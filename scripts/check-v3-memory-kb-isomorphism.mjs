@@ -34,6 +34,7 @@ const DEFAULT_FILES = {
   kbReview: 'crates/missiond-daemon/src/handlers/knowledge/kb/review.rs',
   contextGather: 'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
   mcpContextGather: 'crates/missiond-mcp/src/tools/knowledge/context_gather.rs',
+  mcpCallScript: 'scripts/mission-mcp-call.mjs',
   toolDirectory: 'crates/missiond-daemon/src/handlers/comm/tool_directory.rs',
   kbReviewMigration: 'crates/missiond-core/migrations/20260508001000_knowledge_review_state.sql',
   kbReviewTypes: 'crates/missiond-core/src/types/knowledge.rs',
@@ -211,6 +212,7 @@ function checkFiles(root, files) {
     'active Board task records',
     'bounded conversation logs',
     'Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources',
+    'MCP/search regression wrappers MUST preserve complete JSON-RPC tool responses',
     'mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes',
     'Board/task/workflow records are searchable retrieval evidence',
     'Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane.',
@@ -270,6 +272,18 @@ function checkFiles(root, files) {
     'include_board',
     'include_conversations',
     'conversation_time_range',
+  ]);
+
+  requireAll(diagnostics, files.mcpCallScript, sources.mcpCallScript, [
+    'async function finish',
+    'await writeStream(process.stdout',
+    'function writeStream',
+    'process.exitCode = code ?? 0',
+  ]);
+  forbidAll(diagnostics, files.mcpCallScript, sources.mcpCallScript, [
+    'console.log(JSON.stringify(callResponse, null, 2))',
+    'process.exit(code ?? 0)',
+    "import { writeFileSync } from 'node:fs'",
   ]);
 
   requireAll(diagnostics, files.toolDirectory, sources.toolDirectory, [
@@ -871,6 +885,7 @@ function buildFixture() {
 	    :fields [evidence_lanes authority_order noise_diagnostics context_noise_metrics include_raw_sources]
 	    :invariants ["credential_refs MUST NOT be emitted unless include_credentials=true"
 	                 "Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources"
+	                 "MCP/search regression wrappers MUST preserve complete JSON-RPC tool responses"
 	                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
 	                 "Board/task/workflow records are searchable retrieval evidence"
 	                 "Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane."])
@@ -970,6 +985,12 @@ credential_lane_opt_in; selection.include_credentials; selection.include_raw_sou
 Board task records; bounded conversation logs; source_profile; sourceProfile; intent_default; deploy_ops; conversation_audit; full_debug;
 include_credentials; includeCredentials; include_raw_sources; includeRawSources;
 include_board; include_conversations; conversation_time_range;
+`);
+  writeFixture(root, DEFAULT_FILES.mcpCallScript, `
+async function finish() {}
+await writeStream(process.stdout, 'payload');
+function writeStream() {}
+process.exitCode = code ?? 0;
 `);
   writeFixture(root, DEFAULT_FILES.toolDirectory, `
 mission_context_gather + mission_conversation_* + mission_timeline + mission_audit;

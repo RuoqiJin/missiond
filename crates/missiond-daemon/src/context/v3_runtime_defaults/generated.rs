@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 pub const SCHEMA_VERSION: &str = "missiond.compiled-runtime-config.v1";
-pub const SOURCE_HASH: &str = "249bc39b39a3ad2205c1749feff7a929";
+pub const SOURCE_HASH: &str = "7e2e78de20115661f5ff16699fbb3ebc";
 pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -27,7 +27,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 7,
-      "source_hash": "12927edfde1a9a35818480c3abe026b1"
+      "source_hash": "1a0ea8165c1bd0a7d6a45facb9103948"
     },
     {
       "file": ".missiond/v3/shards/workstation-runtime.lisp",
@@ -186,14 +186,14 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     },
     {
       "id": "control-plane-runtime",
-      "source_hash": "d9821eaff3f0c103b5dc679f55e24915",
+      "source_hash": "53845a0deb2a6174d8605f351bb95dd8",
       "source_units": [
         {
           "file": ".missiond/v3/shards/request-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 7,
-          "source_hash": "12927edfde1a9a35818480c3abe026b1"
+          "source_hash": "1a0ea8165c1bd0a7d6a45facb9103948"
         },
         {
           "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -407,7 +407,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -432,7 +432,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -454,7 +454,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -473,7 +473,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -494,7 +494,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -537,7 +537,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -559,7 +559,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -579,7 +579,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -606,7 +606,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 120,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -643,7 +643,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 187,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     },
     {
@@ -687,7 +687,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 143,
         "source_column": 3,
-        "source_hash": "249bc39b39a3ad2205c1749feff7a929"
+        "source_hash": "7e2e78de20115661f5ff16699fbb3ebc"
       }
     }
   ],
