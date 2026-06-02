@@ -363,6 +363,8 @@ async fn search_evidence_item_read_model(
             let raw_hit_count = items.len();
             let (items, freshness_filtered_count) =
                 filter_stale_compiled_policy_evidence_items(items);
+            let (items, incomplete_filtered_count) =
+                filter_incomplete_deployment_closure_evidence_items(items);
             let (items, deduplicated_count, truncated_count) =
                 dedupe_evidence_search_items(items, limit);
             let lane_counts = lane_counts_for_evidence_items(&items);
@@ -381,6 +383,7 @@ async fn search_evidence_item_read_model(
                     "read_limit": input.limit,
                     "raw_hit_count": raw_hit_count,
                     "freshness_filtered_count": freshness_filtered_count,
+                    "incomplete_filtered_count": incomplete_filtered_count,
                     "deduplicated_count": deduplicated_count,
                     "truncated_count": truncated_count,
                     "hit_count": lane_counts.values().filter_map(Value::as_u64).sum::<u64>(),
@@ -403,6 +406,7 @@ async fn search_evidence_item_read_model(
                 "limit": input.limit,
                 "raw_hit_count": 0,
                 "freshness_filtered_count": 0,
+                "incomplete_filtered_count": 0,
                 "deduplicated_count": 0,
                 "truncated_count": 0,
                 "hit_count": 0,
@@ -427,6 +431,39 @@ fn filter_stale_compiled_policy_evidence_items(
         return (items, 0);
     };
     filter_stale_compiled_policy_evidence_items_with_fingerprint(items, &fingerprint)
+}
+
+fn filter_incomplete_deployment_closure_evidence_items(
+    items: Vec<EvidenceItemInput>,
+) -> (Vec<EvidenceItemInput>, usize) {
+    let mut filtered_count = 0usize;
+    let filtered = items
+        .into_iter()
+        .filter(|item| {
+            if evidence_item_has_incomplete_deployment_closure_placeholder(item) {
+                filtered_count += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (filtered, filtered_count)
+}
+
+fn evidence_item_has_incomplete_deployment_closure_placeholder(item: &EvidenceItemInput) -> bool {
+    let text = format!("{} {}", item.title, item.summary).to_ascii_lowercase();
+    if !text.contains("deployment closure") {
+        return false;
+    }
+    [
+        "service deployment closure support",
+        "deploy center slug deploy-center",
+        "runtime target runtime-target",
+        "manifest refs []",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 fn filter_stale_compiled_policy_evidence_items_with_fingerprint(
@@ -2563,6 +2600,10 @@ fn context_noise_metrics(
                     .get("freshness_filtered_count")
                     .cloned()
                     .unwrap_or_else(|| json!(0)),
+                "incomplete_filtered_count": evidence_item_search
+                    .get("incomplete_filtered_count")
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
                 "deduplicated_count": evidence_item_search
                     .get("deduplicated_count")
                     .cloned()
@@ -3556,7 +3597,7 @@ mod tests {
         context_gather_persist_artifact, context_gather_persist_read_model,
         context_gather_worker_visible_dir_for, context_noise_metrics,
         context_pack_artifact_payload, dedupe_evidence_search_items,
-        diagnostics_have_hard_failures,
+        diagnostics_have_hard_failures, filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
         source_selection, CompiledDeploymentPolicyFingerprint, ContextGatherArgs, SourceProfile,
@@ -3870,6 +3911,55 @@ mod tests {
     }
 
     #[test]
+    fn evidence_search_filters_incomplete_deployment_closure_placeholders() {
+        let placeholder = missiond_core::types::EvidenceItemInput {
+            id: "evi-placeholder".to_string(),
+            lane_id: "skill_evidence".to_string(),
+            source_type: "skill_operational_fact".to_string(),
+            source_id: None,
+            source_ref: None,
+            project_id: Some("payments".to_string()),
+            task_id: None,
+            title: "Scoped deployment closure policy".to_string(),
+            summary: "service deployment closure support: deploy center slug deploy-center; runtime target runtime-target; manifest refs []; required closure records [ReleaseLease, RuntimeObservation, ReleaseEvidence, ClosureVerdict].".to_string(),
+            authority_class: "evidence-only".to_string(),
+            validity: "evidence_only".to_string(),
+            privacy_class: "internal".to_string(),
+            freshness: "version_bound_or_historical".to_string(),
+            score: Some(1.0),
+            raw_policy: "compact_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({"projection": "mission_context_gather.compact_evidence"}),
+        };
+        let valid_payments = missiond_core::types::EvidenceItemInput {
+            id: "evi-payments".to_string(),
+            lane_id: "skill_evidence".to_string(),
+            source_type: "skill_operational_fact".to_string(),
+            source_id: None,
+            source_ref: None,
+            project_id: Some("payments".to_string()),
+            task_id: None,
+            title: "Scoped deployment closure policy".to_string(),
+            summary: "payments deployment closure support: deploy center slug xjp-payments; runtime target gcp-runtime; manifest refs [services/payments/service.manifest.toml]; required closure records [ReleaseLease, RuntimeObservation, ReleaseEvidence, ClosureVerdict].".to_string(),
+            authority_class: "evidence-only".to_string(),
+            validity: "evidence_only".to_string(),
+            privacy_class: "internal".to_string(),
+            freshness: "version_bound_or_historical".to_string(),
+            score: Some(1.0),
+            raw_policy: "compact_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({"projection": "mission_context_gather.compact_evidence"}),
+        };
+
+        let (items, filtered_count) =
+            filter_incomplete_deployment_closure_evidence_items(vec![placeholder, valid_payments]);
+
+        assert_eq!(filtered_count, 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "evi-payments");
+    }
+
+    #[test]
     fn infra_os_disabled_diagnostics_are_not_hard_context_failures() {
         assert!(!diagnostics_have_hard_failures(&[
             optional_infra_os_disabled_diagnostic("infra"),
@@ -4016,6 +4106,7 @@ mod tests {
                 "hit_count": 0,
                 "raw_hit_count": 2,
                 "freshness_filtered_count": 2,
+                "incomplete_filtered_count": 1,
                 "deduplicated_count": 0,
                 "truncated_count": 0,
                 "lane_counts": {}
@@ -4033,6 +4124,13 @@ mod tests {
                 .and_then(|value| value.get("freshness_filtered_count"))
                 .and_then(Value::as_u64),
             Some(2)
+        );
+        assert_eq!(
+            metrics
+                .get("evidence_item_read_model")
+                .and_then(|value| value.get("incomplete_filtered_count"))
+                .and_then(Value::as_u64),
+            Some(1)
         );
     }
 
