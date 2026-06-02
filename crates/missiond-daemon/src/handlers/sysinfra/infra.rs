@@ -813,9 +813,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                                 current = serde_json::Map::new();
                                 current.insert(
                                     "file".into(),
-                                    serde_json::json!(line
-                                        .strip_prefix("CRASH_FILE=")
-                                        .unwrap_or("")),
+                                    serde_json::json!(
+                                        line.strip_prefix("CRASH_FILE=").unwrap_or("")
+                                    ),
                                 );
                             } else if line == "---" {
                                 if !current.is_empty() {
@@ -1392,6 +1392,7 @@ fn is_generic_evidence_token(token: &str) -> bool {
             | "workflow"
             | "github"
             | "center"
+            | "production"
             | "image"
             | "binary"
             | "compose"
@@ -1406,6 +1407,16 @@ fn is_generic_evidence_token(token: &str) -> bool {
             | "skipping"
             | "backward"
             | "compat"
+            | "key"
+            | "keys"
+            | "secret"
+            | "secrets"
+            | "credential"
+            | "credentials"
+            | "diagnostic"
+            | "diagnostics"
+            | "canary"
+            | "access"
             | "health"
             | "ready"
             | "old"
@@ -1642,7 +1653,15 @@ mod tests {
     #[test]
     fn credential_refs_require_explicit_target_or_query_relevance() {
         assert!(!credential_refs_filtered(Some("gcp-runtime"), None, None).is_empty());
-        assert!(!credential_refs_filtered(None, Some("GCP deploy agent"), None).is_empty());
+        let gcp_refs = credential_refs_filtered(
+            None,
+            Some("GCP deploy agent key for payments canary diagnostics"),
+            Some("payments"),
+        );
+        assert!(!gcp_refs.is_empty());
+        assert!(gcp_refs.iter().all(|item| {
+            item.get("targetId").and_then(|value| value.as_str()) == Some("gcp-runtime")
+        }));
         assert!(
             credential_refs_filtered(
                 None,
