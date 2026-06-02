@@ -2850,7 +2850,7 @@ fn runtime_environment_payload() -> Value {
     json!({
         "schema": "missiond.runtime-environment-context.v1",
         "authority": "runtime-env-and-monitor",
-        "rule": "For deployed MissionD, runtime artifacts are authoritative under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR. Repo .missiond/v3/runtime/** is dev/cold evidence only and must not be used to declare deployed compiled projections missing. A bounded worker-readable mirror under .missiond/v3/runtime/context-gather-worker/** may be written for provider CLIs that cannot read outside their workspace; it is an ignored projection, not the canonical artifact.",
+        "rule": "For deployed MissionD, runtime artifacts are authoritative under MISSIOND_RUNTIME_DIR and MISSIOND_COMPILED_RUNTIME_DIR. Repo .missiond/v3/runtime/** is dev/cold evidence only and must not be used to declare deployed compiled projections missing. A bounded worker-readable mirror under MISSIOND_RUNTIME_DIR/context-gather-worker/** may be written for provider CLIs that cannot read outside their workspace; repo .missiond/v3/runtime/context-gather-worker/** is dev fallback only.",
         "project_root": project_root.display().to_string(),
         "orchestrator_root": env::var("MISSIOND_ORCHESTRATOR_ROOT").ok(),
         "runtime_dir": runtime_dir.display().to_string(),
@@ -2893,7 +2893,24 @@ fn context_gather_runtime_dir() -> PathBuf {
 }
 
 fn context_gather_worker_visible_dir() -> PathBuf {
-    missiond_project_root().join(CONTEXT_GATHER_WORKER_VISIBLE_REL)
+    let project_root = missiond_project_root();
+    let runtime_dir = missiond_runtime_dir(&project_root);
+    context_gather_worker_visible_dir_for(
+        &project_root,
+        &runtime_dir,
+        context_gather_uses_external_runtime(),
+    )
+}
+
+fn context_gather_worker_visible_dir_for(
+    project_root: &Path,
+    runtime_dir: &Path,
+    uses_external_runtime: bool,
+) -> PathBuf {
+    if uses_external_runtime {
+        return runtime_dir.join("context-gather-worker");
+    }
+    project_root.join(CONTEXT_GATHER_WORKER_VISIBLE_REL)
 }
 
 fn context_gather_uses_external_runtime() -> bool {
@@ -3058,12 +3075,15 @@ fn collect_evidence_refs_inner(value: &Value, path: &str, refs: &mut Vec<Value>)
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::{json, Value};
 
     use super::{
         build_evidence_items, build_evidence_lanes, build_source_summaries, build_support_catalog,
-        collect_evidence_refs_from_value, context_noise_metrics, context_pack_artifact_payload,
-        response_sources, source_selection, ContextGatherArgs, SourceProfile,
+        collect_evidence_refs_from_value, context_gather_worker_visible_dir_for,
+        context_noise_metrics, context_pack_artifact_payload, response_sources, source_selection,
+        ContextGatherArgs, SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -3105,6 +3125,21 @@ mod tests {
         let selection = source_selection(&args, profile);
         assert!(selection.include_conversations);
         assert!(!selection.include_credentials);
+    }
+
+    #[test]
+    fn worker_visible_context_pack_uses_runtime_dir_when_deployed() {
+        let project_root = Path::new("/release/source");
+        let runtime_dir = Path::new("/var/missiond/runtime");
+
+        assert_eq!(
+            context_gather_worker_visible_dir_for(project_root, runtime_dir, true),
+            Path::new("/var/missiond/runtime/context-gather-worker")
+        );
+        assert_eq!(
+            context_gather_worker_visible_dir_for(project_root, runtime_dir, false),
+            Path::new("/release/source/.missiond/v3/runtime/context-gather-worker")
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@
        (source runtime-environment
          :tool mission_context_gather
          :scope deployed-runtime-authority
-         :rule "For deployed MissionD, mission_context_gather always includes runtime_environment: MISSIOND_RUNTIME_DIR, MISSIOND_COMPILED_RUNTIME_DIR, repo_runtime_dir, canonical Jarvis monitor endpoints, the rule that repo .missiond/v3/runtime/** is dev/cold evidence only, and the context-gather-worker ignored mirror rule for provider CLIs that cannot read outside their workspace.")
+         :rule "For deployed MissionD, mission_context_gather always includes runtime_environment: MISSIOND_RUNTIME_DIR, MISSIOND_COMPILED_RUNTIME_DIR, repo_runtime_dir, canonical Jarvis monitor endpoints, the rule that repo .missiond/v3/runtime/** is dev/cold evidence only, and the MISSIOND_RUNTIME_DIR/context-gather-worker ignored mirror rule for provider CLIs that cannot read outside their workspace; repo .missiond/v3/runtime/context-gather-worker/** is dev fallback only.")
        (source active-board-task-records
          :tool mission_board_query
          :scope active
@@ -60,7 +60,7 @@
        "mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections without deleting or rewriting raw historical material."
        "mission_context_gather source_profile=intent_default MUST exclude bounded conversation logs, global skill/infra evidence, and credential_refs unless an explicit opt-in flag or deploy/debug profile enables them."
        "mission_context_gather source_profile=deploy_ops MUST pass query/project scope into mission_infra_query skill_evidence and credential_refs; evidence-only lanes MUST reject unrelated global skill hits."
-       "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors such as service.manifest.toml, manifest gate, canary smoke, migration/relation failures, compose, entrypoint, binary markers, and volume overrides while still applying query/project scope before returning items."
+       "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors such as service.manifest.toml, manifest gate, db adoption, migration/relation failures, compose, entrypoint, binary markers, image markers, and volume overrides while still applying query/project scope before returning items; skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor, not generic canary/healthcheck/deploy-agent prose."
        "mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence covering service.manifest.toml, ReleaseLease, RuntimeObservation, ReleaseEvidence, ClosureVerdict, canary/smoke/runtime digest/binary marker/db adoption search anchors."
        "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes rather than one flat prompt preload."
        "Board/task/workflow records are searchable retrieval evidence, not active long-term memory unless promoted by an explicit review workflow."
@@ -87,7 +87,7 @@
          :id-field grounding_context_id
          :storage "shared_artifacts(kind=context-gather)"
          :fields [unknowns query project_id source_profile sources_used source_summaries evidence_lanes evidence_items support_catalog authority_order noise_diagnostics context_noise_metrics raw_sources_omitted raw_sources_policy evidence_refs diagnostics grounded_intent_summary runtime_environment context_pack_path context_pack_file canonical_context_pack_file evidence_lane_persistence]
-         :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, canonical_context_pack_file under MISSIOND_RUNTIME_DIR, and a bounded worker-readable context_pack_file mirror under ignored .missiond/v3/runtime/context-gather-worker/** for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
+         :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, canonical_context_pack_file under MISSIOND_RUNTIME_DIR, and a bounded worker-readable context_pack_file mirror under ignored MISSIOND_RUNTIME_DIR/context-gather-worker/** when deployed; repo .missiond/v3/runtime/context-gather-worker/** is a dev fallback only. Worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
       (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
          :id-field artifact_hash

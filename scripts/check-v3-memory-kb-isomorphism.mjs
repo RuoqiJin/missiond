@@ -232,6 +232,7 @@ function checkFiles(root, files) {
     'mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes',
     'mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections',
     'mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors',
+    'skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor',
     'mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence',
     'deployment_closure_policy',
     'ReleaseLease',
@@ -972,6 +973,7 @@ function buildFixture() {
 		                 "mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes"
 		                 "mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections"
 		                 "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors"
+		                 "skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor"
 		                 "mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence"
 		                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
 	                 "Board/task/workflow records are searchable retrieval evidence"

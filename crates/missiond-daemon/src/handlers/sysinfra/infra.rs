@@ -1229,6 +1229,9 @@ fn skill_target_context_allows_deploy_closure_line(
     if !deployment_closure_phrase_overlap(query, line) {
         return false;
     }
+    if !line_has_strong_deployment_closure_anchor(line) {
+        return false;
+    }
     if is_known_project_evidence_token(skill_name) {
         let skill_name_haystack = skill_name.to_ascii_lowercase();
         let query_tokens = evidence_query_tokens(query);
@@ -1241,6 +1244,29 @@ fn skill_target_context_allows_deploy_closure_line(
         }
     }
     true
+}
+
+fn line_has_strong_deployment_closure_anchor(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "service.manifest.toml",
+        "manifest gate",
+        "db adoption",
+        "_sqlx_migrations",
+        "sqlx migrate",
+        "relation",
+        "old binary",
+        "binary marker",
+        "image marker",
+        "entrypoint",
+        "volume override",
+        "releaselease",
+        "runtimeobservation",
+        "releaseevidence",
+        "closureverdict",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn is_deploy_skill_context_source(skill_name: &str) -> bool {
@@ -2319,7 +2345,19 @@ mod tests {
         ));
         assert!(skill_target_context_allows_deploy_closure_line(
             "deploy-ops",
+            "service.manifest.toml Manifest Gate is required before Deploy Center canary smoke can be trusted",
+            "Payments has an independent Cargo.lock and is deployed through Deploy Center.",
+            &manifest_filter,
+        ));
+        assert!(!skill_target_context_allows_deploy_closure_line(
+            "deploy-ops",
             "CI green only means the image built; Deploy Center canary and smoke decide CD truth",
+            "Payments has an independent Cargo.lock and is deployed through Deploy Center.",
+            &manifest_filter,
+        ));
+        assert!(!skill_target_context_allows_deploy_closure_line(
+            "deploy-ops",
+            "Docker healthcheck can use curl or wget during Deploy Center canary",
             "Payments has an independent Cargo.lock and is deployed through Deploy Center.",
             &manifest_filter,
         ));

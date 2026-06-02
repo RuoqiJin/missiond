@@ -31,6 +31,7 @@
                      "crates/missiond-daemon/src/handlers/comm/timeline.rs"
                      "crates/missiond-mcp/src/tools/knowledge/memory.rs"
                      "scripts/check-v3-memory-kb-isomorphism.mjs"
+                     "scripts/check-v3-runtime-path-hygiene.mjs"
                      "scripts/check-v3-ops-infra-isomorphism.mjs"
                      "scripts/check-missiond-blue-green-deploy.mjs"
                      "scripts/check-v3-deployment-closure-plane.mjs"
@@ -39,6 +40,7 @@
                      "scripts/generated/v3_runtime_defaults.mjs"]
        :acceptance ["node scripts/compile-v3-runtime.mjs --check --json"
                     "node scripts/check-v3-memory-kb-isomorphism.mjs --json"
+                    "node scripts/check-v3-runtime-path-hygiene.mjs --json"
                     "node scripts/check-v3-ops-infra-isomorphism.mjs --json"
                     "node scripts/check-missiond-blue-green-deploy.mjs --json"
                     "node scripts/check-v3-deployment-closure-plane.mjs --json"

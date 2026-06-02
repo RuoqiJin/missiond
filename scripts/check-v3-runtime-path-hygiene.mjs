@@ -143,6 +143,8 @@ const REQUIRED = {
     'canonical_public_https',
     'https://jarvis.xiaojinpro.top/api/monitor/jarvis',
     'Repo .missiond/v3/runtime/** is dev/cold evidence only',
+    'MISSIOND_RUNTIME_DIR/context-gather-worker',
+    'repo .missiond/v3/runtime/context-gather-worker',
     'context-gather-worker',
     'context_gather_runtime_dir',
     'context_gather_worker_visible_dir',
@@ -171,10 +173,12 @@ const REQUIRED = {
     'runtime-environment',
     'runtime_environment',
     'MISSIOND_RUNTIME_DIR/context-gather',
+    'MISSIOND_RUNTIME_DIR/context-gather-worker',
     'canonical Jarvis monitor endpoints',
     'runtime_environment.monitor_endpoints.canonical_local_http',
     'canonical_public_https',
     'repo .missiond/v3/runtime/** is dev/cold evidence only',
+    'repo .missiond/v3/runtime/context-gather-worker',
   ],
   controlPlaneRuntime: [
     '$MISSIOND_RUNTIME_DIR/master-control-checkpoint.lisp',
@@ -386,6 +390,8 @@ http://127.0.0.1:9120/api/monitor/jarvis
 canonical_public_https
 https://jarvis.xiaojinpro.top/api/monitor/jarvis
 Repo .missiond/v3/runtime/** is dev/cold evidence only
+MISSIOND_RUNTIME_DIR/context-gather-worker
+repo .missiond/v3/runtime/context-gather-worker
 context-gather-worker
 context_gather_runtime_dir
 context_gather_worker_visible_dir
@@ -410,10 +416,12 @@ canonical Jarvis monitor endpoints`);
 runtime-environment
 runtime_environment
 MISSIOND_RUNTIME_DIR/context-gather
+MISSIOND_RUNTIME_DIR/context-gather-worker
 canonical Jarvis monitor endpoints
 runtime_environment.monitor_endpoints.canonical_local_http
 canonical_public_https
-repo .missiond/v3/runtime/** is dev/cold evidence only`);
+repo .missiond/v3/runtime/** is dev/cold evidence only
+repo .missiond/v3/runtime/context-gather-worker`);
   write(root, 'controlPlaneRuntime', `
 $MISSIOND_RUNTIME_DIR/master-control-checkpoint.lisp
 repo .missiond/v3/runtime kept only as dev fallback`);
