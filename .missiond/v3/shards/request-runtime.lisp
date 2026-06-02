@@ -2,9 +2,14 @@
     :schema "missiond.grounding-search-aggregate.v1"
     :purpose "Provide one high-frequency fact-gathering entry before intent.lisp, plan.lisp, Board triage, deploy decisions, or worker delegation so operators do not have to remember every retrieval surface."
     :primary-tool mission_context_gather
-    :default-sources [runtime-environment project-registry ssot-intent active-kb skill-operational-evidence infra-evidence active-board-task-records bounded-conversation-logs]
+    :default-sources [runtime-environment project-registry ssot-intent active-kb active-board-task-records]
     :source-policy
-      ((source runtime-environment
+      ((source source-profile
+         :tool mission_context_gather
+         :profiles [intent_default deploy_ops conversation_audit full_debug]
+         :default intent_default
+         :rule "source_profile=intent_default includes runtime_environment, project resolution, active SSOT, active KB, and active Board. deploy_ops additionally enables skill/infra evidence and credential refs. conversation_audit explicitly enables bounded conversation logs. full_debug preserves legacy broad diagnostic recall.")
+       (source runtime-environment
          :tool mission_context_gather
          :scope deployed-runtime-authority
          :rule "For deployed MissionD, mission_context_gather always includes runtime_environment: MISSIOND_RUNTIME_DIR, MISSIOND_COMPILED_RUNTIME_DIR, repo_runtime_dir, canonical Jarvis monitor endpoints, the rule that repo .missiond/v3/runtime/** is dev/cold evidence only, and the context-gather-worker ignored mirror rule for provider CLIs that cannot read outside their workspace.")
@@ -16,10 +21,14 @@
          :tool mission_conversation_query
          :scope query-scoped
          :default-time-range last_30d
-         :rule "Durable provider/user conversations are searched only by explicit query/unknowns; this is not prompt preloading and does not re-enable broad historical log context.")
+         :rule "Durable provider/user conversations are searched only when conversation_audit, full_debug, or include_conversations=true opts in; project/time/conversation_type filters must be enforced identically by hybrid vector and FTS paths.")
        (source skill-operational-evidence
          :tool mission_skill_context
-         :rule "Skill files are operational evidence for ClaudeCode-compatible workers; mutation of skill files must be delegated through skill-edit-delegation-policy.")
+         :rule "Skill files are operational evidence for ClaudeCode-compatible workers; mutation of skill files must be delegated through skill-edit-delegation-policy. Default intent_default does not scan skill/infra evidence unless skill, infra_target, include_infra=true, or deploy_ops opts in.")
+       (source credential-refs
+         :tool mission_infra_query
+         :scope explicit-opt-in
+         :rule "credential_refs MUST NOT be emitted unless include_credentials=true, source_profile=deploy_ops, or source_profile=full_debug.")
        (source active-kb
          :tool mission_kb_query
          :rule "Default retrieval applies knowledge_review_state overlay and excludes archived/superseded/noise memories.")
@@ -41,9 +50,12 @@
                 (step s3 :logic "make active task records searchable by mission_context_gather without preloading full Board backlog"))
          :egress [fts-document embedding-document retrieval-evidence-ref]))
     :invariants
-      ["mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs."
+      ["mission_context_gather MUST expose source_profile, evidence_lanes, authority_order, noise_diagnostics, and context_noise_metrics."
+       "mission_context_gather source_profile=intent_default MUST exclude bounded conversation logs, global skill/infra evidence, and credential_refs unless an explicit opt-in flag or deploy/debug profile enables them."
+       "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes rather than one flat prompt preload."
        "Board/task/workflow records are searchable retrieval evidence, not active long-term memory unless promoted by an explicit review workflow."
        "Conversation logs are searched by query and bounded window; they are not default prompt preloads."
+       "Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources unless include_raw_sources=true or source_profile=full_debug."
        "If mission_context_gather cannot answer a source, it returns source-specific diagnostics instead of making the resident master guess."]
     :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")
 
@@ -63,7 +75,7 @@
          :schema "missiond.context-gather-artifact.v1"
          :id-field grounding_context_id
          :storage "shared_artifacts(kind=context-gather)"
-         :fields [unknowns query project_id sources_used evidence_refs diagnostics grounded_intent_summary runtime_environment context_pack_path context_pack_file canonical_context_pack_file]
+         :fields [unknowns query project_id source_profile sources_used evidence_lanes authority_order noise_diagnostics context_noise_metrics evidence_refs diagnostics grounded_intent_summary runtime_environment context_pack_path context_pack_file canonical_context_pack_file]
          :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, canonical_context_pack_file under MISSIOND_RUNTIME_DIR, and a bounded worker-readable context_pack_file mirror under ignored .missiond/v3/runtime/context-gather-worker/** for provider CLIs that do not have MissionD MCP mounted; worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
       (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
@@ -633,6 +645,7 @@
        "Staged source hygiene MUST run git diff --cached --check over the staged path set."
        "Task-scope guard MUST reject staged paths outside :write-scope and any path matching :must-not-touch."
        "Repo text search hygiene MUST project ssot-retrieval-scope into .ignore sidecars so searches rooted at repo, .missiond, .missiond/v3, .missiond/research, or .missiond/tasks preserve the active-authoring default."
+       "Default repo rg MUST NOT surface .missiond/research/true-user-utterances-*.md, archived session dumps, imported transcript exports, or .missiond/v3/runtime cold compiled projections; explicit --no-ignore or explicit path remains the historical forensics entry."
        "The hook doctor MUST be read-only by default; hook installation is a separate explicit install command."
        "Batch verification MAY import checkSuppliedFiles for final-tree source hygiene fixtures, but must not mutate git."])
 

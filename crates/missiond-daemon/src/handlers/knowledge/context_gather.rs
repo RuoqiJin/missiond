@@ -1,7 +1,7 @@
 use anyhow::Result;
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
@@ -18,6 +18,8 @@ use super::{board, intent, kb, project, skill};
 struct ContextGatherArgs {
     #[serde(default)]
     query: Option<String>,
+    #[serde(default, alias = "sourceProfile")]
+    source_profile: Option<String>,
     #[serde(default, alias = "project", alias = "projectId")]
     project_id: Option<String>,
     #[serde(default, alias = "infraTarget")]
@@ -48,6 +50,18 @@ struct ContextGatherArgs {
         deserialize_with = "crate::lenient::option_bool"
     )]
     include_conversations: Option<bool>,
+    #[serde(
+        default,
+        alias = "includeCredentials",
+        deserialize_with = "crate::lenient::option_bool"
+    )]
+    include_credentials: Option<bool>,
+    #[serde(
+        default,
+        alias = "includeRawSources",
+        deserialize_with = "crate::lenient::option_bool"
+    )]
+    include_raw_sources: Option<bool>,
     #[serde(default, alias = "conversationTimeRange")]
     conversation_time_range: Option<String>,
     #[serde(default, alias = "taskId")]
@@ -94,6 +108,81 @@ const CONTEXT_GATHER_WORKER_VISIBLE_REL: &str = ".missiond/v3/runtime/context-ga
 
 fn default_limit() -> usize {
     8
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceProfile {
+    IntentDefault,
+    DeployOps,
+    ConversationAudit,
+    FullDebug,
+}
+
+impl SourceProfile {
+    fn from_arg(value: Option<&str>) -> Self {
+        match value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("intent_default")
+        {
+            "deploy_ops" | "deploy-ops" => Self::DeployOps,
+            "conversation_audit" | "conversation-audit" => Self::ConversationAudit,
+            "full_debug" | "full-debug" => Self::FullDebug,
+            _ => Self::IntentDefault,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::IntentDefault => "intent_default",
+            Self::DeployOps => "deploy_ops",
+            Self::ConversationAudit => "conversation_audit",
+            Self::FullDebug => "full_debug",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SourceSelection {
+    include_project: bool,
+    include_ssot: bool,
+    include_kb: bool,
+    include_skill: bool,
+    include_infra: bool,
+    include_board: bool,
+    include_conversations: bool,
+    include_credentials: bool,
+    include_raw_sources: bool,
+}
+
+fn flag(default: bool, override_value: Option<bool>) -> bool {
+    override_value.unwrap_or(default)
+}
+
+fn source_selection(args: &ContextGatherArgs, profile: SourceProfile) -> SourceSelection {
+    let explicit_skill = normalized_scope_value(args.skill.as_deref()).is_some();
+    let explicit_infra = normalized_scope_value(args.infra_target.as_deref()).is_some();
+    let deploy_ops = profile == SourceProfile::DeployOps;
+    let conversation_audit = profile == SourceProfile::ConversationAudit;
+    let full_debug = profile == SourceProfile::FullDebug;
+
+    SourceSelection {
+        include_project: flag(true, args.include_project),
+        include_ssot: flag(true, args.include_ssot),
+        include_kb: flag(true, args.include_kb),
+        include_skill: flag(
+            full_debug || deploy_ops || explicit_skill,
+            args.include_skill,
+        ),
+        include_infra: flag(
+            full_debug || deploy_ops || explicit_infra || explicit_skill,
+            args.include_infra,
+        ),
+        include_board: flag(true, args.include_board),
+        include_conversations: flag(full_debug || conversation_audit, args.include_conversations),
+        include_credentials: flag(full_debug || deploy_ops, args.include_credentials),
+        include_raw_sources: flag(full_debug, args.include_raw_sources),
+    }
 }
 
 fn normalized_scope_value(value: Option<&str>) -> Option<String> {
@@ -154,8 +243,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 
     let args: ContextGatherArgs = serde_json::from_value(args)?;
+    let profile = SourceProfile::from_arg(args.source_profile.as_deref());
+    let selection = source_selection(&args, profile);
     let query = normalized_query(&args);
-    if query.is_empty() && args.project_id.is_none() && args.skill.is_none() {
+    if query.is_empty()
+        && args.project_id.is_none()
+        && args.skill.is_none()
+        && args.infra_target.is_none()
+    {
         return Ok(ToolResult::error(
             "mission_context_gather requires query, project/project_id, skill, infra_target, or unknowns",
         ));
@@ -164,13 +259,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let limit = args.limit.clamp(1, 25);
     let mut sources = serde_json::Map::new();
     let mut diagnostics = Vec::new();
+    let mut project_resolution_payload: Option<Value> = None;
     sources.insert(
         "runtime_environment".to_string(),
         runtime_environment_payload(),
     );
 
     let mut effective_project_id = args.project_id.clone();
-    if effective_project_id.is_none() && !query.is_empty() && args.include_project.unwrap_or(true) {
+    if effective_project_id.is_none() && !query.is_empty() && selection.include_project {
         match project::handle(
             state,
             "mission_project",
@@ -195,6 +291,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             .and_then(Value::as_str)
                             .map(str::to_string);
                     }
+                    project_resolution_payload = Some(value.clone());
                     sources.insert("project_resolution".to_string(), value);
                 }
             }
@@ -205,21 +302,30 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
     }
 
-    if args.include_project.unwrap_or(true) {
-        let payload = if let Some(project_id) = effective_project_id.as_deref() {
-            json!({"action": "get", "id": project_id})
+    if selection.include_project {
+        if let Some(project_payload) = project_resolution_payload
+            .as_ref()
+            .and_then(|value| value.get("matched_project"))
+            .filter(|value| value.is_object())
+            .cloned()
+        {
+            sources.insert("project_registry".to_string(), project_payload);
         } else {
-            json!({"action": "list"})
-        };
-        insert_subcall(
-            &mut sources,
-            &mut diagnostics,
-            "project_registry",
-            project::handle(state, "mission_project", payload).await,
-        );
+            let payload = if let Some(project_id) = effective_project_id.as_deref() {
+                json!({"action": "get", "id": project_id})
+            } else {
+                json!({"action": "list"})
+            };
+            insert_subcall(
+                &mut sources,
+                &mut diagnostics,
+                "project_registry",
+                project::handle(state, "mission_project", payload).await,
+            );
+        }
     }
 
-    if args.include_ssot.unwrap_or(true) {
+    if selection.include_ssot {
         let payload = if let Some(project_id) = effective_project_id.as_deref() {
             json!({"action": "summary", "project": project_id})
         } else {
@@ -233,7 +339,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         );
     }
 
-    if args.include_kb.unwrap_or(true) {
+    if selection.include_kb {
         insert_subcall(
             &mut sources,
             &mut diagnostics,
@@ -244,7 +350,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 json!({
                     "action": "search",
                     "query": query,
-                    "project": effective_project_id,
+                    "project": effective_project_id.clone(),
                     "limit": limit,
                     "include_archived": false
                 }),
@@ -253,7 +359,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         );
     }
 
-    if args.include_skill.unwrap_or(true) {
+    if selection.include_skill {
         insert_subcall(
             &mut sources,
             &mut diagnostics,
@@ -264,8 +370,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 json!({
                     "action": "resolve",
                     "query": query,
-                    "project_id": effective_project_id,
-                    "skill": args.skill,
+                    "project_id": effective_project_id.clone(),
+                    "skill": args.skill.clone(),
                     "include_kb": false,
                     "include_board": false
                 }),
@@ -274,11 +380,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         );
     }
 
-    if args.include_infra.unwrap_or(true) {
+    if selection.include_infra {
         let infra_payload = if let Some(target_id) = args.infra_target.as_deref() {
             json!({"action": "get", "id": target_id})
         } else {
-            json!({"action": "skill_evidence", "skill": args.skill, "target_id": args.infra_target, "limit": limit})
+            json!({"action": "skill_evidence", "skill": args.skill.clone(), "target_id": args.infra_target.clone(), "limit": limit})
         };
         insert_subcall(
             &mut sources,
@@ -286,6 +392,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             "infra",
             infra::handle(state, "mission_infra_query", infra_payload).await,
         );
+    }
+
+    if selection.include_credentials {
         insert_subcall(
             &mut sources,
             &mut diagnostics,
@@ -295,8 +404,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "mission_infra_query",
                 json!({
                     "action": "credential_refs",
-                    "target_id": args.infra_target,
-                    "skill": args.skill,
+                    "target_id": args.infra_target.clone(),
+                    "skill": args.skill.clone(),
                     "limit": limit
                 }),
             )
@@ -304,7 +413,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         );
     }
 
-    if args.include_board.unwrap_or(true) {
+    if selection.include_board {
         insert_subcall(
             &mut sources,
             &mut diagnostics,
@@ -315,7 +424,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 json!({
                     "action": "search",
                     "query": query,
-                    "project": effective_project_id,
+                    "project": effective_project_id.clone(),
                     "scope": "active",
                     "limit": limit
                 }),
@@ -324,7 +433,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         );
     }
 
-    if args.include_conversations.unwrap_or(true) {
+    if selection.include_conversations {
         insert_subcall(
             &mut sources,
             &mut diagnostics,
@@ -352,6 +461,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         );
     }
 
+    let evidence_lanes = build_evidence_lanes(&sources);
+    let authority_order = authority_order();
+    let noise_diagnostics = noise_diagnostics(profile, selection, &sources);
+    let context_noise_metrics =
+        context_noise_metrics(profile, selection, &sources, &evidence_lanes);
     let evidence_refs = collect_evidence_refs(&sources);
     let unresolved = args
         .unknowns
@@ -413,6 +527,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "sources_used": sources_used,
         "runtime_environment": runtime_environment,
         "sources": Value::Object(sources),
+        "source_profile": profile.as_str(),
+        "evidence_lanes": evidence_lanes,
+        "authority_order": authority_order,
+        "noise_diagnostics": noise_diagnostics,
+        "context_noise_metrics": context_noise_metrics,
         "evidence_refs": evidence_refs,
         "unresolved": unresolved,
         "diagnostics": diagnostics,
@@ -420,12 +539,20 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     });
 
     if args.persist.unwrap_or(false) {
+        let artifact_payload =
+            context_pack_artifact_payload(&payload, selection.include_raw_sources);
         let metadata = json!({
             "schema": "missiond.context-gather-artifact.v1",
             "query": payload.get("query").cloned().unwrap_or(Value::Null),
             "project_id": payload.get("project_id").cloned().unwrap_or(Value::Null),
             "task_id": payload.get("task_id").cloned().unwrap_or(Value::Null),
             "source_id": payload.get("source_id").cloned().unwrap_or(Value::Null),
+            "source_profile": payload.get("source_profile").cloned().unwrap_or(Value::Null),
+            "raw_sources_in_artifact": selection.include_raw_sources,
+            "context_noise_metrics": payload
+                .get("context_noise_metrics")
+                .cloned()
+                .unwrap_or(Value::Null),
             "unknown_count": payload
                 .get("unknowns")
                 .and_then(Value::as_array)
@@ -439,14 +566,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "context-gather",
                 payload.get("project_id").and_then(Value::as_str),
                 payload.get("task_id").and_then(Value::as_str),
-                &payload,
+                &artifact_payload,
                 metadata,
             )
             .await?;
         let context_pack_file = if let Some(hash) = artifact.get("hash").and_then(Value::as_str) {
             Some((
                 hash.to_string(),
-                materialize_context_pack_file(hash, &payload)?,
+                materialize_context_pack_file(hash, &artifact_payload)?,
             ))
         } else {
             None
@@ -459,7 +586,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         };
         let (capsule_lisp, capsule_hash) = super::context_capsule::generate_lisp_capsule(
             &isolation,
-            &payload,
+            &artifact_payload,
             topic_id.as_deref(),
             topic_label.as_deref(),
             args.task_id.as_deref(),
@@ -576,6 +703,169 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 
     Ok(ToolResult::json_pretty(&payload))
+}
+
+fn authority_order() -> Value {
+    json!([
+        "runtime_environment",
+        "ssot_project_facts",
+        "reviewed_kb_memory",
+        "active_board_projection",
+        "conversation_read_model",
+        "skill_infra_evidence"
+    ])
+}
+
+fn build_evidence_lanes(sources: &serde_json::Map<String, Value>) -> Value {
+    json!({
+        "schema": "missiond.context-gather-evidence-lanes.v1",
+        "lanes": {
+            "runtime_environment": evidence_lane(
+                sources,
+                "runtime-env-and-monitor",
+                "deployed runtime paths, compiled runtime locations, and monitor endpoints",
+                &["runtime_environment"],
+            ),
+            "ssot_project_facts": evidence_lane(
+                sources,
+                "file-first-lisp-and-compiled-project-universe",
+                "project identity plus active Lisp/compiled project facts",
+                &["project_resolution", "project_registry", "ssot"],
+            ),
+            "reviewed_kb_memory": evidence_lane(
+                sources,
+                "knowledge_review_state",
+                "curated active KB retrieval after review overlay",
+                &["kb"],
+            ),
+            "active_board_projection": evidence_lane(
+                sources,
+                "board_projection",
+                "active Board task coordination records",
+                &["board_tasks"],
+            ),
+            "conversation_read_model": evidence_lane(
+                sources,
+                "provider_durable_conversation_read_model",
+                "bounded query-scoped conversation audit evidence",
+                &["conversation_logs"],
+            ),
+            "skill_infra_evidence": evidence_lane(
+                sources,
+                "evidence-only",
+                "skill and infra operational hints; not runtime truth",
+                &["skill_context", "infra", "credential_refs"],
+            ),
+        }
+    })
+}
+
+fn evidence_lane(
+    sources: &serde_json::Map<String, Value>,
+    authority: &str,
+    role: &str,
+    keys: &[&str],
+) -> Value {
+    let mut source_keys = Vec::new();
+    for key in keys {
+        if sources.contains_key(*key) {
+            source_keys.push((*key).to_string());
+        }
+    }
+    json!({
+        "authority": authority,
+        "role": role,
+        "source_count": source_keys.len(),
+        "source_keys": source_keys,
+    })
+}
+
+fn noise_diagnostics(
+    profile: SourceProfile,
+    selection: SourceSelection,
+    sources: &serde_json::Map<String, Value>,
+) -> Value {
+    let mut excluded = Vec::new();
+    for (name, included) in [
+        ("project_registry", selection.include_project),
+        ("ssot", selection.include_ssot),
+        ("kb", selection.include_kb),
+        ("skill_context", selection.include_skill),
+        ("infra", selection.include_infra),
+        ("credential_refs", selection.include_credentials),
+        ("board_tasks", selection.include_board),
+        ("conversation_logs", selection.include_conversations),
+    ] {
+        if !included {
+            excluded.push(name);
+        }
+    }
+    json!({
+        "schema": "missiond.context-noise-diagnostics.v1",
+        "source_profile": profile.as_str(),
+        "included_sources": sources.keys().cloned().collect::<Vec<_>>(),
+        "excluded_by_profile": excluded,
+        "credential_lane_opt_in": selection.include_credentials,
+        "conversation_lane_opt_in": selection.include_conversations,
+        "raw_sources_in_artifact": selection.include_raw_sources,
+        "rule": "Default grounding is authority-aware and does not preload conversations, infra skill evidence, or credential refs unless the source profile or explicit include flag opts in."
+    })
+}
+
+fn context_noise_metrics(
+    profile: SourceProfile,
+    selection: SourceSelection,
+    sources: &serde_json::Map<String, Value>,
+    evidence_lanes: &Value,
+) -> Value {
+    let lane_counts = evidence_lanes
+        .get("lanes")
+        .and_then(Value::as_object)
+        .map(|lanes| {
+            lanes
+                .iter()
+                .map(|(lane, value)| {
+                    (
+                        lane.clone(),
+                        value
+                            .get("source_count")
+                            .cloned()
+                            .unwrap_or_else(|| json!(0)),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "schema": "missiond.context-noise-metrics.v1",
+        "source_profile": profile.as_str(),
+        "raw_source_count": sources.len(),
+        "lane_counts": lane_counts,
+        "conversation_lane_enabled": selection.include_conversations,
+        "credential_lane_enabled": selection.include_credentials,
+        "raw_sources_in_artifact": selection.include_raw_sources,
+        "filtered_semantic_conversation_hits": Value::Null,
+        "conversation_filtering": "conversation search owns project/time/type filter metrics; context-gather records whether the lane was enabled."
+    })
+}
+
+fn context_pack_artifact_payload(payload: &Value, include_raw_sources: bool) -> Value {
+    if include_raw_sources {
+        return payload.clone();
+    }
+    let mut compact = payload.clone();
+    if let Some(object) = compact.as_object_mut() {
+        object.remove("sources");
+        object.insert("raw_sources_omitted".to_string(), Value::Bool(true));
+        object.insert(
+            "raw_sources_policy".to_string(),
+            Value::String(
+                "Raw legacy sources are omitted from the worker context pack; use evidence_lanes or rerun with include_raw_sources=true/full_debug for diagnostics."
+                    .to_string(),
+            ),
+        );
+    }
+    compact
 }
 
 fn handle_context_boot(args: Value) -> Result<ToolResult> {
@@ -873,5 +1163,72 @@ fn collect_evidence_refs_inner(value: &Value, path: &str, refs: &mut Vec<Value>)
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        ContextGatherArgs, SourceProfile, context_pack_artifact_payload, source_selection,
+    };
+
+    fn args(value: serde_json::Value) -> ContextGatherArgs {
+        serde_json::from_value(value).expect("context gather args")
+    }
+
+    #[test]
+    fn intent_default_profile_excludes_noisy_sources() {
+        let args = args(json!({"query": "MissionD noise"}));
+        let profile = SourceProfile::from_arg(args.source_profile.as_deref());
+        let selection = source_selection(&args, profile);
+        assert_eq!(profile.as_str(), "intent_default");
+        assert!(selection.include_project);
+        assert!(selection.include_ssot);
+        assert!(selection.include_kb);
+        assert!(selection.include_board);
+        assert!(!selection.include_skill);
+        assert!(!selection.include_infra);
+        assert!(!selection.include_conversations);
+        assert!(!selection.include_credentials);
+        assert!(!selection.include_raw_sources);
+    }
+
+    #[test]
+    fn deploy_ops_profile_enables_skill_infra_and_credentials() {
+        let args = args(json!({"query": "deploy payments", "source_profile": "deploy_ops"}));
+        let profile = SourceProfile::from_arg(args.source_profile.as_deref());
+        let selection = source_selection(&args, profile);
+        assert!(selection.include_skill);
+        assert!(selection.include_infra);
+        assert!(selection.include_credentials);
+        assert!(!selection.include_conversations);
+    }
+
+    #[test]
+    fn explicit_conversation_opt_in_overrides_default_profile() {
+        let args = args(json!({"query": "audit prior answer", "include_conversations": true}));
+        let profile = SourceProfile::from_arg(args.source_profile.as_deref());
+        let selection = source_selection(&args, profile);
+        assert!(selection.include_conversations);
+        assert!(!selection.include_credentials);
+    }
+
+    #[test]
+    fn compact_artifact_payload_omits_raw_sources() {
+        let payload = json!({
+            "schema": "missiond.context-gather.v1",
+            "sources": {"conversation_logs": [{"sessionId": "abc"}]},
+            "evidence_lanes": {"lanes": {}}
+        });
+        let compact = context_pack_artifact_payload(&payload, false);
+        assert!(compact.get("sources").is_none());
+        assert_eq!(
+            compact.get("raw_sources_omitted").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let raw = context_pack_artifact_payload(&payload, true);
+        assert!(raw.get("sources").is_some());
     }
 }

@@ -5,6 +5,12 @@ tasks/wave*/**
 research/memory-review/**
 research/memory-review-v2/**
 research/board-cleanup/**
+research/true-user-utterances-*.md
+research/archived-session*/**
+research/archive*/**
+research/*transcript*.md
+research/*transcript*.jsonl
+research/*conversation*.jsonl
 research/kb-memory-triage-*/memory-export.tsv
 research/kb-memory-triage-*/triage-decisions.jsonl
 research/kb-memory-triage-*/applied-review-overlay.sql

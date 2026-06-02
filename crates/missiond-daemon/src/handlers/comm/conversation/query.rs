@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
@@ -759,6 +759,9 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                         .semantic_conversation_search(
                             qe,
                             ((top_k + skip) * 3) as i64,
+                            time_after.as_deref(),
+                            project.as_deref(),
+                            conversation_type.as_deref(),
                             user_id.as_deref(),
                             tenant_id.as_deref(),
                             application_id.as_deref(),

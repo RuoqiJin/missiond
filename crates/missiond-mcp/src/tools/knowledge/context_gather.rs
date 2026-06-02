@@ -10,6 +10,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "用户诉求、待查对象或 unknowns 的压缩查询"},
+                    "source_profile": {
+                        "type": "string",
+                        "enum": ["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
+                        "default": "intent_default",
+                        "description": "Authority-aware source profile. intent_default excludes conversation/infra/credentials; deploy_ops enables skill+infra+credential evidence; conversation_audit enables bounded conversations; full_debug preserves broad diagnostic behavior."
+                    },
+                    "sourceProfile": {
+                        "type": "string",
+                        "enum": ["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
+                        "default": "intent_default",
+                        "description": "source_profile alias"
+                    },
                     "project_id": {"type": "string", "description": "MissionD project id"},
                     "project": {"type": "string", "description": "project_id alias"},
                     "skill": {"type": "string", "description": "优先指定 skill topic"},
@@ -23,12 +35,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "include_kb": {"type": "boolean", "default": true},
                     "include_ssot": {"type": "boolean", "default": true},
                     "include_project": {"type": "boolean", "default": true},
-                    "include_skill": {"type": "boolean", "default": true},
-                    "include_infra": {"type": "boolean", "default": true},
+                    "include_skill": {"type": "boolean", "description": "Override profile skill evidence selection"},
+                    "include_infra": {"type": "boolean", "description": "Override profile infra evidence selection"},
                     "include_board": {"type": "boolean", "default": true, "description": "Include active BoardTask search results as task-record evidence"},
                     "includeBoard": {"type": "boolean", "default": true, "description": "include_board alias"},
-                    "include_conversations": {"type": "boolean", "default": true, "description": "Include bounded durable conversation search results; this is query-scoped evidence, not prompt preloading"},
-                    "includeConversations": {"type": "boolean", "default": true, "description": "include_conversations alias"},
+                    "include_conversations": {"type": "boolean", "description": "Override profile bounded durable conversation search selection; this is query-scoped evidence, not prompt preloading"},
+                    "includeConversations": {"type": "boolean", "description": "include_conversations alias"},
+                    "include_credentials": {"type": "boolean", "default": false, "description": "Include credential ref lane; disabled unless deploy_ops/full_debug or explicit opt-in"},
+                    "includeCredentials": {"type": "boolean", "default": false, "description": "include_credentials alias"},
+                    "include_raw_sources": {"type": "boolean", "default": false, "description": "Persist raw legacy sources into worker context pack; default artifact uses compact evidence_lanes"},
+                    "includeRawSources": {"type": "boolean", "default": false, "description": "include_raw_sources alias"},
                     "conversation_time_range": {"type": "string", "default": "last_30d", "description": "Conversation search window: last_24h, last_7d, last_30d"},
                     "conversationTimeRange": {"type": "string", "default": "last_30d", "description": "conversation_time_range alias"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 25, "default": 8}
