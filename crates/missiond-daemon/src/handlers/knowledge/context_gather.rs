@@ -1177,6 +1177,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let evidence_items = serde_json::to_value(&evidence_item_inputs).unwrap_or_else(|_| json!([]));
     let response_sources =
         response_sources(&sources, &source_summaries, selection.include_raw_sources);
+    let response_support_catalog = support_catalog_response_view(
+        &support_catalog,
+        profile,
+        selection.include_raw_sources,
+        selection.include_credentials,
+        include_deployment_closure_policy,
+    );
     let evidence_refs = if selection.include_raw_sources {
         collect_evidence_refs(&sources)
     } else {
@@ -1256,7 +1263,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "evidence_item_search": evidence_item_search,
         "evidence_lanes": evidence_lanes,
         "evidence_items": evidence_items,
-        "support_catalog": support_catalog,
+        "support_catalog": response_support_catalog,
         "authority_order": authority_order,
         "noise_diagnostics": noise_diagnostics,
         "context_noise_metrics": context_noise_metrics,
@@ -3709,6 +3716,123 @@ fn response_sources(
     }
 }
 
+fn support_catalog_response_view(
+    support_catalog: &Value,
+    profile: SourceProfile,
+    include_raw_sources: bool,
+    include_credentials: bool,
+    include_deployment_closure_policy: bool,
+) -> Value {
+    if include_raw_sources
+        || matches!(profile, SourceProfile::DeployOps | SourceProfile::FullDebug)
+        || include_deployment_closure_policy
+    {
+        return support_catalog.clone();
+    }
+
+    compact_support_catalog_response(support_catalog, include_credentials)
+}
+
+fn compact_support_catalog_response(support_catalog: &Value, include_credentials: bool) -> Value {
+    let mut compact = serde_json::Map::new();
+    compact.insert(
+        "schema".to_string(),
+        support_catalog
+            .get("schema")
+            .cloned()
+            .unwrap_or_else(|| json!("missiond.support-catalog.v1")),
+    );
+    compact.insert("response_shape".to_string(), json!("compact"));
+    compact.insert(
+        "raw_policy".to_string(),
+        json!("deployment_closure and raw support payloads are omitted unless source_profile=deploy_ops/full_debug, include_raw_sources=true, explicit infra_target, or a deployment-closure query anchor enables them"),
+    );
+
+    for field in [
+        "authority",
+        "project_id",
+        "service_id",
+        "resolver_source",
+        "deploy_center_slug",
+        "runtime_target",
+        "urls",
+        "domains",
+        "manifest_refs",
+        "endpoints",
+        "dependencies",
+        "database",
+        "agent_refs",
+        "credential_ref_count",
+        "secret_policy",
+    ] {
+        insert_compact_support_catalog_field(&mut compact, support_catalog, field);
+    }
+
+    if include_credentials {
+        insert_compact_support_catalog_field(&mut compact, support_catalog, "credential_refs");
+    } else if support_catalog
+        .get("credential_refs")
+        .is_some_and(compact_support_catalog_value_has_content)
+    {
+        compact.insert(
+            "credential_refs_omitted".to_string(),
+            json!({
+                "omitted": true,
+                "reason": "credential refs require include_credentials=true or a deploy/debug profile",
+                "available_with": ["include_credentials=true", "source_profile=deploy_ops", "source_profile=full_debug"]
+            }),
+        );
+    }
+
+    if let Some(deployment_closure) = support_catalog
+        .get("deployment_closure")
+        .filter(|value| !value.is_null())
+    {
+        compact.insert(
+            "deployment_closure_omitted".to_string(),
+            json!({
+                "omitted": true,
+                "reason": "deployment closure policy is evidence-only unless deploy/debug diagnostics or deployment closure anchors opt in",
+                "identity_content_present": deployment_closure_has_identity_content(deployment_closure),
+                "available_with": [
+                    "source_profile=deploy_ops",
+                    "source_profile=full_debug",
+                    "include_raw_sources=true",
+                    "explicit infra_target",
+                    "deployment-closure query anchor"
+                ]
+            }),
+        );
+    }
+
+    Value::Object(compact)
+}
+
+fn insert_compact_support_catalog_field(
+    target: &mut serde_json::Map<String, Value>,
+    source: &Value,
+    field: &str,
+) {
+    if let Some(value) = source
+        .get(field)
+        .filter(|value| compact_support_catalog_value_has_content(value))
+    {
+        target.insert(field.to_string(), value.clone());
+    }
+}
+
+fn compact_support_catalog_value_has_content(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(_) | Value::Number(_) => true,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(object) => object
+            .values()
+            .any(compact_support_catalog_value_has_content),
+    }
+}
+
 fn raw_sources_policy(include_raw_sources: bool) -> &'static str {
     if include_raw_sources {
         "Raw legacy sources are included because include_raw_sources=true or source_profile=full_debug."
@@ -4671,8 +4795,8 @@ mod tests {
         filter_stale_runtime_environment_evidence_items_with_dir,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
         source_selection, summarize_source, support_catalog_has_content,
-        CompiledDeploymentPolicyFingerprint, ContextGatherArgs, DeploymentEventFilterResult,
-        SourceProfile,
+        support_catalog_response_view, CompiledDeploymentPolicyFingerprint, ContextGatherArgs,
+        DeploymentEventFilterResult, SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -5882,6 +6006,145 @@ mod tests {
         assert!(deployment_item.summary.contains("canary"));
         assert!(deployment_item.summary.contains("binary marker"));
         assert!(deployment_item.summary.contains("db adoption"));
+    }
+
+    #[test]
+    fn intent_default_support_catalog_response_omits_deployment_closure_payload() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "project_registry".to_string(),
+            json!({
+                "id": "payments",
+                "source": "compiled-service-runtime",
+                "serviceRuntime": {
+                    "id": "payments",
+                    "project": "payments",
+                    "health": ["/payments/health/ready"],
+                    "supportCatalog": {
+                        "service_id": "payments",
+                        "project_id": "payments",
+                        "deploy_center_slug": "xjp-payments",
+                        "runtime_target": "gcp-runtime",
+                        "executor": "gcp-agent",
+                        "container": "xjp-payments",
+                        "service_manifest_refs": ["services/payments/service.manifest.toml"],
+                        "db_migration_namespace": "payments"
+                    }
+                }
+            }),
+        );
+        sources.insert(
+            "credential_refs".to_string(),
+            json!({
+                "credentialRefs": [{
+                    "namespace": "secret-store",
+                    "keyName": "PAYMENTS_DB_URL",
+                    "availability": "available"
+                }]
+            }),
+        );
+
+        let catalog = build_support_catalog(&sources);
+        assert!(catalog.get("deployment_closure").is_some());
+
+        let compact = support_catalog_response_view(
+            &catalog,
+            SourceProfile::IntentDefault,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            compact.get("response_shape").and_then(Value::as_str),
+            Some("compact")
+        );
+        assert!(compact.get("deployment_closure").is_none());
+        assert_eq!(
+            compact
+                .get("deployment_closure_omitted")
+                .and_then(|value| value.get("omitted"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            compact
+                .get("manifest_refs")
+                .and_then(|value| value.get("service_manifest_refs"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert!(compact.get("credential_refs").is_none());
+        assert_eq!(
+            compact
+                .get("credential_refs_omitted")
+                .and_then(|value| value.get("omitted"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        let rendered = serde_json::to_string(&compact).expect("compact support catalog json");
+        assert!(!rendered.contains("ReleaseLease"));
+        assert!(!rendered.contains("ClosureVerdict"));
+    }
+
+    #[test]
+    fn support_catalog_response_keeps_deployment_closure_for_deploy_or_raw_opt_in() {
+        let catalog = json!({
+            "schema": "missiond.support-catalog.v1",
+            "project_id": "payments",
+            "service_id": "payments",
+            "deployment_closure": {
+                "project_id": "payments",
+                "service_id": "payments",
+                "deploy_center_slug": "xjp-payments",
+                "closure_required_fields": ["ReleaseLease", "ClosureVerdict"]
+            },
+            "credential_refs": [{
+                "namespace": "secret-store",
+                "keyName": "PAYMENTS_DB_URL",
+                "availability": "available"
+            }],
+            "credential_ref_count": 1
+        });
+
+        let deploy =
+            support_catalog_response_view(&catalog, SourceProfile::DeployOps, false, false, false);
+        assert!(deploy.get("deployment_closure").is_some());
+        assert!(deploy.get("response_shape").is_none());
+
+        let raw = support_catalog_response_view(
+            &catalog,
+            SourceProfile::IntentDefault,
+            true,
+            false,
+            false,
+        );
+        assert!(raw.get("deployment_closure").is_some());
+
+        let anchored = support_catalog_response_view(
+            &catalog,
+            SourceProfile::IntentDefault,
+            false,
+            false,
+            true,
+        );
+        assert!(anchored.get("deployment_closure").is_some());
+
+        let credentials_only = support_catalog_response_view(
+            &catalog,
+            SourceProfile::IntentDefault,
+            false,
+            true,
+            false,
+        );
+        assert!(credentials_only.get("deployment_closure").is_none());
+        assert_eq!(
+            credentials_only
+                .get("credential_refs")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
     }
 
     #[test]

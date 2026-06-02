@@ -281,6 +281,7 @@
     :invariants
       ["mission_context_gather MUST resolve project/service before FTS/vector search and MUST apply profile lane allowlists before any semantic retrieval."
        "Default worker context MUST inject compact evidence_items/support_catalog/evidence_lanes only; raw source payloads are excluded unless include_raw_sources=true or full_debug."
+       "Default worker context compact support_catalog MUST omit the full deployment_closure payload unless deploy_ops/full_debug, include_raw_sources=true, explicit infra target, or deployment-closure query anchors opt in."
        "conversation_message_raw and cold_archive data MUST NOT enter intent_default or deploy_ops retrieval. conversation_audit may use bounded episode/fact extracts; raw messages require explicit opt-in."
        "skill_evidence is evidence-only unless a review/promotion workflow promotes an item into reviewed_kb with TTL or version bounds for deploy/config/dependency facts."
        "support_refs MUST expose secret_ref namespace/key/provenance/availability only; secret values are never indexed, embedded, or injected."
