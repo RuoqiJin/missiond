@@ -1395,6 +1395,9 @@ fn credential_refs_filtered(
         return Vec::new();
     }
     let required_capability = credential_required_capability(query);
+    if !credential_query_mentions_secret_intent(query) && !credential_query_mentions_target(query) {
+        return Vec::new();
+    }
     if required_capability.is_none() && !credential_query_mentions_target(query) {
         return Vec::new();
     }
@@ -1446,6 +1449,23 @@ fn credential_required_capability(query: Option<&str>) -> Option<&'static str> {
 
 fn credential_query_mentions_target(query: Option<&str>) -> bool {
     !credential_target_terms(query).is_empty()
+}
+
+fn credential_query_mentions_secret_intent(query: Option<&str>) -> bool {
+    let Some(query) = query.map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    [
+        "key",
+        "keys",
+        "secret",
+        "credential",
+        "credentials",
+        "token",
+        "access",
+    ]
+    .into_iter()
+    .any(|token| query.contains(token))
 }
 
 fn credential_target_terms(query: Option<&str>) -> Vec<&'static str> {
@@ -1849,6 +1869,16 @@ mod tests {
             credential_refs_filtered(
                 None,
                 Some("Payments service.manifest.toml missing manifest gate"),
+                Some("payments"),
+            )
+            .is_empty()
+        );
+        assert!(
+            credential_refs_filtered(
+                None,
+                Some(
+                    "Payments CI image marker but Deploy Center canary old binary compose entrypoint volume override",
+                ),
                 Some("payments"),
             )
             .is_empty()
