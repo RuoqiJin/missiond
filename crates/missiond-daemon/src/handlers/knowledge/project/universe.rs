@@ -3,14 +3,32 @@ use missiond_mcp::tools::ToolResult;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+#[cfg(test)]
+use crate::context::v3_blueprint_runtime::CompiledServiceSupportCatalog;
+use crate::context::v3_blueprint_runtime::{
+    load_compiled_project_universe, CompiledProjectUniverse, CompiledRuntimeSnapshot,
+    CompiledServiceRuntimeEntry,
+};
+
 pub(super) async fn handle_universe(args: Value) -> Result<ToolResult> {
     let filter_id = args.get("id").and_then(|v| v.as_str()).map(str::to_string);
-    let blueprint_path = locate_v3_blueprint()?;
-    let source = std::fs::read_to_string(&blueprint_path)
-        .map_err(|e| anyhow!("Failed to read {}: {}", blueprint_path.display(), e))?;
+    let project_root = crate::helpers::missiond_project_root();
+    let compiled = load_compiled_project_universe(&project_root, None);
+    if let Some(payload) = compiled.payload {
+        return Ok(compiled_universe_result(
+            filter_id.as_deref(),
+            &payload,
+            compiled.snapshot.as_ref(),
+            compiled.diagnostics,
+        ));
+    }
+
+    let shard_path = locate_service_runtime_shard()?;
+    let source = std::fs::read_to_string(&shard_path)
+        .map_err(|e| anyhow!("Failed to read {}: {}", shard_path.display(), e))?;
     let Some(block) = extract_balanced_after(&source, "(service-runtime-universe") else {
         return Ok(ToolResult::error(
-            "service-runtime-universe not found in V3 blueprint",
+            "service-runtime-universe not found in compiled project universe or active V3 shard",
         ));
     };
 
@@ -92,15 +110,129 @@ pub(super) async fn handle_universe(args: Value) -> Result<ToolResult> {
 
     Ok(ToolResult::json_pretty(&json!({
         "schema": "missiond.service-runtime-universe.v1",
-        "source": blueprint_path.display().to_string(),
+        "source": shard_path.display().to_string(),
+        "sourceKind": "source-lisp-fallback",
+        "compiledRuntime": {
+            "snapshot": Value::Null,
+            "diagnostics": compiled.diagnostics,
+        },
         "services": services,
         "capabilities": capabilities,
     })))
 }
 
-fn locate_v3_blueprint() -> Result<PathBuf> {
-    crate::helpers::missiond_blueprint_path()
-        .ok_or_else(|| anyhow!("MissionD V3 blueprint not found"))
+fn compiled_universe_result(
+    filter_id: Option<&str>,
+    payload: &CompiledProjectUniverse,
+    snapshot: Option<&CompiledRuntimeSnapshot>,
+    diagnostics: Vec<String>,
+) -> ToolResult {
+    let services = payload
+        .services
+        .iter()
+        .filter(|service| compiled_service_matches(service, filter_id))
+        .map(compiled_service_to_value)
+        .collect::<Vec<_>>();
+
+    ToolResult::json_pretty(&json!({
+        "schema": "missiond.service-runtime-universe.v1",
+        "source": "compiled-project-universe",
+        "sourceKind": "compiled-runtime",
+        "compiledRuntime": {
+            "snapshot": snapshot.map(compiled_snapshot_to_value).unwrap_or(Value::Null),
+            "diagnostics": diagnostics,
+        },
+        "services": services,
+        "capabilities": [],
+    }))
+}
+
+fn compiled_service_matches(
+    service: &CompiledServiceRuntimeEntry,
+    filter_id: Option<&str>,
+) -> bool {
+    let Some(filter_id) = filter_id else {
+        return true;
+    };
+    [service.id.as_deref(), service.project.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|value| value == filter_id)
+}
+
+fn compiled_service_to_value(service: &CompiledServiceRuntimeEntry) -> Value {
+    let support = service.support_catalog.as_ref();
+    json!({
+        "id": service.id,
+        "project": service.project,
+        "root": service.root,
+        "intent": service.intent,
+        "backend": service.backend,
+        "frontend": service.frontend,
+        "operations": service.operations,
+        "environment": service.environment,
+        "publicBaseUrl": service.public_base_url,
+        "frontendUrl": service.frontend_url,
+        "apiBaseUrl": service.api_base_url,
+        "domains": service.domains,
+        "deployment": {
+            "substrate": "deploy-center",
+            "dcSlug": support.and_then(|support| support.deploy_center_slug.as_deref()),
+            "runtimeTarget": support.and_then(|support| support.runtime_target.as_deref()),
+            "executor": support.and_then(|support| support.executor.as_deref()),
+            "container": support.and_then(|support| support.container.as_deref()),
+        },
+        "proxy": {
+            "kind": Value::Null,
+            "domain": Value::Null,
+            "file": Value::Null,
+            "sseNoBuffer": Value::Null,
+        },
+        "ports": {
+            "http": Value::Null,
+            "metrics": Value::Null,
+            "service": Value::Null,
+        },
+        "health": service.health,
+        "eventIngest": {
+            "endpoint": Value::Null,
+            "domain": Value::Null,
+            "event": Value::Null,
+            "source": Value::Null,
+            "authority": Value::Null,
+            "tokenEnv": Value::Null,
+        },
+        "dependencies": service.dependencies,
+        "opsCapability": service.ops_capability,
+        "sourceEvidence": support
+            .map(|support| support.source_evidence.clone())
+            .unwrap_or_default(),
+        "risks": [],
+        "supportCatalog": support,
+    })
+}
+
+fn compiled_snapshot_to_value(snapshot: &CompiledRuntimeSnapshot) -> Value {
+    json!({
+        "kind": snapshot.kind,
+        "path": snapshot.path.display().to_string(),
+        "schemaVersion": snapshot.schema_version,
+        "sourceHash": snapshot.source_hash,
+    })
+}
+
+fn locate_service_runtime_shard() -> Result<PathBuf> {
+    let root = crate::helpers::missiond_blueprint_path()
+        .and_then(|path| path.parent().map(PathBuf::from))
+        .ok_or_else(|| anyhow!("MissionD V3 blueprint not found"))?;
+    let shard = root
+        .join("shards")
+        .join("universe")
+        .join("service-runtime.lisp");
+    if !shard.exists() {
+        return Err(anyhow!("MissionD service-runtime shard not found"));
+    }
+    Ok(shard)
 }
 
 fn extract_forms(source: &str, marker: &str) -> Vec<String> {
@@ -215,4 +347,61 @@ fn tokenize_atoms(source: &str) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiled_service_output_preserves_runtime_support_catalog() {
+        let service = CompiledServiceRuntimeEntry {
+            id: Some("asr".to_string()),
+            project: Some("asr".to_string()),
+            root: Some("/repo/services/asr".to_string()),
+            intent: Some(".missiond/intent.lisp".to_string()),
+            backend: Some(".missiond/backend/asr-backend-blueprint.lisp".to_string()),
+            frontend: Some(".missiond/frontend/asr-web-blueprint.lisp".to_string()),
+            operations: Some(".missiond/operations/asr-operations-blueprint.lisp".to_string()),
+            environment: Some("production".to_string()),
+            public_base_url: Some("https://speechscribe.top".to_string()),
+            frontend_url: Some("https://speechscribe.top".to_string()),
+            api_base_url: Some("https://auth.xiaojinpro.com/asr".to_string()),
+            domains: vec!["speechscribe.top".to_string()],
+            health: vec!["/health/ready".to_string()],
+            dependencies: vec!["payments".to_string()],
+            ops_capability: Some("deploy-ops".to_string()),
+            surface: Some("service-runtime-universe".to_string()),
+            support_catalog: Some(CompiledServiceSupportCatalog {
+                service_id: Some("asr".to_string()),
+                project_id: Some("asr".to_string()),
+                domains: vec!["speechscribe.top".to_string()],
+                public_base_url: Some("https://speechscribe.top".to_string()),
+                frontend_url: Some("https://speechscribe.top".to_string()),
+                api_base_url: Some("https://auth.xiaojinpro.com/asr".to_string()),
+                health: vec!["/health/ready".to_string()],
+                dependencies: vec!["payments".to_string()],
+                deploy_center_slug: Some("xjp-asr".to_string()),
+                runtime_target: Some("gcp-runtime".to_string()),
+                executor: Some("gcp-agent".to_string()),
+                container: Some("xjp-asr".to_string()),
+                service_manifest_refs: vec!["services/asr/service.manifest.toml".to_string()],
+                credential_refs: Vec::new(),
+                source_evidence: vec!["skill:services/asr".to_string()],
+                db_migration_namespace: None,
+                database_namespace: None,
+            }),
+        };
+
+        let value = compiled_service_to_value(&service);
+
+        assert_eq!(value["id"], "asr");
+        assert_eq!(value["sourceEvidence"][0], "skill:services/asr");
+        assert_eq!(value["deployment"]["substrate"], "deploy-center");
+        assert_eq!(value["deployment"]["dcSlug"], "xjp-asr");
+        assert_eq!(value["deployment"]["runtimeTarget"], "gcp-runtime");
+        assert_eq!(value["deployment"]["container"], "xjp-asr");
+        assert!(compiled_service_matches(&service, Some("asr")));
+        assert!(!compiled_service_matches(&service, Some("payments")));
+    }
 }
