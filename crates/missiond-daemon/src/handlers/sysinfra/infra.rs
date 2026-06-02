@@ -1000,6 +1000,12 @@ fn evidence_matches_scope(
     if query_has_specific_file_token_without_match(skill_name, skill_path, line, filter) {
         return false;
     }
+    if line_mentions_unrequested_foreign_project(line, filter) {
+        return false;
+    }
+    if lacks_line_anchor_for_broad_deploy_query(line, filter) {
+        return false;
+    }
     if lacks_project_anchor_and_query_term_density(skill_name, skill_path, line, filter) {
         return false;
     }
@@ -1014,6 +1020,49 @@ fn evidence_matches_scope(
         return score > 0;
     }
     score >= 4
+}
+
+fn line_mentions_unrequested_foreign_project(line: &str, filter: &InfraEvidenceFilter) -> bool {
+    let Some(project) = normalized_evidence_token(filter.project_id.as_deref()) else {
+        return false;
+    };
+    let query_tokens = filter
+        .query
+        .as_deref()
+        .map(evidence_query_tokens)
+        .unwrap_or_default();
+    let line_haystack = line.to_ascii_lowercase();
+    known_project_evidence_tokens()
+        .iter()
+        .filter(|token| **token != project)
+        .filter(|token| !query_tokens.iter().any(|query_token| query_token == *token))
+        .any(|token| contains_evidence_token(&line_haystack, token))
+}
+
+fn lacks_line_anchor_for_broad_deploy_query(line: &str, filter: &InfraEvidenceFilter) -> bool {
+    let Some(query) = filter.query.as_deref() else {
+        return false;
+    };
+    let query_tokens = evidence_query_tokens(query);
+    if !query_tokens
+        .iter()
+        .any(|token| is_deploy_drift_anchor_token(token))
+    {
+        return false;
+    }
+
+    let line_haystack = line.to_ascii_lowercase();
+    let project_token = normalized_evidence_token(filter.project_id.as_deref());
+    if project_token.as_deref().is_some_and(|project| {
+        project != "missiond" && contains_evidence_token(&line_haystack, project)
+    }) {
+        return false;
+    }
+
+    query_tokens
+        .iter()
+        .filter(|token| is_deploy_drift_anchor_token(token))
+        .all(|token| !contains_evidence_token(&line_haystack, token))
 }
 
 fn lacks_project_anchor_and_query_term_density(
@@ -1714,6 +1763,33 @@ fn is_generic_evidence_token(token: &str) -> bool {
     )
 }
 
+fn known_project_evidence_tokens() -> &'static [&'static str] {
+    &[
+        "asr",
+        "speechscribe",
+        "pcea",
+        "pcea-video-vault",
+        "tiermate",
+        "astrill",
+        "openclaw",
+        "aliyun",
+    ]
+}
+
+fn is_deploy_drift_anchor_token(token: &str) -> bool {
+    matches!(
+        token,
+        "compose"
+            | "entrypoint"
+            | "binary"
+            | "marker"
+            | "volume"
+            | "volumes"
+            | "service.manifest.toml"
+            | "service.manifest"
+    )
+}
+
 fn is_weak_target_evidence_token(token: &str) -> bool {
     matches!(
         token,
@@ -1732,6 +1808,7 @@ fn is_weak_target_evidence_token(token: &str) -> bool {
             | "ci"
             | "volume"
             | "volumes"
+            | "deploy-center"
     )
 }
 
@@ -2012,6 +2089,18 @@ mod tests {
             "pcea",
             "/Users/jinchen/.claude/skills/pcea/SKILL.md",
             "Postgres volume: `pcea_postgres_data` (fixed compose project storage)",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xjp-deploy-center",
+            "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
+            "| 镜像传输 | OSS: `rickyjim/deploy-images/pcea-video-vault/pcea-{sha}.tar.gz` |",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xjp-deploy-center",
+            "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
+            "**OSS 中转策略**: GA CI 构建 docker image → docker save → Deploy Center 触发 → ECS Agent 下载。Build stage 必须 DISABLED。",
             &deploy_runtime_filter,
         ));
         let volume_override_score = evidence_scope_score(
