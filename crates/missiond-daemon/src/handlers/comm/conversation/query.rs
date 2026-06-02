@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::lenient;
@@ -73,6 +74,138 @@ fn normalize_search_conversation_type(conversation_type: Option<String>) -> Opti
         "system" => "meta,worker".to_string(),
         "codex" => "codex_chat".to_string(),
         _ => raw,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalProjectMatch {
+    id: String,
+    path: String,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProjectDiagnosticBucket {
+    count: usize,
+    path: Option<String>,
+    raw_projects: Vec<String>,
+    match_reasons: Vec<&'static str>,
+}
+
+fn encoded_project_path(path: &str) -> String {
+    path.trim_end_matches('/').replace('/', "-")
+}
+
+fn canonical_conversation_project(
+    raw_project: Option<&str>,
+    raw_project_id: Option<&str>,
+    projects: &[missiond_core::types::ProjectConfig],
+) -> Option<CanonicalProjectMatch> {
+    if let Some(project_id) = raw_project_id.map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some(project) = projects
+            .iter()
+            .find(|project| project.active && project.id == project_id)
+        {
+            return Some(CanonicalProjectMatch {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                reason: "conversation_project_id",
+            });
+        }
+    }
+
+    let raw = raw_project.map(str::trim).filter(|p| !p.is_empty())?;
+    for project in projects.iter().filter(|project| project.active) {
+        if raw == project.id {
+            return Some(CanonicalProjectMatch {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                reason: "registered_project_id",
+            });
+        }
+        if raw == project.path
+            || std::path::Path::new(raw).starts_with(std::path::Path::new(&project.path))
+        {
+            return Some(CanonicalProjectMatch {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                reason: "registered_path_prefix",
+            });
+        }
+        let encoded_path = encoded_project_path(&project.path);
+        if !encoded_path.is_empty() && raw.contains(&encoded_path) {
+            return Some(CanonicalProjectMatch {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                reason: "claude_encoded_project_path",
+            });
+        }
+    }
+    None
+}
+
+fn record_project_diagnostic(
+    buckets: &mut BTreeMap<String, ProjectDiagnosticBucket>,
+    raw_project: Option<&str>,
+    canonical: Option<&CanonicalProjectMatch>,
+) {
+    let key = canonical
+        .map(|project| project.id.clone())
+        .or_else(|| raw_project.map(|project| format!("raw:{project}")))
+        .unwrap_or_else(|| "unknown".to_string());
+    let bucket = buckets.entry(key).or_default();
+    bucket.count += 1;
+    if bucket.path.is_none() {
+        bucket.path = canonical.map(|project| project.path.clone());
+    }
+    if let Some(project) = raw_project {
+        if !bucket.raw_projects.iter().any(|seen| seen == project) {
+            bucket.raw_projects.push(project.to_string());
+        }
+    }
+    if let Some(project) = canonical {
+        if !bucket.match_reasons.contains(&project.reason) {
+            bucket.match_reasons.push(project.reason);
+        }
+    }
+}
+
+fn conversation_search_project_diagnostics(
+    requested_project: Option<&str>,
+    buckets: &BTreeMap<String, ProjectDiagnosticBucket>,
+) -> Value {
+    let result_project_counts: Vec<Value> = buckets
+        .iter()
+        .map(|(project_id, bucket)| {
+            serde_json::json!({
+                "projectId": project_id,
+                "canonicalPath": bucket.path.clone(),
+                "count": bucket.count,
+                "rawProjects": bucket.raw_projects.clone(),
+                "matchReasons": bucket.match_reasons.clone(),
+            })
+        })
+        .collect();
+    let project_filter_applied = requested_project.is_some();
+    let distinct_project_lanes = buckets.len();
+    let suggested_filters: Vec<&str> = buckets
+        .keys()
+        .filter(|project| project.as_str() != "unknown" && !project.starts_with("raw:"))
+        .map(|project| project.as_str())
+        .collect();
+    serde_json::json!({
+        "schema": "missiond.conversation-search-project-diagnostics.v1",
+        "projectFilterApplied": project_filter_applied,
+        "requestedProject": requested_project,
+        "scope": if project_filter_applied { "explicit_project" } else { "global_unscoped" },
+        "distinctProjectLanes": distinct_project_lanes,
+        "resultProjectCounts": result_project_counts,
+        "suggestedProjectFilters": suggested_filters,
+        "warning": if !project_filter_applied && distinct_project_lanes > 1 {
+            Some("Unscoped conversation search returned multiple project lanes; pass project=<id> to make the audit bounded.")
+        } else {
+            None
+        },
     })
 }
 
@@ -875,9 +1008,27 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             ranked.truncate(top_k);
 
             // 4. Enrich with snippets (Postgres FTS native) or llmSummary fallback
+            let active_projects: Vec<missiond_core::types::ProjectConfig> = {
+                let registry = state.project_registry.read().await;
+                registry.active_projects().into_iter().cloned().collect()
+            };
+            let mut project_buckets: BTreeMap<String, ProjectDiagnosticBucket> = BTreeMap::new();
             let mut results = Vec::new();
             for (sid, _rrf, fts_r, _vec_r, sim) in &ranked {
                 let conv = state.store.get_conversation(sid).await.ok().flatten();
+                let canonical_project = conv.as_ref().and_then(|conversation| {
+                    canonical_conversation_project(
+                        conversation.project.as_deref(),
+                        conversation.project_id.as_deref(),
+                        &active_projects,
+                    )
+                });
+                record_project_diagnostic(
+                    &mut project_buckets,
+                    conv.as_ref()
+                        .and_then(|conversation| conversation.project.as_deref()),
+                    canonical_project.as_ref(),
+                );
 
                 // Build matchReason: FTS snippet if keyword-matched, llmSummary if vector-only
                 let match_reason = if fts_r.is_some() {
@@ -912,6 +1063,10 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 results.push(serde_json::json!({
                     "sessionId": sid,
                     "project": conv.as_ref().and_then(|c| c.project.as_deref()),
+                    "projectId": conv.as_ref().and_then(|c| c.project_id.as_deref()),
+                    "canonicalProjectId": canonical_project.as_ref().map(|project| project.id.as_str()),
+                    "canonicalProjectPath": canonical_project.as_ref().map(|project| project.path.as_str()),
+                    "projectMatchReason": canonical_project.as_ref().map(|project| project.reason),
                     "conversationType": conv.as_ref().map(|c| c.conversation_type.as_str()),
                     "status": conv.as_ref().map(|c| c.status.as_str()),
                     "slotId": conv.as_ref().and_then(|c| c.slot_id.as_deref()),
@@ -932,6 +1087,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 "ftsHits": fts_ranked.len(),
                 "vecHits": vec_ranked.len(),
                 "filteredSemanticHits": filtered_semantic_hits,
+                "projectDiagnostics": conversation_search_project_diagnostics(project.as_deref(), &project_buckets),
             })))
         }
 
@@ -1231,9 +1387,29 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
 #[cfg(test)]
 mod tests {
     use super::{
+        canonical_conversation_project, conversation_search_project_diagnostics,
         conversation_search_score, keep_conversation_hybrid_candidate,
-        normalize_search_conversation_type, MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
+        normalize_search_conversation_type, record_project_diagnostic, CanonicalProjectMatch,
+        MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
     };
+    use missiond_core::types::ProjectConfig;
+    use std::collections::BTreeMap;
+
+    fn project(id: &str, path: &str) -> ProjectConfig {
+        ProjectConfig {
+            id: id.to_string(),
+            path: path.to_string(),
+            intent_path: None,
+            active: true,
+            slots: vec![],
+            github_url: None,
+            kind: "managed".to_string(),
+            vault_path: None,
+            parent_id: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
 
     #[test]
     fn hybrid_ranking_prefers_fts_over_vector_only() {
@@ -1289,6 +1465,79 @@ mod tests {
         assert_eq!(
             normalize_search_conversation_type(Some("user".into())),
             Some("user".into())
+        );
+    }
+
+    #[test]
+    fn canonical_project_matches_registered_and_claude_encoded_paths() {
+        let projects = vec![
+            project("missiond", "/Users/jinchen/Projects/missiond"),
+            project(
+                "router",
+                "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router",
+            ),
+        ];
+
+        assert_eq!(
+            canonical_conversation_project(None, Some("missiond"), &projects),
+            Some(CanonicalProjectMatch {
+                id: "missiond".into(),
+                path: "/Users/jinchen/Projects/missiond".into(),
+                reason: "conversation_project_id",
+            })
+        );
+        assert_eq!(
+            canonical_conversation_project(
+                Some("/Users/jinchen/.claude/projects/-Users-jinchen-Projects-missiond"),
+                None,
+                &projects,
+            )
+            .map(|project| (project.id, project.reason)),
+            Some(("missiond".into(), "claude_encoded_project_path"))
+        );
+        assert_eq!(
+            canonical_conversation_project(
+                Some("/Users/jinchen/.claude/projects/-Users-jinchen-Downloads-xiaojinpro-gateway-xiaojinpro-backend-services-router/session/subagents"),
+                None,
+                &projects,
+            )
+            .map(|project| (project.id, project.reason)),
+            Some(("router".into(), "claude_encoded_project_path"))
+        );
+    }
+
+    #[test]
+    fn unscoped_project_diagnostics_warn_on_multiple_lanes() {
+        let mut buckets = BTreeMap::new();
+        record_project_diagnostic(
+            &mut buckets,
+            Some("/Users/jinchen/Projects/missiond"),
+            Some(&CanonicalProjectMatch {
+                id: "missiond".into(),
+                path: "/Users/jinchen/Projects/missiond".into(),
+                reason: "registered_path_prefix",
+            }),
+        );
+        record_project_diagnostic(
+            &mut buckets,
+            Some("/Users/jinchen/Projects/router"),
+            Some(&CanonicalProjectMatch {
+                id: "router".into(),
+                path: "/Users/jinchen/Projects/router".into(),
+                reason: "registered_path_prefix",
+            }),
+        );
+
+        let diagnostics = conversation_search_project_diagnostics(None, &buckets);
+        assert_eq!(diagnostics["scope"], "global_unscoped");
+        assert_eq!(diagnostics["distinctProjectLanes"], 2);
+        assert!(diagnostics["warning"].as_str().is_some());
+        assert_eq!(
+            diagnostics["suggestedProjectFilters"]
+                .as_array()
+                .expect("filters")
+                .len(),
+            2
         );
     }
 }
