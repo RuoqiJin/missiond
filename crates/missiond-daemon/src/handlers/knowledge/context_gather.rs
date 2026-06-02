@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -2335,17 +2335,28 @@ async fn deployment_events_source(
         Ok(rows) => {
             let candidate_count = rows.len();
             let mut events = Vec::new();
+            let mut matching_count = 0usize;
+            let mut drop_reason_counts: BTreeMap<String, usize> = BTreeMap::new();
+            let mut sample_dropped_events = Vec::new();
             for row in &rows {
-                if let Some(event) = deployment_event_item_from_timeline_row(
+                match deployment_event_filter_timeline_row(
                     row,
                     project_id,
                     service_id.as_deref(),
                     deploy_center_slug.as_deref(),
                     query,
                 ) {
-                    events.push(event);
-                    if events.len() >= limit {
-                        break;
+                    DeploymentEventFilterResult::Keep(event) => {
+                        matching_count += 1;
+                        if events.len() < limit {
+                            events.push(event);
+                        }
+                    }
+                    DeploymentEventFilterResult::Drop { reason, sample } => {
+                        *drop_reason_counts.entry(reason.to_string()).or_default() += 1;
+                        if sample_dropped_events.len() < 5 {
+                            sample_dropped_events.push(sample);
+                        }
                     }
                 }
             }
@@ -2370,8 +2381,11 @@ async fn deployment_events_source(
                 "filters": filters,
                 "filter_before_injection": true,
                 "candidate_count": candidate_count,
-                "filtered_count": events.len(),
-                "dropped_count": candidate_count.saturating_sub(events.len()),
+                "filtered_count": matching_count,
+                "returned_count": events.len(),
+                "dropped_count": candidate_count.saturating_sub(matching_count),
+                "drop_reason_counts": drop_reason_counts,
+                "sample_dropped_events": sample_dropped_events,
                 "events": events,
                 "diagnostic": diagnostic,
             })
@@ -2388,11 +2402,19 @@ async fn deployment_events_source(
             "filter_before_injection": true,
             "candidate_count": 0,
             "filtered_count": 0,
+            "returned_count": 0,
             "dropped_count": 0,
+            "drop_reason_counts": {},
+            "sample_dropped_events": [],
             "events": [],
             "diagnostic": format!("deployment event_log query failed: {err}"),
         }),
     }
+}
+
+enum DeploymentEventFilterResult {
+    Keep(Value),
+    Drop { reason: &'static str, sample: Value },
 }
 
 fn deployment_event_item_from_timeline_row(
@@ -2402,22 +2424,126 @@ fn deployment_event_item_from_timeline_row(
     deploy_center_slug: Option<&str>,
     query: &str,
 ) -> Option<Value> {
+    match deployment_event_filter_timeline_row(
+        row,
+        project_id,
+        service_id,
+        deploy_center_slug,
+        query,
+    ) {
+        DeploymentEventFilterResult::Keep(event) => Some(event),
+        DeploymentEventFilterResult::Drop { .. } => None,
+    }
+}
+
+fn deployment_event_filter_timeline_row(
+    row: &missiond_core::db::TimelineRow,
+    project_id: Option<&str>,
+    service_id: Option<&str>,
+    deploy_center_slug: Option<&str>,
+    query: &str,
+) -> DeploymentEventFilterResult {
     if row.event_type != "external_service_event" {
-        return None;
+        return deployment_event_drop_result(
+            row,
+            "event_type_mismatch",
+            None,
+            None,
+            None,
+            false,
+            project_id,
+            service_id,
+            deploy_center_slug,
+        );
     }
-    let payload = serde_json::from_str::<Value>(&row.payload).ok()?;
-    let producer_service_id = text_field(&payload, "service_id")?;
-    let event_kind = text_field(&payload, "event_kind")?;
+    let payload = match serde_json::from_str::<Value>(&row.payload) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return deployment_event_drop_result(
+                row,
+                "payload_parse_failed",
+                None,
+                None,
+                None,
+                false,
+                project_id,
+                service_id,
+                deploy_center_slug,
+            )
+        }
+    };
+    let Some(producer_service_id) = text_field(&payload, "service_id") else {
+        return deployment_event_drop_result(
+            row,
+            "missing_producer_service_id",
+            Some(&payload),
+            None,
+            None,
+            false,
+            project_id,
+            service_id,
+            deploy_center_slug,
+        );
+    };
+    let Some(event_kind) = text_field(&payload, "event_kind") else {
+        return deployment_event_drop_result(
+            row,
+            "missing_event_kind",
+            Some(&payload),
+            None,
+            None,
+            false,
+            project_id,
+            service_id,
+            deploy_center_slug,
+        );
+    };
     if !deployment_event_kind_is_relevant(&event_kind) {
-        return None;
+        return deployment_event_drop_result(
+            row,
+            "irrelevant_event_kind",
+            Some(&payload),
+            None,
+            None,
+            false,
+            project_id,
+            service_id,
+            deploy_center_slug,
+        );
     }
-    let event_id = text_field(&payload, "event_id")?;
-    let payload_json = text_field(&payload, "payload_json")
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .unwrap_or(Value::Null);
+    let Some(event_id) = text_field(&payload, "event_id") else {
+        return deployment_event_drop_result(
+            row,
+            "missing_event_id",
+            Some(&payload),
+            None,
+            None,
+            false,
+            project_id,
+            service_id,
+            deploy_center_slug,
+        );
+    };
+    let (payload_json, payload_json_parse_failed) = match text_field(&payload, "payload_json") {
+        Some(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(value) => (value, false),
+            Err(_) => (Value::Null, true),
+        },
+        None => (Value::Null, false),
+    };
     let envelope = payload_json.get("_envelope");
     if !deployment_event_has_deploy_center_authority(&producer_service_id, &event_id, envelope) {
-        return None;
+        return deployment_event_drop_result(
+            row,
+            "non_deploy_center_authority",
+            Some(&payload),
+            Some(&payload_json),
+            envelope,
+            payload_json_parse_failed,
+            project_id,
+            service_id,
+            deploy_center_slug,
+        );
     }
     if !deployment_event_matches_scope(
         &payload,
@@ -2428,7 +2554,17 @@ fn deployment_event_item_from_timeline_row(
         deploy_center_slug,
         query,
     ) {
-        return None;
+        return deployment_event_drop_result(
+            row,
+            "scope_mismatch",
+            Some(&payload),
+            Some(&payload_json),
+            envelope,
+            payload_json_parse_failed,
+            project_id,
+            service_id,
+            deploy_center_slug,
+        );
     }
 
     let target_project_id = text_from_sources(
@@ -2468,7 +2604,7 @@ fn deployment_event_item_from_timeline_row(
         )
     });
 
-    Some(json!({
+    DeploymentEventFilterResult::Keep(json!({
         "sourceType": "deploy_center_event",
         "source": "event_log.external_service_event",
         "authority": "deploy-center durable event via MissionD EventBridge",
@@ -2488,6 +2624,104 @@ fn deployment_event_item_from_timeline_row(
         "event_authority": authority,
         "summary": compact_text(&summary, 420),
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deployment_event_drop_result(
+    row: &missiond_core::db::TimelineRow,
+    reason: &'static str,
+    payload: Option<&Value>,
+    payload_json: Option<&Value>,
+    envelope: Option<&Value>,
+    payload_json_parse_failed: bool,
+    requested_project_id: Option<&str>,
+    requested_service_id: Option<&str>,
+    requested_deploy_center_slug: Option<&str>,
+) -> DeploymentEventFilterResult {
+    DeploymentEventFilterResult::Drop {
+        reason,
+        sample: deployment_event_drop_sample(
+            row,
+            reason,
+            payload,
+            payload_json,
+            envelope,
+            payload_json_parse_failed,
+            requested_project_id,
+            requested_service_id,
+            requested_deploy_center_slug,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deployment_event_drop_sample(
+    row: &missiond_core::db::TimelineRow,
+    reason: &str,
+    payload: Option<&Value>,
+    payload_json: Option<&Value>,
+    envelope: Option<&Value>,
+    payload_json_parse_failed: bool,
+    requested_project_id: Option<&str>,
+    requested_service_id: Option<&str>,
+    requested_deploy_center_slug: Option<&str>,
+) -> Value {
+    let producer_service_id = text_from_sources(&[payload], &["service_id", "serviceId"]);
+    let event_kind = text_from_sources(&[payload], &["event_kind", "eventKind"]);
+    let event_id = text_from_sources(&[payload], &["event_id", "eventId"])
+        .map(|value| compact_text(&value, 160));
+    let target_project_id = text_from_sources(
+        &[envelope, payload_json, payload],
+        &["project_id", "projectId", "project"],
+    );
+    let target_service_id = text_from_sources(
+        &[payload_json, envelope, payload],
+        &[
+            "target_service_id",
+            "targetServiceId",
+            "deploy_service_id",
+            "deployServiceId",
+            "service_id",
+            "serviceId",
+            "project",
+            "project_id",
+            "projectId",
+        ],
+    );
+    let target_deploy_center_slug = text_from_sources(
+        &[payload_json, envelope, payload],
+        &[
+            "deploy_center_slug",
+            "deployCenterSlug",
+            "deploy_center",
+            "deployCenter",
+        ],
+    );
+    let subject = text_from_sources(&[envelope, payload_json, payload], &["subject", "summary"])
+        .map(|value| compact_text(&value, 180));
+    let source = text_from_sources(&[envelope, payload_json], &["source"]);
+    let authority = text_from_sources(&[envelope, payload_json], &["authority"]);
+    json!({
+        "reason": reason,
+        "seq": row.seq,
+        "created_at": row.created_at,
+        "event_type": row.event_type,
+        "event_kind": event_kind,
+        "producer_service_id": producer_service_id,
+        "event_id": event_id,
+        "target_project_id": target_project_id,
+        "target_service_id": target_service_id,
+        "target_deploy_center_slug": target_deploy_center_slug,
+        "subject": subject,
+        "event_source": source,
+        "event_authority": authority,
+        "payload_json_parse_failed": payload_json_parse_failed,
+        "requested_scope": {
+            "project_id": requested_project_id,
+            "service_id": requested_service_id,
+            "deploy_center_slug": requested_deploy_center_slug,
+        }
+    })
 }
 
 fn deployment_event_kind_is_relevant(event_kind: &str) -> bool {
@@ -2857,11 +3091,105 @@ fn short_sha256(input: &str, hex_chars: usize) -> String {
 }
 
 fn support_catalog_has_content(value: &Value) -> bool {
-    value.as_object().is_some_and(|object| {
-        object.iter().any(|(key, value)| {
-            !matches!(key.as_str(), "schema" | "authority" | "secret_policy")
-                && !json_value_is_empty(value)
-        })
+    any_field_has_content(
+        value,
+        &[
+            "project_id",
+            "projectId",
+            "service_id",
+            "serviceId",
+            "deploy_center_slug",
+            "deployCenterSlug",
+            "domains",
+            "dependencies",
+            "agent_refs",
+            "agentRefs",
+        ],
+    ) || nested_field_has_content(
+        value,
+        "runtime_target",
+        &[
+            "environment",
+            "target",
+            "ops_capability",
+            "opsCapability",
+            "executor",
+            "container",
+        ],
+    ) || nested_field_has_content(
+        value,
+        "urls",
+        &[
+            "public_base_url",
+            "publicBaseUrl",
+            "frontend_url",
+            "frontendUrl",
+            "api_base_url",
+            "apiBaseUrl",
+        ],
+    ) || nested_field_has_content(
+        value,
+        "manifest_refs",
+        &[
+            "root",
+            "intent",
+            "backend",
+            "frontend",
+            "operations",
+            "service_manifest_refs",
+            "serviceManifestRefs",
+        ],
+    ) || nested_field_has_content(value, "endpoints", &["health", "smoke"])
+        || nested_field_has_content(
+            value,
+            "database",
+            &[
+                "migration_namespace",
+                "migrationNamespace",
+                "database_namespace",
+                "databaseNamespace",
+            ],
+        )
+        || value
+            .get("deployment_closure")
+            .is_some_and(deployment_closure_has_identity_content)
+}
+
+fn deployment_closure_has_identity_content(value: &Value) -> bool {
+    any_field_has_content(
+        value,
+        &[
+            "project_id",
+            "projectId",
+            "service_id",
+            "serviceId",
+            "deploy_center_slug",
+            "deployCenterSlug",
+            "runtime_target",
+            "runtimeTarget",
+            "executor",
+            "container",
+            "manifest_refs",
+            "manifestRefs",
+            "health_endpoints",
+            "healthEndpoints",
+            "smoke_endpoints",
+            "smokeEndpoints",
+        ],
+    )
+}
+
+fn nested_field_has_content(value: &Value, object_key: &str, keys: &[&str]) -> bool {
+    value
+        .get(object_key)
+        .is_some_and(|object| any_field_has_content(object, keys))
+}
+
+fn any_field_has_content(value: &Value, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        value
+            .get(*key)
+            .is_some_and(|field| !json_value_is_empty(field))
     })
 }
 
@@ -4116,13 +4444,15 @@ mod tests {
         context_gather_persist_artifact, context_gather_persist_read_model,
         context_gather_worker_visible_dir_for, context_noise_metrics,
         context_pack_artifact_payload, dedupe_evidence_search_items,
-        deployment_event_item_from_timeline_row, diagnostics_have_hard_failures, evidence_item_id,
+        deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
+        diagnostics_have_hard_failures, evidence_item_id,
         evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
-        source_selection, CompiledDeploymentPolicyFingerprint, ContextGatherArgs, SourceProfile,
+        source_selection, support_catalog_has_content, CompiledDeploymentPolicyFingerprint,
+        ContextGatherArgs, DeploymentEventFilterResult, SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -4713,6 +5043,29 @@ mod tests {
             "Payments canary",
         )
         .is_none());
+        match deployment_event_filter_timeline_row(
+            &unscoped,
+            Some("payments"),
+            Some("payments"),
+            Some("xjp-payments"),
+            "Payments canary",
+        ) {
+            DeploymentEventFilterResult::Drop { reason, sample } => {
+                assert_eq!(reason, "scope_mismatch");
+                assert_eq!(
+                    sample.get("target_project_id").and_then(Value::as_str),
+                    Some("router")
+                );
+                assert_eq!(
+                    sample
+                        .get("requested_scope")
+                        .and_then(|value| value.get("project_id"))
+                        .and_then(Value::as_str),
+                    Some("payments")
+                );
+            }
+            DeploymentEventFilterResult::Keep(_) => panic!("unscoped router event was kept"),
+        }
 
         let mut non_deploy = unscoped;
         non_deploy.payload = json!({
@@ -4731,6 +5084,22 @@ mod tests {
             "deploy-center",
         )
         .is_none());
+        match deployment_event_filter_timeline_row(
+            &non_deploy,
+            Some("deploy-center"),
+            Some("deploy-center"),
+            Some("xjp-deploy-center"),
+            "deploy-center",
+        ) {
+            DeploymentEventFilterResult::Drop { reason, sample } => {
+                assert_eq!(reason, "irrelevant_event_kind");
+                assert_eq!(
+                    sample.get("event_kind").and_then(Value::as_str),
+                    Some("usage_burst")
+                );
+            }
+            DeploymentEventFilterResult::Keep(_) => panic!("irrelevant deploy event was kept"),
+        }
     }
 
     #[test]
@@ -5015,6 +5384,32 @@ mod tests {
         assert!(deployment_item.summary.contains("canary"));
         assert!(deployment_item.summary.contains("binary marker"));
         assert!(deployment_item.summary.contains("db adoption"));
+    }
+
+    #[test]
+    fn empty_support_catalog_does_not_project_support_refs() {
+        let sources = serde_json::Map::new();
+        let summaries = build_source_summaries(&sources);
+        let catalog = build_support_catalog(&sources);
+
+        assert!(!support_catalog_has_content(&catalog));
+        assert_eq!(
+            catalog.get("schema").and_then(Value::as_str),
+            Some("missiond.support-catalog.v1")
+        );
+
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::ConversationAudit,
+            None,
+            None,
+        );
+        assert!(!items
+            .iter()
+            .any(|item| item.source_type == "support_catalog"
+                || item.source_type == "deployment_closure_policy"));
     }
 
     #[test]
