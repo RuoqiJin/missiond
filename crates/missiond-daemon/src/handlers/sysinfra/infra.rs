@@ -1302,22 +1302,56 @@ fn credential_refs(target_id: Option<&str>) -> Vec<Value> {
 fn credential_refs_filtered(
     target_id: Option<&str>,
     query: Option<&str>,
-    project_id: Option<&str>,
+    _project_id: Option<&str>,
 ) -> Vec<Value> {
     let refs = credential_refs(target_id);
     if target_id.is_some_and(|target| !target.trim().is_empty()) {
         return refs;
     }
-    let terms = scoped_evidence_terms(query, project_id, false);
+    let terms = credential_query_terms(query);
     if terms.is_empty() {
         return Vec::new();
     }
+    let required_capability = credential_required_capability(query);
     refs.into_iter()
         .filter(|item| {
+            if let Some(required_capability) = required_capability {
+                if item
+                    .get("requiredCapability")
+                    .and_then(|value| value.as_str())
+                    != Some(required_capability)
+                {
+                    return false;
+                }
+            }
             let haystack = item.to_string().to_ascii_lowercase();
             terms.iter().any(|term| haystack.contains(term))
         })
         .collect()
+}
+
+fn credential_query_terms(query: Option<&str>) -> Vec<String> {
+    query.map(evidence_query_tokens).unwrap_or_default()
+}
+
+fn credential_required_capability(query: Option<&str>) -> Option<&'static str> {
+    let query = query?.to_ascii_lowercase();
+    if query.contains("cloudflare")
+        || query.contains("dns")
+        || query.contains("certificate")
+        || query.contains("cert")
+    {
+        return Some("dns-ops");
+    }
+    if query.contains("deploy")
+        || query.contains("agent")
+        || query.contains("canary")
+        || query.contains("diagnostic")
+        || query.contains("diagnostics")
+    {
+        return Some("deploy-ops");
+    }
+    None
 }
 
 fn scoped_evidence_terms(
@@ -1661,6 +1695,22 @@ mod tests {
         assert!(!gcp_refs.is_empty());
         assert!(gcp_refs.iter().all(|item| {
             item.get("targetId").and_then(|value| value.as_str()) == Some("gcp-runtime")
+        }));
+        assert!(gcp_refs.iter().all(|item| {
+            item.get("requiredCapability")
+                .and_then(|value| value.as_str())
+                == Some("deploy-ops")
+        }));
+        assert!(gcp_refs.iter().all(|item| {
+            item.get("keyName")
+                .and_then(|value| value.as_str())
+                .is_none_or(|key| !key.contains("CLOUDFLARE_DNS_TOKEN"))
+        }));
+        let dns_refs =
+            credential_refs_filtered(None, Some("Cloudflare DNS token on GCP runtime"), None);
+        assert!(dns_refs.iter().any(|item| {
+            item.get("keyName").and_then(|value| value.as_str())
+                == Some("cloudflare/CLOUDFLARE_DNS_TOKEN")
         }));
         assert!(
             credential_refs_filtered(
