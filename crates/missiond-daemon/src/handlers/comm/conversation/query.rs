@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
@@ -67,18 +67,38 @@ fn conversation_duplicate_signature(
     ))
 }
 
+fn copy_duplicate_summary_field(map: &mut Map<String, Value>, result: &Value, key: &str) {
+    if let Some(value) = result.get(key) {
+        if !value.is_null() {
+            map.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
 fn duplicate_session_summary(result: &Value) -> Value {
-    serde_json::json!({
-        "sessionId": result.get("sessionId").cloned().unwrap_or(Value::Null),
-        "status": result.get("status").cloned().unwrap_or(Value::Null),
-        "startedAt": result.get("startedAt").cloned().unwrap_or(Value::Null),
-        "messageCount": result.get("messageCount").cloned().unwrap_or(Value::Null),
-        "projectId": result.get("projectId").cloned().unwrap_or(Value::Null),
-        "canonicalProjectId": result.get("canonicalProjectId").cloned().unwrap_or(Value::Null),
-        "conversationType": result.get("conversationType").cloned().unwrap_or(Value::Null),
-        "rawMatchReasonChars": result.get("rawMatchReasonChars").cloned().unwrap_or(Value::Null),
-        "matchReasonTruncated": result.get("matchReasonTruncated").cloned().unwrap_or(Value::Null),
-    })
+    let mut map = Map::new();
+    for key in [
+        "sessionId",
+        "project",
+        "projectId",
+        "canonicalProjectId",
+        "canonicalProjectPath",
+        "projectMatchReason",
+        "conversationType",
+        "status",
+        "slotId",
+        "messageCount",
+        "startedAt",
+        "summary",
+        "matchReason",
+        "matchReasonTruncated",
+        "rawMatchReasonChars",
+        "cosineSim",
+        "rawMatchReason",
+    ] {
+        copy_duplicate_summary_field(&mut map, result, key);
+    }
+    Value::Object(map)
 }
 
 fn remove_internal_duplicate_signature(result: &mut Value) {
@@ -1697,20 +1717,32 @@ mod tests {
         let results = vec![
             json!({
                 "sessionId": "s1",
+                "project": "/Users/jinchen/Projects/missiond",
                 "status": "completed",
                 "startedAt": "2026-06-02T01:00:00Z",
+                "slotId": "slot-codex-default",
                 "canonicalProjectId": "missiond",
+                "canonicalProjectPath": "/Users/jinchen/Projects/missiond",
+                "projectMatchReason": "conversation_project_id",
                 "conversationType": "codex_chat",
+                "messageCount": 21,
+                "matchReason": raw,
                 "rawMatchReasonChars": raw.chars().count(),
                 "matchReasonTruncated": false,
                 "_duplicateSignature": signature,
             }),
             json!({
                 "sessionId": "s2",
+                "project": "/Users/jinchen/Projects/missiond",
                 "status": "active",
                 "startedAt": "2026-06-02T02:00:00Z",
+                "slotId": "slot-codex-default",
                 "canonicalProjectId": "missiond",
+                "canonicalProjectPath": "/Users/jinchen/Projects/missiond",
+                "projectMatchReason": "conversation_project_id",
                 "conversationType": "codex_chat",
+                "messageCount": 22,
+                "matchReason": raw,
                 "rawMatchReasonChars": raw.chars().count(),
                 "matchReasonTruncated": false,
                 "_duplicateSignature": conversation_duplicate_signature(Some("missiond"), raw).unwrap(),
@@ -1734,6 +1766,20 @@ mod tests {
         assert_eq!(duplicate_sessions_collapsed, 1);
         assert_eq!(collapsed[0]["duplicateSessionCount"], 2);
         assert_eq!(collapsed[0]["duplicateSessions"][0]["sessionId"], "s2");
+        assert_eq!(
+            collapsed[0]["duplicateSessions"][0]["project"],
+            "/Users/jinchen/Projects/missiond"
+        );
+        assert_eq!(
+            collapsed[0]["duplicateSessions"][0]["canonicalProjectId"],
+            "missiond"
+        );
+        assert_eq!(
+            collapsed[0]["duplicateSessions"][0]["projectMatchReason"],
+            "conversation_project_id"
+        );
+        assert_eq!(collapsed[0]["duplicateSessions"][0]["messageCount"], 22);
+        assert_eq!(collapsed[0]["duplicateSessions"][0]["matchReason"], raw);
         assert!(collapsed[0].get("_duplicateSignature").is_none());
         assert_eq!(collapsed[1]["duplicateSessionCount"], 1);
     }
