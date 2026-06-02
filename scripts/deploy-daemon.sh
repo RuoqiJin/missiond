@@ -27,6 +27,9 @@
 #                               snapshot by default; this root is recorded as
 #                               release_owner_root for ownership checks.
 #   MISSIOND_DEPLOY_OWNER_ROOT  explicit owner root for active mutation guards.
+#                               Default: current stable git root, or the active
+#                               release manifest's release_owner_root when
+#                               deploying from a transient worktree.
 #   MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT  expected launchd_project_root for
 #                               the currently active release before mutating
 #                               active/apply-cleanup; default: deploy owner root
@@ -132,48 +135,6 @@ PREVIOUS_COMPILED_RUNTIME_DIR=""
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-is_transient_repo_root() {
-  case "$1" in
-    /tmp/*|/private/tmp/*|/var/folders/*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-read_launchd_plist_string_early() {
-  local key="$1"
-  [ -f "$LAUNCHD_PLIST" ] || return 1
-  [ -x /usr/libexec/PlistBuddy ] || return 1
-  /usr/libexec/PlistBuddy -c "Print :${key}" "$LAUNCHD_PLIST" 2>/dev/null || return 1
-}
-
-select_launchd_project_root() {
-  if [ -n "${MISSIOND_LAUNCHD_PROJECT_ROOT:-}" ]; then
-    printf '%s\n' "$MISSIOND_LAUNCHD_PROJECT_ROOT"
-    return 0
-  fi
-  if is_transient_repo_root "$REPO_ROOT"; then
-    local existing_root
-    existing_root="$(read_launchd_plist_string_early "WorkingDirectory" || true)"
-    if [ -n "$existing_root" ] && ! is_transient_repo_root "$existing_root" && [ -d "$existing_root/.missiond/v3" ]; then
-      printf '[deploy-daemon] launchd: preserving existing stable project root %s; current repo root is transient %s\n' "$existing_root" "$REPO_ROOT" >&2
-      printf '%s\n' "$existing_root"
-      return 0
-    fi
-  fi
-  printf '%s\n' "$REPO_ROOT"
-}
-
-LAUNCHD_PROJECT_ROOT="$(select_launchd_project_root)"
-DEPLOY_OWNER_ROOT="${MISSIOND_DEPLOY_OWNER_ROOT:-$LAUNCHD_PROJECT_ROOT}"
-MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$DEPLOY_OWNER_ROOT}"
-MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER="${MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER:-0}"
-MISSIOND_RELEASE_SOURCE_SNAPSHOT="${MISSIOND_RELEASE_SOURCE_SNAPSHOT:-1}"
-REPO_ID="$(basename "$REPO_ROOT")"
-RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
-COMPILED_RUNTIME_DIR="${MISSIOND_COMPILED_RUNTIME_DIR:-${RUNTIME_DIR}/compiled}"
-export MISSIOND_RUNTIME_DIR="$RUNTIME_DIR"
-export MISSIOND_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"
-
 augment_managed_node_path() {
   local candidates=(
     "${HOME}/.local/share/node-v24.14.0-darwin-arm64/bin"
@@ -199,6 +160,111 @@ augment_managed_node_path() {
 }
 
 augment_managed_node_path
+
+is_transient_repo_root() {
+  case "$1" in
+    /tmp/*|/private/tmp/*|/var/folders/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+read_launchd_plist_string_early() {
+  local key="$1"
+  [ -f "$LAUNCHD_PLIST" ] || return 1
+  [ -x /usr/libexec/PlistBuddy ] || return 1
+  /usr/libexec/PlistBuddy -c "Print :${key}" "$LAUNCHD_PLIST" 2>/dev/null || return 1
+}
+
+active_release_manifest_path_early() {
+  local target manifest
+  [ -L "$ACTIVE_LINK" ] || return 1
+  target="$(readlink "$ACTIVE_LINK")" || return 1
+  case "$target" in
+    /*) ;;
+    *) target="$(cd "$(dirname "$ACTIVE_LINK")" && cd "$(dirname "$target")" && pwd -P)/$(basename "$target")" ;;
+  esac
+  manifest="$target/release-manifest.json"
+  [ -f "$manifest" ] || return 1
+  printf '%s\n' "$manifest"
+}
+
+read_active_manifest_string_early() {
+  local key="$1"
+  local manifest
+  command -v node >/dev/null 2>&1 || return 1
+  manifest="$(active_release_manifest_path_early)" || return 1
+  node - "$manifest" "$key" <<'NODE'
+const fs = require("node:fs");
+const [file, key] = process.argv.slice(2);
+const value = JSON.parse(fs.readFileSync(file, "utf8"))[key];
+if (typeof value !== "string") process.exit(2);
+process.stdout.write(value);
+NODE
+}
+
+is_stable_owner_root_candidate() {
+  local candidate="$1"
+  [ -n "$candidate" ] || return 1
+  ! is_transient_repo_root "$candidate" || return 1
+  [ -d "$candidate/.missiond/v3" ] || return 1
+  git -C "$candidate" rev-parse --show-toplevel >/dev/null 2>&1 || return 1
+}
+
+select_launchd_project_root() {
+  if [ -n "${MISSIOND_LAUNCHD_PROJECT_ROOT:-}" ]; then
+    printf '%s\n' "$MISSIOND_LAUNCHD_PROJECT_ROOT"
+    return 0
+  fi
+  if is_transient_repo_root "$REPO_ROOT"; then
+    local existing_root
+    existing_root="$(read_launchd_plist_string_early "WorkingDirectory" || true)"
+    if [ -n "$existing_root" ] && ! is_transient_repo_root "$existing_root" && [ -d "$existing_root/.missiond/v3" ]; then
+      printf '[deploy-daemon] launchd: preserving existing stable project root %s; current repo root is transient %s\n' "$existing_root" "$REPO_ROOT" >&2
+      printf '%s\n' "$existing_root"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$REPO_ROOT"
+}
+
+select_deploy_owner_root() {
+  if [ -n "${MISSIOND_DEPLOY_OWNER_ROOT:-}" ]; then
+    printf '%s\n' "$MISSIOND_DEPLOY_OWNER_ROOT"
+    return 0
+  fi
+
+  local active_owner_root
+  active_owner_root="$(read_active_manifest_string_early "release_owner_root" || true)"
+  if is_transient_repo_root "$REPO_ROOT" && is_stable_owner_root_candidate "$active_owner_root"; then
+    printf '[deploy-daemon] ownership: preserving active release owner root %s; current repo root is transient %s\n' "$active_owner_root" "$REPO_ROOT" >&2
+    printf '%s\n' "$active_owner_root"
+    return 0
+  fi
+  if is_stable_owner_root_candidate "$REPO_ROOT"; then
+    printf '%s\n' "$REPO_ROOT"
+    return 0
+  fi
+  if is_stable_owner_root_candidate "${LAUNCHD_PROJECT_ROOT:-}"; then
+    printf '[deploy-daemon] ownership: using stable launchd project root %s as deploy owner root\n' "$LAUNCHD_PROJECT_ROOT" >&2
+    printf '%s\n' "$LAUNCHD_PROJECT_ROOT"
+    return 0
+  fi
+  printf '%s\n' "$LAUNCHD_PROJECT_ROOT"
+}
+
+LAUNCHD_PROJECT_ROOT="$(select_launchd_project_root)"
+DEPLOY_OWNER_ROOT="$(select_deploy_owner_root)"
+MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$DEPLOY_OWNER_ROOT}"
+MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER="${MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER:-0}"
+MISSIOND_RELEASE_SOURCE_SNAPSHOT="${MISSIOND_RELEASE_SOURCE_SNAPSHOT:-1}"
+REPO_ID="$(basename "$REPO_ROOT")"
+RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
+COMPILED_RUNTIME_DIR="${MISSIOND_COMPILED_RUNTIME_DIR:-${RUNTIME_DIR}/compiled}"
+export MISSIOND_RUNTIME_DIR="$RUNTIME_DIR"
+export MISSIOND_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"
+
+log() { printf '[deploy-daemon] %s\n' "$*" >&2; }
+fail() { printf '[deploy-daemon] FAIL: %s\n' "$*" >&2; exit "${2:-1}"; }
 
 ensure_codex_app_cli_on_path() {
   if command -v codex >/dev/null 2>&1; then
@@ -234,9 +300,6 @@ case "$PROFILE" in
     ;;
   *) echo "unsupported profile: $PROFILE" >&2; exit 1 ;;
 esac
-
-log() { printf '[deploy-daemon] %s\n' "$*" >&2; }
-fail() { printf '[deploy-daemon] FAIL: %s\n' "$*" >&2; exit "${2:-1}"; }
 
 TIMING_NAMES=()
 TIMING_SECS=()

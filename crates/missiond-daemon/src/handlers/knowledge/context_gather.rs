@@ -247,6 +247,16 @@ fn optional_infra_os_disabled_diagnostic(source: &str) -> Value {
     })
 }
 
+fn diagnostics_have_hard_failures(diagnostics: &[Value]) -> bool {
+    diagnostics.iter().any(|diagnostic| {
+        diagnostic.get("error").is_some()
+            || diagnostic
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "feature_disabled")
+    })
+}
+
 fn load_evidence_lane_policy() -> (EvidenceLaneRuntimeConfig, String, Option<Value>) {
     match EvidenceLaneRuntimeConfig::load_for_current_dir() {
         Ok(policy) => (policy, "compiled-v3".to_string(), None),
@@ -770,7 +780,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         )
     });
     let mut payload = json!({
-            "ok": diagnostics.is_empty(),
+            "ok": !diagnostics_have_hard_failures(&diagnostics),
             "schema": "missiond.context-gather.v1",
             "query": query,
             "project_id": effective_project_id.clone(),
@@ -3145,7 +3155,7 @@ mod tests {
     use super::{
         build_evidence_items, build_evidence_lanes, build_source_summaries, build_support_catalog,
         collect_evidence_refs_from_value, context_gather_worker_visible_dir_for,
-        context_noise_metrics, context_pack_artifact_payload,
+        context_noise_metrics, context_pack_artifact_payload, diagnostics_have_hard_failures,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
         source_selection, ContextGatherArgs, SourceProfile,
     };
@@ -3257,6 +3267,22 @@ mod tests {
                 .and_then(Value::as_str),
             Some("feature_disabled")
         );
+    }
+
+    #[test]
+    fn infra_os_disabled_diagnostics_are_not_hard_context_failures() {
+        assert!(!diagnostics_have_hard_failures(&[
+            optional_infra_os_disabled_diagnostic("infra"),
+            optional_infra_os_disabled_diagnostic("credential_refs"),
+        ]));
+        assert!(diagnostics_have_hard_failures(&[json!({
+            "source": "project_registry",
+            "error": "not found"
+        })]));
+        assert!(diagnostics_have_hard_failures(&[json!({
+            "source": "infra",
+            "status": "unavailable"
+        })]));
     }
 
     #[test]

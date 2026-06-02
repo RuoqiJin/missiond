@@ -105,6 +105,8 @@ function checkFiles(root, files) {
     'Deploy scripts MUST emit timing for cargo-build',
     'Dev-only fast deploy may select debug profile and sccache',
     'Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root',
+    'Deploy owner root MUST default to the current stable git root',
+    'release source snapshots MUST NOT become the next release_owner_root',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
     'M6 MissionD formatting MUST be converged',
     'Rust formatter edition MUST be derived from workspace Cargo.toml',
@@ -158,6 +160,10 @@ function checkFiles(root, files) {
     'atomic_symlink_update',
     'switch_active_release',
     'assert_active_project_root_can_mutate',
+    'select_deploy_owner_root',
+    'read_active_manifest_string_early',
+    'is_stable_owner_root_candidate',
+    'preserving active release owner root',
     'project-root mutation guard verified',
     'active release belongs to another project root',
     'capture_launchd_runtime_state',
@@ -319,11 +325,13 @@ function buildFixture() {
        "Blue-green rollback MUST switch active back to the previous release."
        "Blue-green rollback MUST restore launchd WorkingDirectory, MISSIOND_PROJECT_ROOT, MISSIOND_RUNTIME_DIR, and MISSIOND_COMPILED_RUNTIME_DIR captured before the switch."
        "Release cleanup MUST keep active, previous, and newest retained releases."
+       "Socket readiness MUST be proven by bounded MCP initialize smoke."
        "IPC smoke MUST retry after socket readiness and then rollback on failure."
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT."
        "Deploy scripts MUST emit timing for cargo-build."
        "Dev-only fast deploy may select debug profile and sccache."
        "Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root."
+       "Deploy owner root MUST default to the current stable git root; release source snapshots MUST NOT become the next release_owner_root."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
        "M6 MissionD formatting MUST be converged."
        "Rust formatter edition MUST be derived from workspace Cargo.toml."
@@ -371,6 +379,10 @@ release-manifest.json
 atomic_symlink_update
 switch_active_release
 assert_active_project_root_can_mutate
+select_deploy_owner_root
+read_active_manifest_string_early
+is_stable_owner_root_candidate
+preserving active release owner root
 project-root mutation guard verified
 active release belongs to another project root
 capture_launchd_runtime_state
@@ -381,6 +393,9 @@ create_legacy_release_if_needed
 codesign_or_verify "$CANDIDATE_DIR/bin/missiond"
 codesign_or_verify "$CANDIDATE_DIR/bin/mission-mcp"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
+ready: IPC initialize succeeded
+[wait-smoke]
+socket exists but IPC initialize is not ready yet
 lsof "$SOCK_PATH"
 run_mcp_initialize_smoke()
 validate_default_mcp_config

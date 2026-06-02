@@ -234,6 +234,7 @@ function checkFiles(root, files) {
     'mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors',
     'skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor',
     'source_summaries.infra.status=feature_disabled',
+    'optional feature_disabled diagnostics MUST NOT set the top-level ok=false by themselves',
     'mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence',
     'deployment_closure_policy',
     'ReleaseLease',
@@ -976,6 +977,7 @@ function buildFixture() {
 		                 "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors"
 		                 "skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor"
 		                 "source_summaries.infra.status=feature_disabled"
+		                 "optional feature_disabled diagnostics MUST NOT set the top-level ok=false by themselves"
 		                 "mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence"
 		                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
 	                 "Board/task/workflow records are searchable retrieval evidence"
