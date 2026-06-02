@@ -997,7 +997,17 @@ fn evidence_matches_scope(
     {
         return true;
     }
-    evidence_scope_score(skill_name, skill_path, line, filter) > 0
+    let score = evidence_scope_score(skill_name, skill_path, line, filter);
+    if filter
+        .query
+        .as_deref()
+        .map(evidence_query_tokens)
+        .is_none_or(|tokens| tokens.is_empty())
+        && normalized_evidence_token(filter.project_id.as_deref()).is_none()
+    {
+        return score > 0;
+    }
+    score >= 2
 }
 
 fn evidence_scope_score(
@@ -1037,10 +1047,20 @@ fn evidence_scope_score(
         .map(evidence_query_tokens)
         .unwrap_or_default()
     {
+        let line_score = if is_weak_target_evidence_token(&term) {
+            1
+        } else {
+            8
+        };
+        let skill_score = if is_weak_target_evidence_token(&term) {
+            1
+        } else {
+            4
+        };
         if line_haystack.contains(&term) {
-            score += 8;
+            score += line_score;
         } else if skill_haystack.contains(&term) {
-            score += 4;
+            score += skill_score;
         }
     }
     if score == 0
@@ -1378,6 +1398,7 @@ fn credential_refs_filtered(
     if required_capability.is_none() && !credential_query_mentions_target(query) {
         return Vec::new();
     }
+    let target_terms = credential_target_terms(query);
     refs.into_iter()
         .filter(|item| {
             if let Some(required_capability) = required_capability {
@@ -1390,6 +1411,10 @@ fn credential_refs_filtered(
                 }
             }
             let haystack = item.to_string().to_ascii_lowercase();
+            if !target_terms.is_empty() && !target_terms.iter().any(|term| haystack.contains(term))
+            {
+                return false;
+            }
             terms.iter().any(|term| haystack.contains(term))
         })
         .collect()
@@ -1420,8 +1445,12 @@ fn credential_required_capability(query: Option<&str>) -> Option<&'static str> {
 }
 
 fn credential_query_mentions_target(query: Option<&str>) -> bool {
+    !credential_target_terms(query).is_empty()
+}
+
+fn credential_target_terms(query: Option<&str>) -> Vec<&'static str> {
     let Some(query) = query.map(str::to_ascii_lowercase) else {
-        return false;
+        return Vec::new();
     };
     [
         "gcp",
@@ -1434,12 +1463,24 @@ fn credential_query_mentions_target(query: Option<&str>) -> bool {
         "cloudflare",
         "dns",
     ]
-    .iter()
-    .any(|token| query.contains(token))
+    .into_iter()
+    .filter(|token| query.contains(token))
+    .collect()
 }
 
 fn evidence_query_tokens(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
+    let lower = query.to_ascii_lowercase();
+    for compound in [
+        ("deploy agent", "deploy-agent"),
+        ("deploy-agent", "deploy-agent"),
+        ("deploy center", "deploy-center"),
+        ("deploy-center", "deploy-center"),
+    ] {
+        if lower.contains(compound.0) {
+            tokens.push(compound.1.to_string());
+        }
+    }
     for raw in
         query.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
     {
@@ -1497,6 +1538,13 @@ fn is_generic_evidence_token(token: &str) -> bool {
             | "diagnostics"
             | "canary"
             | "access"
+    )
+}
+
+fn is_weak_target_evidence_token(token: &str) -> bool {
+    matches!(
+        token,
+        "gcp" | "ecs" | "bwg" | "vps" | "windows" | "aliyun" | "cloud"
     )
 }
 
@@ -1746,6 +1794,26 @@ mod tests {
             "/Users/jinchen/.claude/skills/tiermate/SKILL.md",
             "GCP deploy-agent endpoint and secret-store references",
             &deploy_runtime_filter,
+        ));
+
+        let gcp_agent_filter = InfraEvidenceFilter {
+            target_id: None,
+            skill: None,
+            query: Some("GCP deploy agent key for payments canary diagnostics".to_string()),
+            project_id: Some("payments".to_string()),
+            limit: 10,
+        };
+        assert!(evidence_matches_scope(
+            "xjp-deploy-agent",
+            "/Users/jinchen/.claude/skills/xjp-deploy-agent/SKILL.md",
+            "GCP tunnel API and deploy-agent diagnostics",
+            &gcp_agent_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "wepub",
+            "/Users/jinchen/.claude/skills/wepub/SKILL.md",
+            "Backend GCP /opt/wepub deployment notes",
+            &gcp_agent_filter,
         ));
     }
 
