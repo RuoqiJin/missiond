@@ -19,8 +19,8 @@ use super::types::{
     ProviderBoxStatus, ProviderControlAction, ProviderInteractionRequest, ProviderSessionIdentity,
     PtyObservation, PtyStepAction, PtyStepRecord, PtyStepVerificationStatus,
     DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
-    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
-    DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED, DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
+    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
     DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
 };
 
@@ -1275,7 +1275,10 @@ impl ClaudeCodeProviderDriver {
                     result,
                     slot_id,
                     Duration::from_secs(12),
-                    Some("wait for ClaudeCode composer after workspace trust confirmation".to_string()),
+                    Some(
+                        "wait for ClaudeCode composer after workspace trust confirmation"
+                            .to_string(),
+                    ),
                     is_ready_for_claude_code_text,
                 )
                 .await;
@@ -1319,7 +1322,8 @@ impl ClaudeCodeProviderDriver {
                     }),
                 ));
                 let status = self.pty.get_status(slot_id).await;
-                result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
                 return false;
             }
 
@@ -1336,7 +1340,8 @@ impl ClaudeCodeProviderDriver {
                     }),
                 ));
                 let status = self.pty.get_status(slot_id).await;
-                result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
                 return false;
             }
 
@@ -1392,11 +1397,8 @@ impl ClaudeCodeProviderDriver {
         let mut idle_seen_at: Option<Instant> = None;
 
         loop {
-            let analysis = analyze_claude_code_jsonl_after_cursor(
-                &self.claude_home,
-                session_id,
-                &cursor,
-            );
+            let analysis =
+                analyze_claude_code_jsonl_after_cursor(&self.claude_home, session_id, &cursor);
             if let Some(violation) = analysis.violation {
                 result.status = ProviderBoxStatus::Failed;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -1476,7 +1478,8 @@ impl ClaudeCodeProviderDriver {
                     }),
                 ));
                 let status = self.pty.get_status(slot_id).await;
-                result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
                 return false;
             }
 
@@ -1578,7 +1581,10 @@ impl ClaudeCodeProviderDriver {
         self.pty.init_slot(&slot).await;
 
         let mut extra_env = HashMap::new();
-        extra_env.insert("MISSIOND_PROVIDER_BOX_TEXT_ONLY".to_string(), "1".to_string());
+        extra_env.insert(
+            "MISSIOND_PROVIDER_BOX_TEXT_ONLY".to_string(),
+            "1".to_string(),
+        );
         extra_env.insert(
             "MISSIOND_PROVIDER_BOX_TEXT_PROVIDER".to_string(),
             CLAUDE_CODE_TEXT_PROVIDER.to_string(),
@@ -1655,10 +1661,7 @@ impl ClaudeCodeProviderDriver {
 
         let cursor = claude_code_jsonl_cursor_for_session(&self.claude_home, session_id);
         let prompt = claude_code_text_prompt(request.prompt.as_deref().unwrap_or_default());
-        if !self
-            .submit_text_only_prompt(result, slot_id, &prompt)
-            .await
-        {
+        if !self.submit_text_only_prompt(result, slot_id, &prompt).await {
             result.status = ProviderBoxStatus::Failed;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
@@ -1890,7 +1893,8 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
         result.provider = Some(CLAUDE_CODE_TEXT_PROVIDER.to_string());
         result.model = Some(source.model_id.to_string());
         result.model_profile = Some(source.effort.to_string());
-        self.run_text_only_source(request, &mut result, source).await;
+        self.run_text_only_source(request, &mut result, source)
+            .await;
         result
     }
 
@@ -2188,7 +2192,9 @@ fn is_claude_code_workspace_trust_prompt(observation: &ClaudeCodeObservation) ->
             .contains("Do you trust the contents of this project?")
 }
 
-fn selected_claude_code_workspace_trust_option(observation: &ClaudeCodeObservation) -> Option<String> {
+fn selected_claude_code_workspace_trust_option(
+    observation: &ClaudeCodeObservation,
+) -> Option<String> {
     observation.lines.iter().find_map(|line| {
         let trimmed = line.trim_start();
         if !(trimmed.starts_with('❯') || trimmed.starts_with('>')) {
@@ -2292,7 +2298,12 @@ fn find_claude_code_session_jsonl(claude_home: &Path, session_id: &str) -> Optio
         })
 }
 
-fn find_named_jsonl(root: &Path, filename: &str, depth: usize, max_depth: usize) -> Option<PathBuf> {
+fn find_named_jsonl(
+    root: &Path,
+    filename: &str,
+    depth: usize,
+    max_depth: usize,
+) -> Option<PathBuf> {
     if depth > max_depth {
         return None;
     }
@@ -2361,7 +2372,7 @@ fn json_value_has_disallowed_claude_code_tool_evidence(value: &Value) -> bool {
             }
             map.iter().any(|(key, value)| {
                 let key_lower = key.to_ascii_lowercase();
-                (key_lower.contains("mcp") && !value.is_null())
+                (key_lower.contains("mcp") && json_value_has_signal(value))
                     || json_value_has_disallowed_claude_code_tool_evidence(value)
             })
         }
@@ -2369,6 +2380,17 @@ fn json_value_has_disallowed_claude_code_tool_evidence(value: &Value) -> bool {
             .iter()
             .any(json_value_has_disallowed_claude_code_tool_evidence),
         _ => false,
+    }
+}
+
+fn json_value_has_signal(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(_) => true,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
     }
 }
 
@@ -2406,15 +2428,20 @@ fn claude_code_message_content_text(content: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::Write;
+
     use missiond_core::pty::recognize_screen;
     use missiond_core::types::CliEngine;
     use missiond_core::SessionState;
 
     use super::{
-        claude_code_permission_cycle_steps, claude_code_staged_command_matches,
+        analyze_claude_code_jsonl_after_cursor, claude_code_jsonl_cursor_for_session,
+        claude_code_jsonl_event_is_text_only_violation, claude_code_permission_cycle_steps,
+        claude_code_staged_command_matches, find_claude_code_session_jsonl,
         is_claude_code_logout_success, normalize_claude_code_model_target,
-        normalize_claude_code_permission_mode, ClaudeCodeModelTarget, ClaudeCodeObservation,
-        ClaudeCodePermissionMode,
+        normalize_claude_code_permission_mode, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,
+        ClaudeCodeObservation, ClaudeCodePermissionMode,
     };
 
     fn observation(lines: &[&str]) -> ClaudeCodeObservation {
@@ -2579,5 +2606,157 @@ mod tests {
             "⏵⏵ auto mode on (shift+tab to cycle)",
         ]);
         assert!(!is_claude_code_logout_success(&idle));
+    }
+
+    #[test]
+    fn claude_code_jsonl_scanner_extracts_assistant_end_turn_after_cursor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = "019e82f0-0000-7000-8000-000000000001";
+        let project_dir = temp
+            .path()
+            .join("projects")
+            .join("-Users-jinchen-Projects-missiond");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let jsonl = project_dir.join(format!("{session_id}.jsonl"));
+        fs::write(
+            &jsonl,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"old final\"}]}}\n",
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n"
+            ),
+        )
+        .expect("initial jsonl");
+        let cursor = claude_code_jsonl_cursor_for_session(temp.path(), session_id);
+        assert_eq!(cursor.path.as_deref(), Some(jsonl.as_path()));
+        assert!(cursor.offset > 0);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl)
+            .expect("open append")
+            .write_all(
+                br#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"marker final"}]}}"#,
+            )
+            .expect("append final");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl)
+            .expect("open newline")
+            .write_all(b"\n")
+            .expect("append newline");
+
+        let analysis = analyze_claude_code_jsonl_after_cursor(temp.path(), session_id, &cursor);
+
+        assert_eq!(analysis.final_text.as_deref(), Some("marker final"));
+        assert!(analysis.violation.is_none());
+        assert_eq!(analysis.line_count, 1);
+    }
+
+    #[test]
+    fn claude_code_jsonl_scanner_finds_session_file_without_cwd_encoding() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = "019e82f0-0000-7000-8000-000000000002";
+        let nested = temp
+            .path()
+            .join("projects")
+            .join("arbitrary")
+            .join("encoded")
+            .join("path");
+        fs::create_dir_all(&nested).expect("nested");
+        let jsonl = nested.join(format!("{session_id}.jsonl"));
+        fs::write(&jsonl, "{}\n").expect("jsonl");
+
+        assert_eq!(
+            find_claude_code_session_jsonl(temp.path(), session_id).as_deref(),
+            Some(jsonl.as_path())
+        );
+    }
+
+    #[test]
+    fn claude_code_jsonl_scanner_detects_tool_and_web_mcp_violations() {
+        for event in [
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Read"}]
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1"}]
+                }
+            }),
+            serde_json::json!({
+                "toolUseResult": {"stdout": "ok"}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "done"}]
+                },
+                "web_search_requests": [{"query": "weather"}]
+            }),
+            serde_json::json!({
+                "mcpServer": "missiond"
+            }),
+        ] {
+            assert!(
+                claude_code_jsonl_event_is_text_only_violation(&event),
+                "expected violation for {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_code_jsonl_scanner_allows_empty_mcp_metadata() {
+        let event = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "plain final"}]
+            },
+            "mcpServers": [],
+            "mcp": {}
+        });
+
+        assert!(!claude_code_jsonl_event_is_text_only_violation(&event));
+    }
+
+    #[test]
+    fn claude_code_jsonl_scanner_reports_violation_before_returning_final() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = "019e82f0-0000-7000-8000-000000000003";
+        let project_dir = temp.path().join("projects").join("missiond");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let jsonl = project_dir.join(format!("{session_id}.jsonl"));
+        fs::write(
+            &jsonl,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\"}]}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"should not be trusted\"}]}}\n"
+            ),
+        )
+        .expect("jsonl");
+
+        let analysis = analyze_claude_code_jsonl_after_cursor(
+            temp.path(),
+            session_id,
+            &ClaudeCodeJsonlCursor {
+                path: None,
+                offset: 0,
+            },
+        );
+
+        assert!(analysis.violation.is_some());
+        assert_eq!(
+            analysis.final_text.as_deref(),
+            Some("should not be trusted")
+        );
     }
 }

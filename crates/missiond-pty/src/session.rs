@@ -385,6 +385,7 @@ pub enum SessionEvent {
 ///
 /// Each engine has different binary, arguments, and flag support.
 /// The working directory is set via CommandBuilder::cwd(), not via CLI flags.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_cli_command(
     engine: missiond_shared::CliEngine,
     cwd: &std::path::Path,
