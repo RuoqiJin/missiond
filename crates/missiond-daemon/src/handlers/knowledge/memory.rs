@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::info;
 
 use crate::context::v3_blueprint_runtime::{
@@ -1095,30 +1096,31 @@ async fn call_xjp_memory(
     path: &str,
     payload: Option<Value>,
 ) -> Result<ToolResult> {
-    let url = format!("{base_url}{path}");
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .pool_max_idle_per_host(0)
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| anyhow!("failed to build xjp-memory client: {e}"))?;
-    let mut request = client.request(method, &url);
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
-    if let Some(payload) = payload {
-        request = request.json(&payload);
-    }
-    let response = request.send().await?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let endpoint = match parse_xjp_memory_http_endpoint(base_url, path) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("MEMORY_PROVIDER_UNSUPPORTED_URL", error.to_string())
+                    .with_suggestion(
+                        "Use a local http://host:port xjp-memory provider URL, or route this operation through the local compatibility provider.",
+                    ),
+            ));
+        }
+    };
+
+    let body = payload
+        .map(|value| serde_json::to_string(&value))
+        .transpose()?
+        .unwrap_or_default();
+    let response = xjp_memory_direct_http(&endpoint, token, method.as_str(), &body).await?;
+    let status_code = response.status_code;
+    let body = response.body;
     let parsed = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({ "raw": body }));
-    if !status.is_success() {
+    if !(200..300).contains(&status_code) {
         return Ok(ToolResult::structured_error(
             ToolError::new(
                 "MEMORY_PROVIDER_HTTP_ERROR",
-                format!("xjp-memory returned HTTP {status} for {path}"),
+                format!("xjp-memory returned HTTP {status_code} for {path}"),
             )
             .with_suggestion(format!(
                 "Check {MEMORY_PROVIDER_URL_ENV}, provider health, and secret-store token configuration."
@@ -1128,8 +1130,154 @@ async fn call_xjp_memory(
     Ok(ToolResult::json_pretty(&json!({
         "provider": "xjp-memory",
         "path": path,
+        "transport": "direct-http-loopback",
         "response": parsed,
     })))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct XjpMemoryHttpEndpoint {
+    host: String,
+    port: u16,
+    host_header: String,
+    request_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct XjpMemoryHttpResponse {
+    status_code: u16,
+    body: String,
+}
+
+fn parse_xjp_memory_http_endpoint(base_url: &str, path: &str) -> Result<XjpMemoryHttpEndpoint> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let without_scheme = trimmed.strip_prefix("http://").ok_or_else(|| {
+        anyhow!(
+            "xjp-memory direct transport only supports http:// provider URLs; got {base_url}"
+        )
+    })?;
+    let (authority, base_path) = without_scheme
+        .split_once('/')
+        .map(|(authority, rest)| (authority, format!("/{rest}")))
+        .unwrap_or((without_scheme, String::new()));
+    if authority.trim().is_empty() {
+        return Err(anyhow!("xjp-memory provider URL is missing host"));
+    }
+
+    let (host, port) = parse_http_authority(authority)?;
+    let request_path = if base_path.is_empty() {
+        path.to_string()
+    } else {
+        format!("{base_path}{path}")
+    };
+    Ok(XjpMemoryHttpEndpoint {
+        host: host.clone(),
+        port,
+        host_header: if authority.contains(':') {
+            authority.to_string()
+        } else {
+            format!("{host}:{port}")
+        },
+        request_path,
+    })
+}
+
+fn parse_http_authority(authority: &str) -> Result<(String, u16)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| anyhow!("invalid bracketed IPv6 host in xjp-memory provider URL"))?;
+        let port = tail
+            .strip_prefix(':')
+            .map(parse_http_port)
+            .transpose()?
+            .unwrap_or(80);
+        return Ok((host.to_string(), port));
+    }
+    let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.contains(':') {
+            (authority.to_string(), 80)
+        } else {
+            (host.to_string(), parse_http_port(port)?)
+        }
+    } else {
+        (authority.to_string(), 80)
+    };
+    if host.trim().is_empty() {
+        return Err(anyhow!("xjp-memory provider URL is missing host"));
+    }
+    Ok((host, port))
+}
+
+fn parse_http_port(port: &str) -> Result<u16> {
+    port.parse::<u16>()
+        .map_err(|_| anyhow!("invalid xjp-memory provider port: {port}"))
+}
+
+async fn xjp_memory_direct_http(
+    endpoint: &XjpMemoryHttpEndpoint,
+    token: Option<&str>,
+    method: &str,
+    body: &str,
+) -> Result<XjpMemoryHttpResponse> {
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+    )
+    .await
+    .map_err(|_| anyhow!("xjp-memory connect timed out"))??;
+
+    let auth_header = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    let content_type = if body.is_empty() {
+        String::new()
+    } else {
+        "Content-Type: application/json\r\n".to_string()
+    };
+    let request = format!(
+        "{method} {} HTTP/1.1\r\nHost: {}\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        endpoint.request_path,
+        endpoint.host_header,
+        auth_header,
+        content_type,
+        body.len(),
+        body
+    );
+    tokio::time::timeout(Duration::from_secs(3), stream.write_all(request.as_bytes()))
+        .await
+        .map_err(|_| anyhow!("xjp-memory request write timed out"))??;
+
+    let mut response_bytes = Vec::new();
+    let mut limited = stream.take(2 * 1024 * 1024);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        limited.read_to_end(&mut response_bytes),
+    )
+    .await
+    .map_err(|_| anyhow!("xjp-memory response read timed out"))??;
+    parse_direct_http_response(&response_bytes)
+}
+
+fn parse_direct_http_response(bytes: &[u8]) -> Result<XjpMemoryHttpResponse> {
+    let split = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("xjp-memory response missing HTTP header terminator"))?;
+    let headers = std::str::from_utf8(&bytes[..split])
+        .map_err(|_| anyhow!("xjp-memory response headers were not UTF-8"))?;
+    let status_line = headers
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("xjp-memory response missing status line"))?;
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow!("xjp-memory response missing status code"))?
+        .parse::<u16>()
+        .map_err(|_| anyhow!("xjp-memory response status code was invalid"))?;
+    let body = String::from_utf8_lossy(&bytes[split + 4..]).to_string();
+    Ok(XjpMemoryHttpResponse { status_code, body })
 }
 
 async fn handle_provider_status(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -2127,10 +2275,10 @@ mod tests {
     use super::{
         classify_memory_input_noise, compiled_deployment_closure_evidence_item,
         compiled_support_catalog_evidence_item, evidence_promotion_requires_bound,
-        get_string_list_any, promotion_bound_present, provider_evidence_search_payload,
-        provider_query_payload, provider_remember_payload, source_matches_any,
-        source_requests_compiled_authority, CompiledServiceRuntimeEntry,
-        CompiledServiceSupportCatalog, MemoryProviderSelection,
+        get_string_list_any, parse_direct_http_response, parse_xjp_memory_http_endpoint,
+        promotion_bound_present, provider_evidence_search_payload, provider_query_payload,
+        provider_remember_payload, source_matches_any, source_requests_compiled_authority,
+        CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog, MemoryProviderSelection,
     };
     use serde_json::json;
     use std::path::Path;
@@ -2347,5 +2495,27 @@ mod tests {
         assert_eq!(payload["provider"], "xjp-memory");
         assert_eq!(payload["configured"], true);
         assert_eq!(payload["mode"], "remote-provider");
+    }
+
+    #[test]
+    fn direct_http_endpoint_parser_preserves_provider_path_prefix() {
+        let endpoint =
+            parse_xjp_memory_http_endpoint("http://127.0.0.1:8091/provider", "/v1/status")
+                .expect("endpoint");
+        assert_eq!(endpoint.host, "127.0.0.1");
+        assert_eq!(endpoint.port, 8091);
+        assert_eq!(endpoint.host_header, "127.0.0.1:8091");
+        assert_eq!(endpoint.request_path, "/provider/v1/status");
+        assert!(parse_xjp_memory_http_endpoint("https://memory.example", "/v1/status").is_err());
+    }
+
+    #[test]
+    fn direct_http_response_parser_extracts_status_and_body() {
+        let response = parse_direct_http_response(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"ok\":true}",
+        )
+        .expect("response");
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, "{\"ok\":true}");
     }
 }

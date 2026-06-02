@@ -92,7 +92,7 @@
          :entry [V3-compiled-runtime env-config mission_memory.provider_status]
          :core ((step s1 :logic "load provider declarations and active provider selection from MISSIOND_MEMORY_PROVIDER_URL / MISSIOND_MEMORY_PROVIDER_MODE")
                 (step s2 :logic "validate provider capabilities against requested operation")
-                (step s3 :logic "return a configuration snapshot by default; call /v1/memory/provider_status for xjp-memory providers only when probe=true, or return explicit null/local compatibility diagnostics"))
+                (step s3 :logic "return a configuration snapshot by default; use bounded direct HTTP loopback transport for xjp-memory provider calls and only probe /v1/memory/provider_status when probe=true; otherwise return explicit null/local compatibility diagnostics"))
          :egress [MemoryProviderConfig provider-status])
        (function memory-scope-resolution
          :entry [BoardTask project-registry user-request active-universe]
