@@ -9,4 +9,8 @@
            (event fix
              :at "2026-06-02T18:35:00Z"
              :actor codex
-             :summary "Box local_evidence_backfill_response and context_gather::handle futures so compiled authority prewarm stays stack-isolated from skill/context-gather branches; V3 SSOT and checker now require this runtime-stack guard.")))
+             :summary "Box local_evidence_backfill_response and context_gather::handle futures so compiled authority prewarm stays stack-isolated from skill/context-gather branches; V3 SSOT and checker now require this runtime-stack guard.")
+           (event search-quality-fix
+             :at "2026-06-02T18:48:00Z"
+             :actor codex
+             :summary "mission_memory evidence_search now dedupes repeated context_gather/backfill projections by lane/source/project, and compiled authority backfill emits compact service/support evidence_refs instead of wide runtime payloads.")))

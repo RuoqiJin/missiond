@@ -125,7 +125,8 @@
          :core ((step s1 :logic "resolve scope and profile before retrieval")
                 (step s2 :logic "filter allowed evidence lanes before FTS/vector/rerank")
                 (step s3 :logic "return compact EvidenceItem projections with provenance and raw_policy")
-                (step s4 :logic "MissionD authority evidence lanes are served from local evidence_items even when xjp-memory is configured as the remote memory provider"))
+                (step s4 :logic "MissionD authority evidence lanes are served from local evidence_items even when xjp-memory is configured as the remote memory provider")
+                (step s5 :logic "dedupe repeated context_gather/backfill projections by lane/source/project before returning search results"))
          :egress [evidence_items])
        (function memory-evidence-promotion-contract
          :entry [mission_memory.evidence_promote memory-review-batch-runner]
@@ -141,7 +142,8 @@
                 (step s3 :logic "index skill/support evidence through compact evidence_items and skill_evidence_items projections")
                 (step s4 :logic "credential_refs are counted only unless include_credentials=true; secret values are never indexed")
                 (step s5 :logic "mark conversation/skill derived facts needs_review until explicit promotion")
-                (step s6 :logic "isolate large async context-gather futures from project/support authority backfill so compiled authority prewarm cannot stack-overflow daemon worker threads"))
+                (step s6 :logic "isolate large async context-gather futures from project/support authority backfill so compiled authority prewarm cannot stack-overflow daemon worker threads")
+                (step s7 :logic "backfill evidence_refs stay compact, keeping service/support key fields instead of whole runtime payloads"))
          :egress [conversation_episodes conversation_fact_extracts skill_evidence_items evidence_items])
        (function memory-context-injection-policy
          :entry [resident-master context-pack-builder worker-brief]

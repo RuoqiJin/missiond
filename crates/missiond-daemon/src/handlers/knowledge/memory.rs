@@ -801,20 +801,35 @@ fn redacted_service_runtime_ref(
         "id": service.id,
         "project": service.project,
         "root": service.root,
-        "intent": service.intent,
-        "backend": service.backend,
-        "frontend": service.frontend,
-        "operations": service.operations,
         "environment": service.environment,
-        "public_base_url": service.public_base_url,
-        "frontend_url": service.frontend_url,
         "api_base_url": service.api_base_url,
         "domains": service.domains,
         "health": service.health,
-        "dependencies": service.dependencies,
-        "ops_capability": service.ops_capability,
         "surface": service.surface,
-        "support_catalog": redacted_support_catalog_ref(
+        "deploy_center_slug": service.support_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.deploy_center_slug.as_deref()),
+        "runtime_target": service.support_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.runtime_target.as_deref()),
+        "container": service.support_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.container.as_deref()),
+        "service_manifest_refs": service.support_catalog
+            .as_ref()
+            .map(|catalog| catalog.service_manifest_refs.clone())
+            .unwrap_or_default(),
+        "db_migration_namespace": service.support_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.db_migration_namespace.as_deref()),
+        "database_namespace": service.support_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.database_namespace.as_deref()),
+        "credential_ref_count": service.support_catalog
+            .as_ref()
+            .map(|catalog| catalog.credential_refs.len())
+            .unwrap_or(0),
+        "credential_refs": redacted_credential_refs(
             service.support_catalog.as_ref(),
             include_credentials,
         ),
@@ -843,22 +858,37 @@ fn redacted_support_catalog_ref(
         "service_id": catalog.service_id,
         "project_id": catalog.project_id,
         "domains": catalog.domains,
-        "public_base_url": catalog.public_base_url,
-        "frontend_url": catalog.frontend_url,
         "api_base_url": catalog.api_base_url,
         "health": catalog.health,
-        "dependencies": catalog.dependencies,
         "deploy_center_slug": catalog.deploy_center_slug,
         "runtime_target": catalog.runtime_target,
         "executor": catalog.executor,
         "container": catalog.container,
         "service_manifest_refs": catalog.service_manifest_refs,
-        "source_evidence": catalog.source_evidence,
         "db_migration_namespace": catalog.db_migration_namespace,
         "database_namespace": catalog.database_namespace,
         "credential_ref_count": catalog.credential_refs.len(),
         "credential_refs": credential_refs,
     })
+}
+
+fn redacted_credential_refs(
+    catalog: Option<&CompiledServiceSupportCatalog>,
+    include_credentials: bool,
+) -> Value {
+    let Some(catalog) = catalog else {
+        return Value::Null;
+    };
+    if !include_credentials {
+        return Value::Null;
+    }
+    Value::Array(
+        catalog
+            .credential_refs
+            .iter()
+            .map(|value| json!({"ref": value, "redacted": true}))
+            .collect(),
+    )
 }
 
 fn compiled_deployment_policy_for_backfill(
@@ -1444,6 +1474,7 @@ fn provider_evidence_search_payload(args: &Value) -> Value {
 }
 
 async fn local_evidence_search_response(state: &AppState, args: &Value) -> Result<Value> {
+    let requested_limit = get_i64_any(args, &["limit"]).unwrap_or(20).clamp(1, 100);
     let input = EvidenceSearchInput {
         query: get_string_any(args, &["query"])
             .unwrap_or_default()
@@ -1453,13 +1484,16 @@ async fn local_evidence_search_response(state: &AppState, args: &Value) -> Resul
             .map(ToOwned::to_owned),
         task_id: get_string_any(args, &["taskId", "task_id"]).map(ToOwned::to_owned),
         include_global: get_bool_any(args, &["include_global", "includeGlobal"]).unwrap_or(true),
-        limit: get_i64_any(args, &["limit"]).unwrap_or(20).clamp(1, 100),
+        limit: (requested_limit * 3).clamp(1, 100),
     };
-    let items = state
+    let raw_items = state
         .store
         .search_evidence_items(&input)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
+    let raw_hit_count = raw_items.len();
+    let (items, deduplicated_count) =
+        dedupe_evidence_search_items(raw_items, requested_limit as usize);
     Ok(json!({
         "ok": true,
         "schema": "missiond.memory-evidence-search.v1",
@@ -1471,9 +1505,46 @@ async fn local_evidence_search_response(state: &AppState, args: &Value) -> Resul
         "project_id": input.project_id,
         "task_id": input.task_id,
         "include_global": input.include_global,
+        "limit": requested_limit,
+        "raw_hit_count": raw_hit_count,
+        "deduplicated_count": deduplicated_count,
         "count": items.len(),
         "items": items,
     }))
+}
+
+fn dedupe_evidence_search_items(
+    items: Vec<EvidenceItemInput>,
+    limit: usize,
+) -> (Vec<EvidenceItemInput>, usize) {
+    let mut seen = BTreeSet::new();
+    let mut deduplicated_count = 0usize;
+    let mut out = Vec::new();
+    for item in items {
+        let key = evidence_search_dedupe_key(&item);
+        if !seen.insert(key) {
+            deduplicated_count += 1;
+            continue;
+        }
+        out.push(item);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    (out, deduplicated_count)
+}
+
+fn evidence_search_dedupe_key(item: &EvidenceItemInput) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        item.lane_id,
+        item.source_type,
+        item.project_id
+            .as_deref()
+            .or(item.source_id.as_deref())
+            .unwrap_or(""),
+        item.task_id.as_deref().unwrap_or("")
+    )
 }
 
 async fn handle_provider_evidence_search(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -2274,11 +2345,12 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_memory_input_noise, compiled_deployment_closure_evidence_item,
-        compiled_support_catalog_evidence_item, evidence_promotion_requires_bound,
-        get_string_list_any, parse_direct_http_response, parse_xjp_memory_http_endpoint,
-        promotion_bound_present, provider_evidence_search_payload, provider_query_payload,
-        provider_remember_payload, source_matches_any, source_requests_compiled_authority,
+        backfill_evidence_item, classify_memory_input_noise,
+        compiled_deployment_closure_evidence_item, compiled_support_catalog_evidence_item,
+        dedupe_evidence_search_items, evidence_promotion_requires_bound, get_string_list_any,
+        parse_direct_http_response, parse_xjp_memory_http_endpoint, promotion_bound_present,
+        provider_evidence_search_payload, provider_query_payload, provider_remember_payload,
+        redacted_service_runtime_ref, source_matches_any, source_requests_compiled_authority,
         CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog, MemoryProviderSelection,
     };
     use serde_json::json;
@@ -2466,6 +2538,51 @@ mod tests {
         assert!(item.summary.contains("canary smoke"));
         assert!(item.summary.contains("binary marker"));
         assert!(item.evidence_refs.to_string().contains("old binary"));
+    }
+
+    #[test]
+    fn service_runtime_backfill_refs_stay_compact() {
+        let refs = redacted_service_runtime_ref(&payments_service_fixture(), false);
+        assert_eq!(refs["id"], "payments");
+        assert_eq!(refs["deploy_center_slug"], "xjp-payments");
+        assert_eq!(
+            refs["service_manifest_refs"][0],
+            "services/payments/service.manifest.toml"
+        );
+        assert_eq!(refs["credential_ref_count"], 1);
+        assert!(refs.get("dependencies").is_none());
+        assert!(refs.get("support_catalog").is_none());
+        assert_eq!(refs["credential_refs"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn evidence_search_dedupes_duplicate_projection_sources() {
+        let first = backfill_evidence_item(
+            "support_refs",
+            "deployment_closure_policy",
+            Some("payments"),
+            None,
+            Some("payments"),
+            "Deployment closure policy".to_string(),
+            "compact context-gather projection".to_string(),
+            json!({"projection": "mission_context_gather.compact_evidence"}),
+        );
+        let duplicate = backfill_evidence_item(
+            "support_refs",
+            "deployment_closure_policy",
+            Some("payments"),
+            Some("/srv/payments"),
+            Some("payments"),
+            "Deployment closure policy: payments".to_string(),
+            "compiled authority backfill projection".to_string(),
+            json!({"projection": "mission_memory.evidence_backfill.compiled_authority"}),
+        );
+
+        let kept_id = first.id.clone();
+        let (items, dropped) = dedupe_evidence_search_items(vec![first, duplicate], 10);
+        assert_eq!(items.len(), 1);
+        assert_eq!(dropped, 1);
+        assert_eq!(items[0].id, kept_id);
     }
 
     #[test]
