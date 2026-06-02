@@ -1034,8 +1034,8 @@ fn evidence_scope_score(
 
     let project_token = normalized_evidence_token(filter.project_id.as_deref());
     if let Some(project) = project_token.as_deref() {
-        if project != "missiond" && haystack.contains(&project) {
-            score += if line_haystack.contains(&project) {
+        if project != "missiond" && contains_evidence_token(&haystack, project) {
+            score += if contains_evidence_token(&line_haystack, project) {
                 4
             } else {
                 2
@@ -1061,9 +1061,9 @@ fn evidence_scope_score(
         } else {
             4
         };
-        if line_haystack.contains(&term) {
+        if contains_evidence_token(&line_haystack, &term) {
             score += line_score;
-        } else if skill_haystack.contains(&term) {
+        } else if contains_evidence_token(&skill_haystack, &term) {
             score += skill_score;
         }
     }
@@ -1079,6 +1079,49 @@ fn evidence_scope_score(
         return 1;
     }
     score
+}
+
+fn contains_evidence_token(haystack: &str, token: &str) -> bool {
+    if token
+        .chars()
+        .any(|ch| matches!(ch, '-' | '_' | '.' | '/'))
+    {
+        return haystack.contains(token);
+    }
+
+    let bytes = haystack.as_bytes();
+    let needle = token.as_bytes();
+    if needle.is_empty() || bytes.len() < needle.len() {
+        return false;
+    }
+    for idx in 0..=bytes.len() - needle.len() {
+        if &bytes[idx..idx + needle.len()] != needle {
+            continue;
+        }
+        let before = idx.checked_sub(1).and_then(|pos| bytes.get(pos)).copied();
+        let after = bytes.get(idx + needle.len()).copied();
+        if before.is_none_or(|ch| !is_evidence_word_byte(ch))
+            && after.is_none_or(|ch| !is_evidence_word_byte(ch))
+        {
+            return true;
+        }
+        if token.len() > 3
+            && token.bytes().all(|ch| ch.is_ascii_alphabetic())
+            && after == Some(b's')
+        {
+            let plural_after = bytes.get(idx + needle.len() + 1).copied();
+            if before.is_none_or(|ch| !is_evidence_word_byte(ch))
+                && plural_after.is_none_or(|ch| !is_evidence_word_byte(ch))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_evidence_word_byte(ch: u8) -> bool {
+    ch.is_ascii_alphanumeric() || ch == b'_'
 }
 
 fn is_infra_evidence_line(line: &str) -> bool {
@@ -1802,6 +1845,18 @@ mod tests {
             "tiermate",
             "/Users/jinchen/.claude/skills/tiermate/SKILL.md",
             "GCP deploy-agent endpoint and secret-store references",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "astrill-gateway",
+            "/Users/jinchen/.claude/skills/astrill-gateway/SKILL.md",
+            "Router/Gateway 192.168.80.254 ARP flux and gateway-iptables.sh diagnostics",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "openclaw",
+            "/Users/jinchen/.claude/skills/openclaw/SKILL.md",
+            "OpenAI-compatible API model routing backend notes",
             &filter,
         ));
         assert!(evidence_matches_scope(
