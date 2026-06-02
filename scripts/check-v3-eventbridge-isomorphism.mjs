@@ -14,7 +14,7 @@ const checks = [
   ['crates/missiond-core/src/ws/server.rs', ['/webhooks/deploy-center-event', 'require_event_id', '_envelope']],
   ['crates/missiond-daemon/src/bus/bootstrap.rs', ['publish_system_webhook', 'external_service_dedupe_key']],
   ['crates/missiond-daemon/src/bus/v2_subscribers.rs', ['deployment_event_response', 'deployment_event_is_actionable', 'agent_update_failed', 'deployment-event-response', '- task_class: deploy-ops', '- pool_hint: claude-code-deploy-ops', 'xjp_build_wait/xjp_deploy_watch', 'router_event_board_task_input', 'router_event_is_actionable', '- task_class: router-ops', 'provider_auth_failure_burst']],
-  ['crates/missiond-daemon/src/handlers/knowledge/context_gather.rs', ['deployment_event_kind_is_relevant', 'workflow_run_created', 'workflow_job_succeeded', 'artifact_recorded']],
+  ['crates/missiond-daemon/src/handlers/knowledge/context_gather.rs', ['deployment_event_kind_is_relevant', 'workflow_run_created', 'workflow_job_succeeded', 'artifact_recorded', 'accepted_event_kinds', 'observed_candidates']],
   ['crates/missiond-daemon/src/handlers/comm/timeline.rs', ['project_id', 'correlation_id', 'external_payload_field_matches']],
   ['crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs', ['project-registry-reconcile.v1', 'root_mismatch', 'deploy_fact_missing']],
   ['crates/missiond-mcp/src/tools/knowledge/project.rs', ['reconcile', 'deployCenterRoot', 'forgeRoot']],

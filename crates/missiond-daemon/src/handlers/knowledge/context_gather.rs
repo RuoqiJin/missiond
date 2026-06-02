@@ -2513,6 +2513,7 @@ async fn deployment_events_source(
     {
         Ok(rows) => {
             let candidate_count = rows.len();
+            let observed_candidates = deployment_event_observed_candidate_summary(&rows);
             let mut events = Vec::new();
             let mut matching_count = 0usize;
             let mut drop_reason_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -2567,6 +2568,8 @@ async fn deployment_events_source(
                 "filters": filters,
                 "filter_before_injection": true,
                 "candidate_count": candidate_count,
+                "accepted_event_kinds": DEPLOYMENT_EVENT_RELEVANT_KINDS,
+                "observed_candidates": observed_candidates,
                 "filtered_count": matching_count,
                 "returned_count": events.len(),
                 "dropped_count": candidate_count.saturating_sub(matching_count),
@@ -2588,6 +2591,8 @@ async fn deployment_events_source(
             "filters": filters,
             "filter_before_injection": true,
             "candidate_count": 0,
+            "accepted_event_kinds": DEPLOYMENT_EVENT_RELEVANT_KINDS,
+            "observed_candidates": deployment_event_empty_observed_candidate_summary(),
             "filtered_count": 0,
             "returned_count": 0,
             "dropped_count": 0,
@@ -2598,6 +2603,129 @@ async fn deployment_events_source(
             "diagnostic": format!("deployment event_log query failed: {err}"),
         }),
     }
+}
+
+const DEPLOYMENT_EVENT_RELEVANT_KINDS: &[&str] = &[
+    "deploy_created",
+    "build_started",
+    "build_succeeded",
+    "build_failed",
+    "deploy_started",
+    "deploy_succeeded",
+    "deploy_failed",
+    "workflow_run_created",
+    "workflow_job_started",
+    "workflow_job_succeeded",
+    "workflow_job_failed",
+    "workflow_job_cancelled",
+    "workflow_job_lease_expired",
+    "artifact_recorded",
+    "smoke_succeeded",
+    "smoke_failed",
+    "rollback_started",
+    "rollback_succeeded",
+    "rollback_failed",
+    "agent_heartbeat",
+    "agent_offline",
+    "agent_update_started",
+    "agent_update_succeeded",
+    "agent_update_failed",
+    "provenance_changed",
+    "closure_verdict",
+];
+
+fn deployment_event_empty_observed_candidate_summary() -> Value {
+    json!({
+        "candidate_count": 0,
+        "deploy_center_candidate_count": 0,
+        "accepted_kind_candidate_count": 0,
+        "observed_deploy_center_source": false,
+        "observed_accepted_deploy_kind": false,
+        "producer_service_counts": {},
+        "event_kind_counts": {},
+        "event_source_counts": {},
+        "event_authority_counts": {},
+    })
+}
+
+fn deployment_event_observed_candidate_summary(rows: &[missiond_core::db::TimelineRow]) -> Value {
+    let mut producer_service_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut event_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut event_source_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut event_authority_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut deploy_center_candidate_count = 0usize;
+    let mut accepted_kind_candidate_count = 0usize;
+
+    for row in rows {
+        let payload = serde_json::from_str::<Value>(&row.payload).ok();
+        let payload_json = payload
+            .as_ref()
+            .and_then(|value| text_field(value, "payload_json"))
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        let envelope = payload_json
+            .as_ref()
+            .and_then(|value| value.get("_envelope"));
+        let producer_service_id = text_from_sources(
+            &[payload.as_ref()],
+            &["service_id", "serviceId", "producer_service_id"],
+        )
+        .unwrap_or_else(|| "unknown".to_string());
+        let event_kind =
+            text_from_sources(&[payload.as_ref()], &["event_kind", "eventKind", "kind"])
+                .unwrap_or_else(|| "unknown".to_string());
+        let event_source = text_from_sources(
+            &[envelope, payload_json.as_ref(), payload.as_ref()],
+            &["source"],
+        )
+        .unwrap_or_else(|| "unknown".to_string());
+        let event_authority = text_from_sources(
+            &[envelope, payload_json.as_ref(), payload.as_ref()],
+            &["authority"],
+        )
+        .unwrap_or_else(|| "unknown".to_string());
+
+        *producer_service_counts
+            .entry(producer_service_id.clone())
+            .or_default() += 1;
+        *event_kind_counts.entry(event_kind.clone()).or_default() += 1;
+        *event_source_counts.entry(event_source).or_default() += 1;
+        *event_authority_counts.entry(event_authority).or_default() += 1;
+
+        if deployment_event_kind_is_relevant(&event_kind) {
+            accepted_kind_candidate_count += 1;
+        }
+        let event_id =
+            text_from_sources(&[payload.as_ref()], &["event_id", "eventId"]).unwrap_or_default();
+        if deployment_event_has_deploy_center_authority(&producer_service_id, &event_id, envelope) {
+            deploy_center_candidate_count += 1;
+        }
+    }
+
+    json!({
+        "candidate_count": rows.len(),
+        "deploy_center_candidate_count": deploy_center_candidate_count,
+        "accepted_kind_candidate_count": accepted_kind_candidate_count,
+        "observed_deploy_center_source": deploy_center_candidate_count > 0,
+        "observed_accepted_deploy_kind": accepted_kind_candidate_count > 0,
+        "producer_service_counts": deployment_event_count_object(producer_service_counts, 8),
+        "event_kind_counts": deployment_event_count_object(event_kind_counts, 12),
+        "event_source_counts": deployment_event_count_object(event_source_counts, 8),
+        "event_authority_counts": deployment_event_count_object(event_authority_counts, 8),
+    })
+}
+
+fn deployment_event_count_object(counts: BTreeMap<String, usize>, limit: usize) -> Value {
+    let mut entries = counts.into_iter().collect::<Vec<_>>();
+    entries.sort_by(|(left_key, left_count), (right_key, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_key.cmp(right_key))
+    });
+    let mut map = serde_json::Map::new();
+    for (key, count) in entries.into_iter().take(limit) {
+        map.insert(key, json!(count));
+    }
+    Value::Object(map)
 }
 
 fn deployment_event_drop_reason_is_sample_worthy(reason: &str) -> bool {
@@ -2917,35 +3045,7 @@ fn deployment_event_drop_sample(
 }
 
 fn deployment_event_kind_is_relevant(event_kind: &str) -> bool {
-    matches!(
-        event_kind,
-        "deploy_created"
-            | "build_started"
-            | "build_succeeded"
-            | "build_failed"
-            | "deploy_started"
-            | "deploy_succeeded"
-            | "deploy_failed"
-            | "workflow_run_created"
-            | "workflow_job_started"
-            | "workflow_job_succeeded"
-            | "workflow_job_failed"
-            | "workflow_job_cancelled"
-            | "workflow_job_lease_expired"
-            | "artifact_recorded"
-            | "smoke_succeeded"
-            | "smoke_failed"
-            | "rollback_started"
-            | "rollback_succeeded"
-            | "rollback_failed"
-            | "agent_heartbeat"
-            | "agent_offline"
-            | "agent_update_started"
-            | "agent_update_succeeded"
-            | "agent_update_failed"
-            | "provenance_changed"
-            | "closure_verdict"
-    )
+    DEPLOYMENT_EVENT_RELEVANT_KINDS.contains(&event_kind)
 }
 
 fn deployment_event_has_deploy_center_authority(
@@ -3922,6 +4022,8 @@ fn summarize_source(key: &str, value: &Value) -> Value {
             insert_field(&mut map, value, "since");
             insert_field(&mut map, value, "filter_before_injection");
             insert_field(&mut map, value, "candidate_count");
+            insert_field(&mut map, value, "accepted_event_kinds");
+            insert_field(&mut map, value, "observed_candidates");
             insert_field(&mut map, value, "filtered_count");
             insert_field(&mut map, value, "returned_count");
             insert_field(&mut map, value, "dropped_count");
@@ -4809,16 +4911,16 @@ mod tests {
         context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_items,
         dedupe_evidence_search_items, deployment_event_drop_reason_is_sample_worthy,
         deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
-        diagnostics_have_hard_failures, evidence_item_id,
-        evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
-        filter_deployment_closure_policy_evidence_items,
+        deployment_event_observed_candidate_summary, diagnostics_have_hard_failures,
+        evidence_item_id, evidence_item_read_model_scope_allows_search,
+        evidence_item_uses_stable_projection_id, filter_deployment_closure_policy_evidence_items,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
         source_selection, summarize_source, support_catalog_has_content,
         support_catalog_response_view, CompiledDeploymentPolicyFingerprint, ContextGatherArgs,
-        DeploymentEventFilterResult, SourceProfile,
+        DeploymentEventFilterResult, SourceProfile, DEPLOYMENT_EVENT_RELEVANT_KINDS,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -5614,6 +5716,74 @@ mod tests {
     }
 
     #[test]
+    fn deployment_event_observed_candidates_expose_relay_absence_signals() {
+        assert!(DEPLOYMENT_EVENT_RELEVANT_KINDS.contains(&"workflow_job_succeeded"));
+        assert!(DEPLOYMENT_EVENT_RELEVANT_KINDS.contains(&"artifact_recorded"));
+
+        let row = missiond_core::db::TimelineRow {
+            seq: 88,
+            trace_id: Some("trace-88".to_string()),
+            span_id: None,
+            parent_span_id: None,
+            event_type: "external_service_event".to_string(),
+            summary: Some("shared memory worker settled".to_string()),
+            payload: json!({
+                "service_id": "missiond-shared-memory",
+                "event_id": "missiond-shared-memory:88",
+                "event_kind": "worker_completion.settled",
+                "summary": "worker settled"
+            })
+            .to_string(),
+            created_at: "2026-06-02 20:08:18".to_string(),
+        };
+
+        let summary = deployment_event_observed_candidate_summary(&[row]);
+
+        assert_eq!(
+            summary.get("candidate_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            summary
+                .get("deploy_center_candidate_count")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            summary
+                .get("accepted_kind_candidate_count")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            summary
+                .get("observed_deploy_center_source")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            summary
+                .get("observed_accepted_deploy_kind")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            summary
+                .get("producer_service_counts")
+                .and_then(|value| value.get("missiond-shared-memory"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            summary
+                .get("event_kind_counts")
+                .and_then(|value| value.get("worker_completion.settled"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn deployment_event_summary_preserves_drop_diagnostics() {
         let source = json!({
             "schema": "missiond.deployment-events-context.v1",
@@ -5625,6 +5795,15 @@ mod tests {
             "since": "30d",
             "filter_before_injection": true,
             "candidate_count": 2,
+            "accepted_event_kinds": ["workflow_job_succeeded", "artifact_recorded"],
+            "observed_candidates": {
+                "candidate_count": 2,
+                "deploy_center_candidate_count": 0,
+                "accepted_kind_candidate_count": 0,
+                "observed_deploy_center_source": false,
+                "observed_accepted_deploy_kind": false,
+                "producer_service_counts": {"missiond-shared-memory": 2}
+            },
             "filtered_count": 0,
             "returned_count": 0,
             "dropped_count": 2,
@@ -5655,6 +5834,21 @@ mod tests {
                 .and_then(|value| value.get("irrelevant_event_kind"))
                 .and_then(Value::as_u64),
             Some(16)
+        );
+        assert_eq!(
+            summary
+                .get("observed_candidates")
+                .and_then(|value| value.get("producer_service_counts"))
+                .and_then(|value| value.get("missiond-shared-memory"))
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            summary
+                .get("accepted_event_kinds")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
         );
         assert_eq!(
             summary
