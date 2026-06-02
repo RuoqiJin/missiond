@@ -245,6 +245,8 @@ function checkFiles(root, files) {
     'deployment_closure_omitted',
     'mission_context_gather source_profile=deploy_ops MUST query bounded MissionD EventBridge deployment_events from event_log domain system::external_service_event',
     'mission_context_gather deployment_events MUST expose drop_reason_counts and sample_dropped_events diagnostics',
+    'mission_context_gather deployment_events sample_dropped_events MUST omit low-value irrelevant_event_kind samples',
+    'drop_sample_omitted_counts',
     'source_summaries.deployment_events.status',
     'never fall back to conversation/tool timeline hits for deploy evidence',
     'source_summaries.infra.status=feature_disabled',
@@ -321,9 +323,11 @@ function checkFiles(root, files) {
     'deployment_event_filter_timeline_row',
     'DeploymentEventFilterResult',
     'deployment_event_drop_sample',
+    'deployment_event_drop_reason_is_sample_worthy',
     'deployment_event_item_from_timeline_row',
     'deployment_event_matches_scope',
     'drop_reason_counts',
+    'drop_sample_omitted_counts',
     'sample_dropped_events',
     'system::external_service_event',
     'deploy_center_event',
@@ -1093,6 +1097,8 @@ function buildFixture() {
                          "deployment_closure_omitted"
                          "mission_context_gather source_profile=deploy_ops MUST query bounded MissionD EventBridge deployment_events from event_log domain system::external_service_event"
                          "mission_context_gather deployment_events MUST expose drop_reason_counts and sample_dropped_events diagnostics"
+                         "mission_context_gather deployment_events sample_dropped_events MUST omit low-value irrelevant_event_kind samples"
+                         "drop_sample_omitted_counts"
                          "source_summaries.deployment_events.status"
                          "never fall back to conversation/tool timeline hits for deploy evidence"
 		                 "source_summaries.infra.status=feature_disabled"
@@ -1248,7 +1254,7 @@ CREATE TABLE IF NOT EXISTS skill_evidence_items;
   writeFixture(root, DEFAULT_FILES.contextGather, `
 SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources; persist_read_model; persistReadModel; context_gather_persist_read_model;
 include_board; include_conversations; conversation_time_range;
-	evidence_lanes; evidence_items; support_catalog; deployment_closure; deployment_closure_policy; deployment_events; deploy_center_event; deployment_events_source; deployment_event_filter_timeline_row; DeploymentEventFilterResult; deployment_event_drop_sample; deployment_event_item_from_timeline_row; deployment_event_matches_scope; drop_reason_counts; sample_dropped_events; system::external_service_event; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; support_catalog_response_view; compact_support_catalog_response; deployment_closure_omitted; support_catalog_has_content; support_refs_compact_item_count; deployment_closure_support_allowed; deployment_closure_query_has_anchor; deployment_closure_has_identity_content; attach_infra_os_disabled_support_fallback; infra_os_disabled_support_fallback_items; support_catalog_available; dedupe_evidence_search_items; evidence_search_dedupe_key; filter_incomplete_deployment_closure_evidence_items; filter_deployment_closure_policy_evidence_items; evidence_item_has_incomplete_deployment_closure_placeholder; filter_stale_runtime_environment_evidence_items; evidence_item_has_stale_runtime_environment_ref; evidence_item_runtime_environment_compiled_dir; evidence_item_uses_stable_projection_id; evidence_item_read_model_scope_allows_search; scope_skipped; raw_hit_count; incomplete_filtered_count; deployment_closure_profile_filtered_count; deduplicated_count; truncated_count; operational_fact_count; build_evidence_items; build_evidence_items_with_options; build_deployment_closure_support; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
+	evidence_lanes; evidence_items; support_catalog; deployment_closure; deployment_closure_policy; deployment_events; deploy_center_event; deployment_events_source; deployment_event_filter_timeline_row; DeploymentEventFilterResult; deployment_event_drop_sample; deployment_event_drop_reason_is_sample_worthy; deployment_event_item_from_timeline_row; deployment_event_matches_scope; drop_reason_counts; drop_sample_omitted_counts; sample_dropped_events; system::external_service_event; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; support_catalog_response_view; compact_support_catalog_response; deployment_closure_omitted; support_catalog_has_content; support_refs_compact_item_count; deployment_closure_support_allowed; deployment_closure_query_has_anchor; deployment_closure_has_identity_content; attach_infra_os_disabled_support_fallback; infra_os_disabled_support_fallback_items; support_catalog_available; dedupe_evidence_search_items; evidence_search_dedupe_key; filter_incomplete_deployment_closure_evidence_items; filter_deployment_closure_policy_evidence_items; evidence_item_has_incomplete_deployment_closure_placeholder; filter_stale_runtime_environment_evidence_items; evidence_item_has_stale_runtime_environment_ref; evidence_item_runtime_environment_compiled_dir; evidence_item_uses_stable_projection_id; evidence_item_read_model_scope_allows_search; scope_skipped; raw_hit_count; incomplete_filtered_count; deployment_closure_profile_filtered_count; deduplicated_count; truncated_count; operational_fact_count; build_evidence_items; build_evidence_items_with_options; build_deployment_closure_support; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
 load_compiled_project_universe; compiled_service_runtime_payload_for_project; supportCatalog; compiled_deployment_policy_for_service;
 credential_lane_opt_in; selection.include_credentials; selection.include_raw_sources; raw_sources_omitted;
 "board_tasks"; "conversation_logs"; "credential_refs"; "mission_board_query"; "mission_conversation_query"; "scope": "active"; "time_range"; last_30d;

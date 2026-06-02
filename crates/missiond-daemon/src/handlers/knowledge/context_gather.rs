@@ -2516,6 +2516,7 @@ async fn deployment_events_source(
             let mut events = Vec::new();
             let mut matching_count = 0usize;
             let mut drop_reason_counts: BTreeMap<String, usize> = BTreeMap::new();
+            let mut drop_sample_omitted_counts: BTreeMap<String, usize> = BTreeMap::new();
             let mut sample_dropped_events = Vec::new();
             for row in &rows {
                 match deployment_event_filter_timeline_row(
@@ -2533,8 +2534,14 @@ async fn deployment_events_source(
                     }
                     DeploymentEventFilterResult::Drop { reason, sample } => {
                         *drop_reason_counts.entry(reason.to_string()).or_default() += 1;
-                        if sample_dropped_events.len() < 5 {
+                        if deployment_event_drop_reason_is_sample_worthy(reason)
+                            && sample_dropped_events.len() < 5
+                        {
                             sample_dropped_events.push(sample);
+                        } else {
+                            *drop_sample_omitted_counts
+                                .entry(reason.to_string())
+                                .or_default() += 1;
                         }
                     }
                 }
@@ -2564,6 +2571,7 @@ async fn deployment_events_source(
                 "returned_count": events.len(),
                 "dropped_count": candidate_count.saturating_sub(matching_count),
                 "drop_reason_counts": drop_reason_counts,
+                "drop_sample_omitted_counts": drop_sample_omitted_counts,
                 "sample_dropped_events": sample_dropped_events,
                 "events": events,
                 "diagnostic": diagnostic,
@@ -2584,11 +2592,16 @@ async fn deployment_events_source(
             "returned_count": 0,
             "dropped_count": 0,
             "drop_reason_counts": {},
+            "drop_sample_omitted_counts": {},
             "sample_dropped_events": [],
             "events": [],
             "diagnostic": format!("deployment event_log query failed: {err}"),
         }),
     }
+}
+
+fn deployment_event_drop_reason_is_sample_worthy(reason: &str) -> bool {
+    !matches!(reason, "irrelevant_event_kind")
 }
 
 enum DeploymentEventFilterResult {
@@ -3906,6 +3919,7 @@ fn summarize_source(key: &str, value: &Value) -> Value {
             insert_field(&mut map, value, "returned_count");
             insert_field(&mut map, value, "dropped_count");
             insert_field(&mut map, value, "drop_reason_counts");
+            insert_field(&mut map, value, "drop_sample_omitted_counts");
             insert_field(&mut map, value, "sample_dropped_events");
             insert_field(&mut map, value, "filters");
             insert_compact_field(&mut map, value, "diagnostic", 260);
@@ -4786,8 +4800,9 @@ mod tests {
         build_support_catalog, collect_evidence_refs_from_value, context_gather_persist_artifact,
         context_gather_persist_read_model, context_gather_worker_visible_dir_for,
         context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_items,
-        dedupe_evidence_search_items, deployment_event_filter_timeline_row,
-        deployment_event_item_from_timeline_row, diagnostics_have_hard_failures, evidence_item_id,
+        dedupe_evidence_search_items, deployment_event_drop_reason_is_sample_worthy,
+        deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
+        diagnostics_have_hard_failures, evidence_item_id,
         evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
         filter_deployment_closure_policy_evidence_items,
         filter_incomplete_deployment_closure_evidence_items,
@@ -5520,6 +5535,19 @@ mod tests {
     }
 
     #[test]
+    fn deployment_event_drop_samples_skip_irrelevant_event_kind_noise() {
+        assert!(!deployment_event_drop_reason_is_sample_worthy(
+            "irrelevant_event_kind"
+        ));
+        assert!(deployment_event_drop_reason_is_sample_worthy(
+            "scope_mismatch"
+        ));
+        assert!(deployment_event_drop_reason_is_sample_worthy(
+            "missing_event_id"
+        ));
+    }
+
+    #[test]
     fn deployment_event_summary_preserves_drop_diagnostics() {
         let source = json!({
             "schema": "missiond.deployment-events-context.v1",
@@ -5535,6 +5563,7 @@ mod tests {
             "returned_count": 0,
             "dropped_count": 2,
             "drop_reason_counts": {"scope_mismatch": 2},
+            "drop_sample_omitted_counts": {"irrelevant_event_kind": 16},
             "sample_dropped_events": [{
                 "reason": "scope_mismatch",
                 "seq": 7,
@@ -5553,6 +5582,13 @@ mod tests {
                 .and_then(|value| value.get("scope_mismatch"))
                 .and_then(Value::as_u64),
             Some(2)
+        );
+        assert_eq!(
+            summary
+                .get("drop_sample_omitted_counts")
+                .and_then(|value| value.get("irrelevant_event_kind"))
+                .and_then(Value::as_u64),
+            Some(16)
         );
         assert_eq!(
             summary
