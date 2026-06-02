@@ -384,7 +384,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         let infra_payload = if let Some(target_id) = args.infra_target.as_deref() {
             json!({"action": "get", "id": target_id})
         } else {
-            json!({"action": "skill_evidence", "skill": args.skill.clone(), "target_id": args.infra_target.clone(), "limit": limit})
+            json!({
+                "action": "skill_evidence",
+                "skill": args.skill.clone(),
+                "target_id": args.infra_target.clone(),
+                "query": query,
+                "project_id": effective_project_id.clone(),
+                "limit": limit
+            })
         };
         insert_subcall(
             &mut sources,
@@ -406,6 +413,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     "action": "credential_refs",
                     "target_id": args.infra_target.clone(),
                     "skill": args.skill.clone(),
+                    "query": query,
+                    "project_id": effective_project_id.clone(),
                     "limit": limit
                 }),
             )

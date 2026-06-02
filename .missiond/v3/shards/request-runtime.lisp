@@ -24,7 +24,7 @@
          :rule "Durable provider/user conversations are searched only when conversation_audit, full_debug, or include_conversations=true opts in; project/time/conversation_type filters must be enforced identically by hybrid vector and FTS paths.")
        (source skill-operational-evidence
          :tool mission_skill_context
-         :rule "Skill files are operational evidence for ClaudeCode-compatible workers; mutation of skill files must be delegated through skill-edit-delegation-policy. Default intent_default does not scan skill/infra evidence unless skill, infra_target, include_infra=true, or deploy_ops opts in.")
+         :rule "Skill files are operational evidence for ClaudeCode-compatible workers; mutation of skill files must be delegated through skill-edit-delegation-policy. Default intent_default does not scan skill/infra evidence unless skill, infra_target, include_infra=true, or deploy_ops opts in. deploy_ops infra evidence must still be target/project/query scoped; it must not perform global skill evidence scans.")
        (source credential-refs
          :tool mission_infra_query
          :scope explicit-opt-in
@@ -52,6 +52,7 @@
     :invariants
       ["mission_context_gather MUST expose source_profile, evidence_lanes, authority_order, noise_diagnostics, and context_noise_metrics."
        "mission_context_gather source_profile=intent_default MUST exclude bounded conversation logs, global skill/infra evidence, and credential_refs unless an explicit opt-in flag or deploy/debug profile enables them."
+       "mission_context_gather source_profile=deploy_ops MUST pass query/project scope into mission_infra_query skill_evidence and credential_refs; evidence-only lanes MUST reject unrelated global skill hits."
        "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes rather than one flat prompt preload."
        "Board/task/workflow records are searchable retrieval evidence, not active long-term memory unless promoted by an explicit review workflow."
        "Conversation logs are searched by query and bounded window; they are not default prompt preloads."

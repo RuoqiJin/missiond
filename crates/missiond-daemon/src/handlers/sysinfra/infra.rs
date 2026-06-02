@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::state::AppState;
 
@@ -27,6 +27,10 @@ struct InfraEvidenceArgs {
     target_id: Option<String>,
     #[serde(default)]
     skill: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default, alias = "project", alias = "projectId")]
+    project_id: Option<String>,
     #[serde(default = "default_evidence_limit")]
     limit: usize,
 }
@@ -116,6 +120,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 InfraEvidenceFilter {
                     target_id: None,
                     skill: None,
+                    query: None,
+                    project_id: None,
                     limit: 200,
                 },
             );
@@ -145,6 +151,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 serde_json::from_value(args).unwrap_or(InfraEvidenceArgs {
                     target_id: None,
                     skill: None,
+                    query: None,
+                    project_id: None,
                     limit: default_evidence_limit(),
                 });
             let evidence = collect_skill_evidence(
@@ -152,6 +160,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 InfraEvidenceFilter {
                     target_id: args.target_id,
                     skill: args.skill,
+                    query: args.query,
+                    project_id: args.project_id,
                     limit: args.limit.min(500),
                 },
             );
@@ -167,9 +177,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 serde_json::from_value(args).unwrap_or(InfraEvidenceArgs {
                     target_id: None,
                     skill: None,
+                    query: None,
+                    project_id: None,
                     limit: default_evidence_limit(),
                 });
-            let refs = credential_refs(args.target_id.as_deref());
+            let refs = credential_refs_filtered(
+                args.target_id.as_deref(),
+                args.query.as_deref(),
+                args.project_id.as_deref(),
+            );
             Ok(ToolResult::json_pretty(&json!({
                 "schema": "missiond.credential-ref-inventory.v1",
                 "rule": "Only secret refs are returned. MissionD never returns credential values from Lisp, Board, or skills.",
@@ -203,6 +219,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 InfraEvidenceFilter {
                     target_id: None,
                     skill: None,
+                    query: None,
+                    project_id: None,
                     limit: 500,
                 },
             );
@@ -900,6 +918,8 @@ fn default_evidence_limit() -> usize {
 struct InfraEvidenceFilter {
     target_id: Option<String>,
     skill: Option<String>,
+    query: Option<String>,
+    project_id: Option<String>,
     limit: usize,
 }
 
@@ -931,6 +951,10 @@ fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<
                     continue;
                 }
             }
+            if !evidence_matches_scope(skill_name, &skill.path.display().to_string(), line, &filter)
+            {
+                continue;
+            }
             let (excerpt, credential_risk) = redact_skill_evidence_line(line);
             items.push(json!({
                 "sourceSkill": skill_name,
@@ -944,6 +968,31 @@ fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<
         }
     }
     items
+}
+
+fn evidence_matches_scope(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> bool {
+    if filter
+        .target_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || filter
+            .skill
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
+    let terms = scoped_evidence_terms(filter.query.as_deref(), filter.project_id.as_deref(), true);
+    if terms.is_empty() {
+        return true;
+    }
+    let haystack = format!("{skill_name}\n{skill_path}\n{line}").to_ascii_lowercase();
+    terms.iter().any(|term| haystack.contains(term))
 }
 
 fn is_infra_evidence_line(line: &str) -> bool {
@@ -1250,6 +1299,120 @@ fn credential_refs(target_id: Option<&str>) -> Vec<Value> {
     })
 }
 
+fn credential_refs_filtered(
+    target_id: Option<&str>,
+    query: Option<&str>,
+    project_id: Option<&str>,
+) -> Vec<Value> {
+    let refs = credential_refs(target_id);
+    if target_id.is_some_and(|target| !target.trim().is_empty()) {
+        return refs;
+    }
+    let terms = scoped_evidence_terms(query, project_id, false);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    refs.into_iter()
+        .filter(|item| {
+            let haystack = item.to_string().to_ascii_lowercase();
+            terms.iter().any(|term| haystack.contains(term))
+        })
+        .collect()
+}
+
+fn scoped_evidence_terms(
+    query: Option<&str>,
+    project_id: Option<&str>,
+    prefer_project_scope: bool,
+) -> Vec<String> {
+    let mut terms = Vec::new();
+    if let Some(project) = normalized_evidence_token(project_id) {
+        if project != "missiond" {
+            terms.push(project);
+            if prefer_project_scope {
+                return terms;
+            }
+        }
+    }
+    if let Some(query) = query {
+        for token in evidence_query_tokens(query) {
+            if !terms.iter().any(|existing| existing == &token) {
+                terms.push(token);
+            }
+        }
+    }
+    terms
+}
+
+fn evidence_query_tokens(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for raw in
+        query.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
+    {
+        let Some(token) = normalized_evidence_token(Some(raw)) else {
+            continue;
+        };
+        if is_generic_evidence_token(&token) {
+            continue;
+        }
+        if !tokens.iter().any(|existing| existing == &token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+fn normalized_evidence_token(value: Option<&str>) -> Option<String> {
+    let token = value?.trim().trim_matches(|ch: char| {
+        !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+    });
+    if token.is_empty() {
+        return None;
+    }
+    let token = token.to_ascii_lowercase();
+    if token.len() < 3 && !token.chars().any(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(token)
+}
+
+fn is_generic_evidence_token(token: &str) -> bool {
+    matches!(
+        token,
+        "deploy"
+            | "agent"
+            | "runtime"
+            | "service"
+            | "project"
+            | "status"
+            | "state"
+            | "success"
+            | "failure"
+            | "failed"
+            | "workflow"
+            | "github"
+            | "center"
+            | "image"
+            | "binary"
+            | "compose"
+            | "entrypoint"
+            | "volume"
+            | "manifest"
+            | "migration"
+            | "schema"
+            | "gate"
+            | "missing"
+            | "verify"
+            | "skipping"
+            | "backward"
+            | "compat"
+            | "health"
+            | "ready"
+            | "old"
+            | "new"
+    )
+}
+
 fn list_infra_servers(
     state: &AppState,
     role: Option<&str>,
@@ -1445,5 +1608,48 @@ fn maybe_push_skill_target(
         .any(|existing| infra_id_matches(existing, id))
     {
         servers.push(server);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InfraEvidenceFilter, credential_refs_filtered, evidence_matches_scope};
+
+    #[test]
+    fn evidence_scope_rejects_unrelated_project_skill_lines() {
+        let filter = InfraEvidenceFilter {
+            target_id: None,
+            skill: None,
+            query: Some("Payments service.manifest.toml missing manifest gate".to_string()),
+            project_id: Some("payments".to_string()),
+            limit: 10,
+        };
+
+        assert!(!evidence_matches_scope(
+            "tiermate",
+            "/Users/jinchen/.claude/skills/tiermate/SKILL.md",
+            "GCP deploy-agent endpoint and secret-store references",
+            &filter,
+        ));
+        assert!(evidence_matches_scope(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "Payments deploy-agent canary evidence and manifest gate notes",
+            &filter,
+        ));
+    }
+
+    #[test]
+    fn credential_refs_require_explicit_target_or_query_relevance() {
+        assert!(!credential_refs_filtered(Some("gcp-runtime"), None, None).is_empty());
+        assert!(!credential_refs_filtered(None, Some("GCP deploy agent"), None).is_empty());
+        assert!(
+            credential_refs_filtered(
+                None,
+                Some("Payments service.manifest.toml missing manifest gate"),
+                Some("payments"),
+            )
+            .is_empty()
+        );
     }
 }

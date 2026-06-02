@@ -10,7 +10,9 @@
        :write_scope ["crates/missiond-core/src/db"
                      "crates/missiond-daemon/src/handlers/comm/conversation"
                      "crates/missiond-daemon/src/handlers/knowledge"
+                     "crates/missiond-daemon/src/handlers/sysinfra"
                      "crates/missiond-mcp/src/tools/knowledge"
+                     "crates/missiond-mcp/src/tools/sysinfra"
                      "scripts/check-v3-memory-kb-isomorphism.mjs"
                      "scripts/check-v3-source-hygiene-isomorphism.mjs"]
        :acceptance ["node scripts/check-v3-memory-kb-isomorphism.mjs --json"
@@ -18,4 +20,5 @@
                     "node scripts/check-v3-runtime-path-hygiene.mjs --json"
                     "node scripts/check-v3-shared-memory-isomorphism.mjs --json"
                     "cargo test -p missiond-daemon --bin missiond context_gather::tests"
+                    "cargo test -p missiond-daemon --bin missiond sysinfra::infra::tests"
                     "cargo test -p missiond-daemon --bin missiond project::registry::tests"])))
