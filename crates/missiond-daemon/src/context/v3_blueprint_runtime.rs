@@ -18,9 +18,10 @@ use compiled_envelope::{
     source_domain_bundle_hash, validate_compiled_source_domains, validate_compiled_source_units,
     CompiledRuntimeEnvelope, CompiledSourceDomain, CompiledSourceUnit,
 };
-#[cfg(test)]
-use compiled_runtime::load_compiled_runtime_snapshot;
-use compiled_runtime::{load_compiled_payload, CompiledPayloadLoad, CompiledRuntimeSnapshot};
+pub(crate) use compiled_runtime::CompiledRuntimeSnapshot;
+use compiled_runtime::{
+    load_compiled_payload, load_compiled_runtime_snapshot, CompiledPayloadLoad, CompiledRuntimeLoad,
+};
 use compiled_snapshot::compiled_runtime_snapshot_path;
 use runtime_config_payload::{
     generated_default_runtime_config, CompiledRuntimeConfigPayload, CompiledRuntimeDomainPayload,
@@ -3025,6 +3026,10 @@ pub(crate) fn load_compiled_project_universe(
         snapshot: loaded.snapshot,
         diagnostics: loaded.diagnostics,
     }
+}
+
+pub(crate) fn load_compiled_deployment_policy_snapshot(project_root: &Path) -> CompiledRuntimeLoad {
+    load_compiled_runtime_snapshot(project_root, "deployment-policy", None)
 }
 
 #[allow(dead_code)]

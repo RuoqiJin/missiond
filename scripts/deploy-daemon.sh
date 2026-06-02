@@ -728,6 +728,7 @@ const targets = {
   v3: 'compiled-v3-blueprint.json',
   runtimeConfig: 'compiled-runtime-config.json',
   universe: 'compiled-project-universe.json',
+  deploymentPolicy: 'compiled-deployment-policy.json',
   workflows: 'compiled-workflows.json',
 };
 const projections = {};

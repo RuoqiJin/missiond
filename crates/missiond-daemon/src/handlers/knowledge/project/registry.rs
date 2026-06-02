@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use missiond_core::types::ProjectConfig;
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
@@ -7,8 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::context::v3_blueprint_runtime::{
-    CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry, ProjectRegistryRuntimeConfig,
-    load_compiled_project_universe,
+    load_compiled_deployment_policy_snapshot, load_compiled_project_universe,
+    CompiledProjectUniverseEntry, CompiledRuntimeSnapshot, CompiledServiceRuntimeEntry,
+    ProjectRegistryRuntimeConfig,
 };
 use crate::state::AppState;
 
@@ -33,6 +34,18 @@ struct ResolveArgs {
     include_unregistered_candidates: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct StatusArgs {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -77,12 +90,96 @@ pub(super) async fn handle_get(state: &AppState, args: Value) -> Result<ToolResu
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     match project {
-        Some(p) => Ok(ToolResult::json_pretty(&p)),
+        Some(p) => {
+            let mut value = db_project_to_value(&p);
+            enrich_project_status_value(&mut value);
+            Ok(ToolResult::json_pretty(&value))
+        }
         None => match compiled_project_lookup(id) {
-            Some(value) => Ok(ToolResult::json_pretty(&value)),
+            Some(mut value) => {
+                enrich_project_status_value(&mut value);
+                Ok(ToolResult::json_pretty(&value))
+            }
             None => Ok(ToolResult::error(format!("Project not found: {}", id))),
         },
     }
+}
+
+pub(super) async fn handle_status(state: &AppState, args: Value) -> Result<ToolResult> {
+    let args: StatusArgs = serde_json::from_value(args)?;
+    let query = first_non_empty([
+        args.query.as_deref(),
+        args.id.as_deref(),
+        args.path.as_deref(),
+        args.cwd.as_deref(),
+    ]);
+    let projects = state
+        .store
+        .list_projects()
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+    let mut diagnostics = Vec::new();
+    let compiled = load_resolution_universe(&mut diagnostics);
+    let runtime_status = compiled_runtime_status_from_projection(&compiled.runtime);
+    if runtime_status
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status == "compiled_runtime_stale")
+    {
+        diagnostics.push(serde_json::json!({
+            "kind": "compiled_runtime_stale",
+            "source": "active-release-manifest",
+            "staleProjections": runtime_status
+                .get("staleProjections")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "recovery": "Run scripts/deploy-daemon.sh after regenerating compiled runtime projections, or restart the daemon on the active release that owns these hashes."
+        }));
+    }
+
+    let target = query.as_deref().and_then(|query| {
+        resolve_status_target(
+            query,
+            args.id.as_deref(),
+            args.path.as_deref(),
+            args.cwd.as_deref(),
+            &projects,
+            &compiled,
+        )
+    });
+    let target_status = target
+        .as_ref()
+        .map(|target| target.status.as_str())
+        .unwrap_or("not_requested");
+    let status = if target_status == "not_found"
+        && runtime_status
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "compiled_runtime_stale")
+    {
+        "compiled_runtime_stale"
+    } else {
+        target_status
+    };
+
+    Ok(ToolResult::json_pretty(&serde_json::json!({
+        "ok": matches!(status, "not_requested" | "resolved" | "ambiguous"),
+        "schema": "missiond.project-status.v1",
+        "status": status,
+        "query": query,
+        "matched_project_id": target.as_ref().and_then(|target| target.project_id.clone()),
+        "matched_project": target.as_ref().map(|target| target.project.clone()).unwrap_or(Value::Null),
+        "candidate_projects": target.as_ref().map(|target| target.candidates.clone()).unwrap_or_default(),
+        "compiledRuntime": compiled.runtime,
+        "runtime_status": runtime_status,
+        "activeRelease": missiond_active_release_status(),
+        "productionRelease": {
+            "authority": "deploy-center",
+            "status": "not_queried",
+            "reason": "MissionD project status reports identity and compiled policy state only; Deploy Center closure/provenance is the runtime release authority."
+        },
+        "diagnostics": diagnostics,
+    })))
 }
 
 pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -173,8 +270,26 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
     } else {
         Value::Null
     };
+    let runtime_status = compiled_runtime_status_from_projection(&compiled.runtime);
+    let runtime_stale = runtime_status
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status == "compiled_runtime_stale");
+    if runtime_stale {
+        diagnostics.push(serde_json::json!({
+            "kind": "compiled_runtime_stale",
+            "source": "active-release-manifest",
+            "staleProjections": runtime_status
+                .get("staleProjections")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "recovery": "Regenerate compiled projections and redeploy/restart MissionD so the daemon active release and compiled runtime hashes match."
+        }));
+    }
     let status = if candidate_values.is_empty() {
-        if !domain_queries.is_empty() || registration_proposal.is_object() {
+        if runtime_stale {
+            "compiled_runtime_stale"
+        } else if !domain_queries.is_empty() || registration_proposal.is_object() {
             "unregistered_candidate"
         } else if !diagnostics.is_empty() {
             "stale_runtime"
@@ -222,6 +337,9 @@ pub(super) async fn handle_resolve(state: &AppState, args: Value) -> Result<Tool
         "candidate_projects": candidate_values,
         "candidate_roots": candidate_roots,
         "registration_proposal": registration_proposal,
+        "compiledRuntime": compiled.runtime,
+        "runtime_status": runtime_status,
+        "activeRelease": missiond_active_release_status(),
         "diagnostics": diagnostics,
         "next_actions": next_actions,
     })))
@@ -581,6 +699,7 @@ async fn import_compiled_universe(
     let mut updated = 0u32;
     let mut skipped = 0u32;
     let mut imported_ids = Vec::new();
+    let mut path_conflicts = Vec::new();
 
     for entry in payload.projects {
         let Some(config) = compiled_project_to_config(&project_root, &entry, runtime_config) else {
@@ -594,11 +713,25 @@ async fn import_compiled_universe(
             .map(|p| p.is_some())
             .unwrap_or(false);
 
-        state
-            .store
-            .upsert_project(&config)
-            .await
-            .map_err(|e| anyhow!("DB error: {}", e))?;
+        if let Err(err) = archive_inactive_path_aliases(state, &config.id, &config.path).await {
+            skipped += 1;
+            path_conflicts.push(serde_json::json!({
+                "id": config.id,
+                "path": config.path,
+                "error": err.to_string(),
+            }));
+            continue;
+        }
+
+        if let Err(err) = state.store.upsert_project(&config).await {
+            skipped += 1;
+            path_conflicts.push(serde_json::json!({
+                "id": config.id,
+                "path": config.path,
+                "error": format!("DB error: {err}"),
+            }));
+            continue;
+        }
 
         if existed {
             updated += 1;
@@ -617,6 +750,7 @@ async fn import_compiled_universe(
         "updated": updated,
         "skipped": skipped,
         "reference_noted": 0,
+        "pathConflicts": path_conflicts,
         "manifestFallback": false,
         "importedIds": imported_ids,
         "compiledRuntime": {
@@ -770,6 +904,14 @@ fn github_url_for_path(path: impl AsRef<Path>) -> Option<String> {
 struct ResolutionUniverse {
     projects: Vec<CompiledProjectUniverseEntry>,
     services: Vec<CompiledServiceRuntimeEntry>,
+    runtime: Value,
+}
+
+struct StatusResolutionTarget {
+    status: String,
+    project_id: Option<String>,
+    project: Value,
+    candidates: Vec<Value>,
 }
 
 struct LookupInput {
@@ -836,14 +978,12 @@ impl LookupInput {
 fn load_resolution_universe(diagnostics: &mut Vec<Value>) -> ResolutionUniverse {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let loaded = load_compiled_project_universe(&project_root, None);
-    let snapshot = loaded.snapshot.as_ref().map(|snapshot| {
-        serde_json::json!({
-            "kind": snapshot.kind.clone(),
-            "path": snapshot.path.display().to_string(),
-            "schemaVersion": snapshot.schema_version.clone(),
-            "sourceHash": snapshot.source_hash.clone(),
-        })
-    });
+    let snapshot = loaded.snapshot.as_ref().map(compiled_snapshot_to_value);
+    let deployment_policy = load_compiled_deployment_policy_snapshot(&project_root);
+    let policy_snapshot = deployment_policy
+        .snapshot
+        .as_ref()
+        .map(compiled_snapshot_to_value);
     if !loaded.diagnostics.is_empty() {
         diagnostics.push(serde_json::json!({
             "kind": "compiled_project_universe_unavailable",
@@ -853,16 +993,290 @@ fn load_resolution_universe(diagnostics: &mut Vec<Value>) -> ResolutionUniverse 
             "recovery": "Run node scripts/compile-v3-runtime.mjs --write from the MissionD repo. Resolver continues with DB and explicit query facts."
         }));
     }
+    if !deployment_policy.diagnostics.is_empty() {
+        diagnostics.push(serde_json::json!({
+            "kind": "compiled_deployment_policy_unavailable",
+            "source": "compiled-deployment-policy",
+            "diagnostics": deployment_policy.diagnostics,
+            "snapshot": policy_snapshot,
+            "recovery": "Run node scripts/compile-v3-runtime.mjs --write from the MissionD repo so deployment policy hash is available."
+        }));
+    }
+    let runtime = serde_json::json!({
+        "universe": snapshot,
+        "deploymentPolicy": policy_snapshot,
+    });
     match loaded.payload {
         Some(payload) => ResolutionUniverse {
             projects: payload.projects,
             services: payload.services,
+            runtime,
         },
         None => ResolutionUniverse {
             projects: Vec::new(),
             services: Vec::new(),
+            runtime,
         },
     }
+}
+
+fn compiled_snapshot_to_value(snapshot: &CompiledRuntimeSnapshot) -> Value {
+    serde_json::json!({
+        "kind": snapshot.kind.clone(),
+        "path": snapshot.path.display().to_string(),
+        "schemaVersion": snapshot.schema_version.clone(),
+        "sourceHash": snapshot.source_hash.clone(),
+    })
+}
+
+fn resolve_status_target(
+    query: &str,
+    id: Option<&str>,
+    path: Option<&str>,
+    cwd: Option<&str>,
+    projects: &[ProjectConfig],
+    compiled: &ResolutionUniverse,
+) -> Option<StatusResolutionTarget> {
+    if query.trim().is_empty() {
+        return None;
+    }
+    let lookup = LookupInput::new(query, id, path, cwd);
+    let mut candidates: HashMap<String, ResolutionCandidate> = HashMap::new();
+    let mut known_project_ids: HashSet<String> =
+        projects.iter().map(|p| normalize_key(&p.id)).collect();
+
+    for project in projects {
+        match_db_project(&lookup, project, &mut candidates);
+    }
+    for project in &compiled.projects {
+        if let Some(id) = project.id.as_deref() {
+            known_project_ids.insert(normalize_key(id));
+        }
+    }
+    for project in &compiled.projects {
+        match_compiled_project(&lookup, project, projects, &mut candidates);
+    }
+    for service in &compiled.services {
+        match_compiled_service(
+            &lookup,
+            service,
+            projects,
+            &known_project_ids,
+            &mut candidates,
+        );
+    }
+
+    let mut candidate_values = candidates
+        .into_values()
+        .map(candidate_to_value)
+        .collect::<Vec<_>>();
+    candidate_values.sort_by(|a, b| {
+        let left = a.get("score").and_then(Value::as_i64).unwrap_or(0);
+        let right = b.get("score").and_then(Value::as_i64).unwrap_or(0);
+        right.cmp(&left)
+    });
+    let top_score = candidate_values
+        .first()
+        .and_then(|v| v.get("score"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let second_score = candidate_values
+        .get(1)
+        .and_then(|v| v.get("score"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let status = if candidate_values.is_empty() {
+        "not_found"
+    } else if candidate_values.len() > 1 && top_score - second_score < 8 {
+        "ambiguous"
+    } else {
+        "resolved"
+    };
+    let matched_project = if status == "resolved" {
+        candidate_values
+            .first()
+            .and_then(|candidate| candidate.get("project"))
+            .cloned()
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let matched_project_id = matched_project
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(StatusResolutionTarget {
+        status: status.to_string(),
+        project_id: matched_project_id,
+        project: matched_project,
+        candidates: candidate_values,
+    })
+}
+
+fn enrich_project_status_value(value: &mut Value) {
+    if !value.is_object() {
+        return;
+    }
+    let mut diagnostics = Vec::new();
+    let compiled = load_resolution_universe(&mut diagnostics);
+    value["compiledRuntime"] = compiled.runtime.clone();
+    value["runtime_status"] = compiled_runtime_status_from_projection(&compiled.runtime);
+    value["activeRelease"] = missiond_active_release_status();
+    value["productionRelease"] = serde_json::json!({
+        "authority": "deploy-center",
+        "status": "not_queried",
+        "reason": "MissionD project get reports identity and compiled policy state only; Deploy Center closure/provenance is the runtime release authority."
+    });
+    if !diagnostics.is_empty() {
+        value["diagnostics"] = Value::Array(diagnostics);
+    }
+}
+
+fn compiled_runtime_status_from_projection(compiled_runtime: &Value) -> Value {
+    let active = missiond_active_release_status();
+    let current_universe = compiled_runtime_source_hash(compiled_runtime, "universe");
+    let current_policy = compiled_runtime_source_hash(compiled_runtime, "deploymentPolicy");
+    let current = serde_json::json!({
+        "universe": current_universe,
+        "deploymentPolicy": current_policy,
+    });
+    let missing_current = ["universe", "deploymentPolicy"]
+        .into_iter()
+        .filter(|key| {
+            current
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    if !missing_current.is_empty() {
+        return serde_json::json!({
+            "status": "compiled_runtime_unavailable",
+            "compiled_runtime_stale": false,
+            "compiled_source_hash": current.get("universe").cloned().unwrap_or(Value::Null),
+            "policy_hash": current.get("deploymentPolicy").cloned().unwrap_or(Value::Null),
+            "currentSourceHash": current,
+            "missingCurrentProjections": missing_current,
+        });
+    }
+
+    if !active.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return serde_json::json!({
+            "status": "active_release_unknown",
+            "compiled_runtime_stale": false,
+            "compiled_source_hash": current.get("universe").cloned().unwrap_or(Value::Null),
+            "policy_hash": current.get("deploymentPolicy").cloned().unwrap_or(Value::Null),
+            "currentSourceHash": current,
+            "activeReleaseDiagnostic": active.get("diagnostic").cloned().unwrap_or(Value::Null),
+        });
+    }
+
+    let active_universe = active_release_projection_source_hash(&active, "universe");
+    let active_policy = active_release_projection_source_hash(&active, "deploymentPolicy");
+    let active_hashes = serde_json::json!({
+        "universe": active_universe,
+        "deploymentPolicy": active_policy,
+    });
+    let mut stale = Vec::new();
+    for key in ["universe", "deploymentPolicy"] {
+        let current_hash = current.get(key).and_then(Value::as_str);
+        let active_hash = active_hashes.get(key).and_then(Value::as_str);
+        if current_hash != active_hash {
+            stale.push(serde_json::json!({
+                "projection": key,
+                "currentSourceHash": current_hash,
+                "activeReleaseSourceHash": active_hash,
+            }));
+        }
+    }
+
+    serde_json::json!({
+        "status": if stale.is_empty() { "current" } else { "compiled_runtime_stale" },
+        "compiled_runtime_stale": !stale.is_empty(),
+        "compiled_source_hash": current.get("universe").cloned().unwrap_or(Value::Null),
+        "policy_hash": current.get("deploymentPolicy").cloned().unwrap_or(Value::Null),
+        "currentSourceHash": current,
+        "activeReleaseSourceHash": active_hashes,
+        "staleProjections": stale,
+    })
+}
+
+fn compiled_runtime_source_hash(compiled_runtime: &Value, key: &str) -> Option<String> {
+    compiled_runtime
+        .get(key)
+        .and_then(|value| value.get("sourceHash"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn active_release_projection_source_hash(active: &Value, key: &str) -> Option<String> {
+    active
+        .get("typedLispRuntime")
+        .and_then(|value| value.get("projections"))
+        .and_then(|value| value.get(key))
+        .and_then(|value| value.get("source_hash"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn missiond_active_release_status() -> Value {
+    let install_root = std::env::var("MISSIOND_INSTALL_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|home| PathBuf::from(home).join(".xjp-mission"))
+                .unwrap_or_else(|_| PathBuf::from(".xjp-mission"))
+        });
+    let active_link = std::env::var("MISSIOND_ACTIVE_LINK")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| install_root.join("active"));
+    missiond_active_release_status_for(&active_link)
+}
+
+fn missiond_active_release_status_for(active_link: &Path) -> Value {
+    let active_target = std::fs::read_link(active_link).ok();
+    let active_dir = active_target.as_deref().unwrap_or(active_link);
+    let manifest_path = active_dir.join("release-manifest.json");
+    let bytes = match std::fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return serde_json::json!({
+                "ok": false,
+                "activeLink": active_link.display().to_string(),
+                "activeTarget": active_target.as_ref().map(|p| p.display().to_string()),
+                "manifestPath": manifest_path.display().to_string(),
+                "missing": true,
+                "diagnostic": err.to_string()
+            });
+        }
+    };
+    let manifest: Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            return serde_json::json!({
+                "ok": false,
+                "activeLink": active_link.display().to_string(),
+                "activeTarget": active_target.as_ref().map(|p| p.display().to_string()),
+                "manifestPath": manifest_path.display().to_string(),
+                "missing": false,
+                "diagnostic": err.to_string()
+            });
+        }
+    };
+    let typed = manifest
+        .get("typed_lisp_runtime")
+        .cloned()
+        .unwrap_or(Value::Null);
+    serde_json::json!({
+        "ok": !typed.is_null(),
+        "activeLink": active_link.display().to_string(),
+        "activeTarget": active_target.as_ref().map(|p| p.display().to_string()),
+        "manifestPath": manifest_path.display().to_string(),
+        "releaseId": manifest.get("release_id").cloned().unwrap_or(Value::Null),
+        "gitSha": manifest.get("git_sha").cloned().unwrap_or(Value::Null),
+        "typedLispRuntimePresent": !typed.is_null(),
+        "typedLispRuntime": typed,
+    })
 }
 
 fn match_db_project(
@@ -1563,6 +1977,14 @@ fn project_resolution_next_actions(
             "command": "node scripts/compile-v3-runtime.mjs --write",
             "hint": "Compiled universe was unavailable; registry DB and explicit query facts were still used."
         })],
+        "compiled_runtime_stale" => vec![serde_json::json!({
+            "action": "refresh_and_redeploy_runtime_projection",
+            "commands": [
+                "node scripts/compile-v3-runtime.mjs --write",
+                "scripts/deploy-daemon.sh"
+            ],
+            "hint": "The daemon active release and compiled runtime projection hashes do not match; do not treat unregistered candidates as authoritative until the hashes converge."
+        })],
         _ => vec![serde_json::json!({
             "action": "request_root_or_register",
             "hint": "No registered project or local candidate was found. Ask for the repo root or add the project to MissionD Universe."
@@ -1579,8 +2001,8 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry, compiled_project_lookup_matches,
-        compiled_service_lookup_matches,
+        compiled_project_lookup_matches, compiled_service_lookup_matches,
+        CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry,
     };
 
     fn compiled_project() -> CompiledProjectUniverseEntry {
