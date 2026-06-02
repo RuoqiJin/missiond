@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use missiond_core::types::CliEngine;
 use missiond_core::{ProviderBoxHttpRequest, ProviderBoxHttpResponse};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 use super::driver::ProviderDriverCapabilities;
 use super::runtime::ProviderInteractionBox;
@@ -29,6 +31,7 @@ const CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT: usize = 4;
 const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
 const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
 const CLAUDE_CODE_TEXT_MAX_CONCURRENT: usize = 1;
+const MODEL_CATALOG_LIVE_TIMEOUT_SECS: u64 = 20;
 const PTY_STEP_ALLOWED_KEYS: &[&str] = &[
     "enter",
     "return",
@@ -827,11 +830,51 @@ impl ProviderBoxHttpAdapter {
         } else {
             interaction.router_export_policy = Some(json!({}));
         }
-        let result = self
-            .boxed
-            .execute(interaction)
-            .await
-            .map_err(|err| err.to_string())?;
+        let timeout_secs = request
+            .body
+            .get("live_timeout_secs")
+            .or_else(|| request.body.get("timeout_secs"))
+            .and_then(Value::as_u64)
+            .unwrap_or(MODEL_CATALOG_LIVE_TIMEOUT_SECS);
+        let result = match timeout(
+            Duration::from_secs(timeout_secs.max(1)),
+            self.boxed.execute(interaction.clone()),
+        )
+        .await
+        {
+            Ok(Ok(result)) if result.status == ProviderBoxStatus::Completed => result,
+            Ok(Ok(result)) => static_models_export_result(
+                &interaction,
+                ProviderBoxDiagnostic::warning(
+                    "MODEL_CATALOG_LIVE_EXPORT_UNAVAILABLE",
+                    "Live provider model catalog is unavailable; returning static provider-box sources",
+                    json!({
+                        "live_status": result.status,
+                        "live_diagnostics": result.diagnostics,
+                    }),
+                ),
+            ),
+            Ok(Err(err)) => static_models_export_result(
+                &interaction,
+                ProviderBoxDiagnostic::warning(
+                    "MODEL_CATALOG_LIVE_EXPORT_ERROR",
+                    "Live provider model catalog failed; returning static provider-box sources",
+                    json!({
+                        "error": err.to_string(),
+                    }),
+                ),
+            ),
+            Err(_) => static_models_export_result(
+                &interaction,
+                ProviderBoxDiagnostic::warning(
+                    "MODEL_CATALOG_LIVE_EXPORT_TIMEOUT",
+                    "Live provider model catalog timed out; returning static provider-box sources",
+                    json!({
+                        "timeout_secs": timeout_secs.max(1),
+                    }),
+                ),
+            ),
+        };
         Ok(result_response(result))
     }
 
@@ -966,7 +1009,10 @@ impl ProviderBoxHttpAdapter {
         };
         if logical_claude_code_text_request && has_explicit_slot {
             let mut result = ProviderBoxResult::base(
-                &ProviderInteractionRequest::new(BoxCommand::PureTextSingleTurn, CliEngine::ClaudeCode),
+                &ProviderInteractionRequest::new(
+                    BoxCommand::PureTextSingleTurn,
+                    CliEngine::ClaudeCode,
+                ),
                 ProviderBoxStatus::Failed,
             );
             result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -1133,7 +1179,10 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
         return None;
     }
     let engine = engine_from_body(body);
-    if !matches!(engine, CliEngine::Agy | CliEngine::Codex | CliEngine::ClaudeCode) {
+    if !matches!(
+        engine,
+        CliEngine::Agy | CliEngine::Codex | CliEngine::ClaudeCode
+    ) {
         return None;
     }
     if has_forbidden_text_only_fields(body) {
@@ -1145,6 +1194,14 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
     let correlation_id = string_field(body, "correlation_id")
         .unwrap_or_else(|| format!("router-{}", uuid::Uuid::new_v4().simple()));
     let prompt = build_pure_text_prompt(messages)?;
+    let model_profile = string_field(body, "model_profile")
+        .or_else(|| string_field(body, "reasoning_effort"))
+        .or_else(|| string_field(body, "model_reasoning_effort"));
+    if engine == CliEngine::ClaudeCode
+        && !is_exported_claude_code_text_model(&model, model_profile.as_deref())
+    {
+        return None;
+    }
 
     let mut interaction = ProviderInteractionRequest::pure_text(engine, prompt);
     interaction.schema = "missiond.provider-interaction-request.v1".to_string();
@@ -1159,9 +1216,7 @@ fn text_only_interaction_from_body(body: &Value) -> Option<ProviderInteractionRe
         )
     });
     interaction.model = Some(model.clone());
-    interaction.model_profile = string_field(body, "model_profile")
-        .or_else(|| string_field(body, "reasoning_effort"))
-        .or_else(|| string_field(body, "model_reasoning_effort"));
+    interaction.model_profile = model_profile;
     interaction.provider_box_lane = provider_box_lane(body);
     interaction.xjp_request_stage = string_field(body, "xjp_request_stage")
         .or_else(|| string_field(body, "pipeline_stage"))
@@ -1561,11 +1616,7 @@ fn engine_from_body(body: &Value) -> CliEngine {
 
 fn cli_engine_from_hint(raw: &str) -> CliEngine {
     match raw.to_ascii_lowercase().as_str() {
-        "claude-code"
-        | "claude_code"
-        | "claudecode"
-        | "claude"
-        | "claude_code_text"
+        "claude-code" | "claude_code" | "claudecode" | "claude" | "claude_code_text"
         | "claude-code-text" => CliEngine::ClaudeCode,
         "codex"
         | "codex_cli"
@@ -1840,19 +1891,23 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
         }
         body
     } else {
+        let diagnostics = result.diagnostics.clone();
+        let error_code = diagnostics.first().map(|diag| diag.code.clone());
         json!({
             "schema": result.schema,
             "status": result.status,
             "turn_id": result.turn_id,
             "correlation_id": result.correlation_id,
             "error": {
+                "code": error_code,
                 "message": result
                     .diagnostics
                     .first()
                     .map(|diag| diag.message.clone())
                     .unwrap_or_else(|| "Provider-box request failed".to_string()),
-                "diagnostics": result.diagnostics
+                "diagnostics": diagnostics.clone()
             },
+            "diagnostics": diagnostics,
             "slot_status": result.slot_status,
             "provider_conversation_id": result.provider_conversation_id,
             "provider_session_identity": result.provider_session_identity,
@@ -1869,6 +1924,41 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
         })
     };
     json_response(status, body)
+}
+
+fn static_models_export_result(
+    request: &ProviderInteractionRequest,
+    diagnostic: ProviderBoxDiagnostic,
+) -> ProviderBoxResult {
+    let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Completed);
+    result.model_catalog = Some(ProviderModelCatalog {
+        schema: "missiond.provider-model-catalog.v1".to_string(),
+        catalog_id: format!("static-catalog-{}", uuid::Uuid::new_v4().simple()),
+        provider: Some("provider-box-static".to_string()),
+        engine: request.engine,
+        account_ref: None,
+        discovered_at: chrono::Utc::now().to_rfc3339(),
+        source: Some("provider-box:static-text-only-sources".to_string()),
+        entries: Vec::new(),
+        diagnostics: vec![diagnostic.clone()],
+    });
+    result.router_export = Some(ProviderRouterExport {
+        schema: "missiond.provider-router-export.v1".to_string(),
+        export_id: format!("static-export-{}", uuid::Uuid::new_v4().simple()),
+        catalog_id: result
+            .model_catalog
+            .as_ref()
+            .map(|catalog| catalog.catalog_id.clone()),
+        provider: Some("provider-box-static".to_string()),
+        engine: request.engine,
+        router_backend_ids: vec!["xjp-router:provider-box-static".to_string()],
+        routeable_entries: Vec::new(),
+        blocked_entries: Vec::new(),
+        policy_ref: Some("interactive-provider-box/static-text-only-sources".to_string()),
+        diagnostics: vec![diagnostic.clone()],
+    });
+    result.diagnostics.push(diagnostic);
+    result
 }
 
 fn response_media_artifact(slot_status: Option<&Value>) -> Option<Value> {
@@ -2522,7 +2612,7 @@ fn claude_code_text_openai_model_data() -> Vec<Value> {
                 },
                 "pure_text": true,
                 "routeable_default": true,
-                "routeable_status": "pending_live_smoke",
+                "routeable_status": "live_smoke_passed",
                 "guarded": true
             })
         })
@@ -2545,7 +2635,7 @@ fn claude_code_text_only_sources() -> Vec<Value> {
                 "model_profile": def.model_profile,
                 "completion_endpoint": "/provider-box/v1/text-only/completions",
                 "routeable": true,
-                "routeable_status": "pending_live_smoke",
+                "routeable_status": "live_smoke_passed",
                 "request_template": {
                     "schema": "missiond.provider-box.text-only-completion-request.v1",
                     "provider": CLAUDE_CODE_TEXT_PROVIDER,
@@ -2608,7 +2698,7 @@ fn claude_code_text_router_sources() -> Vec<Value> {
                 "model_id": def.model_id,
                 "display_name": def.display_name,
                 "routeable": true,
-                "routeable_status": "pending_live_smoke",
+                "routeable_status": "live_smoke_passed",
                 "route": {
                     "provider": CLAUDE_CODE_TEXT_PROVIDER,
                     "provider_model_id": def.provider_model_id,
@@ -2626,6 +2716,16 @@ fn claude_code_text_router_sources() -> Vec<Value> {
 
 fn claude_code_text_queue_key(model_id: &str) -> String {
     format!("{CLAUDE_CODE_TEXT_PROVIDER}:{model_id}")
+}
+
+fn is_exported_claude_code_text_model(model_id: &str, model_profile: Option<&str>) -> bool {
+    let model_id = model_id.trim();
+    claude_code_text_source_defs().into_iter().any(|def| {
+        def.model_id.eq_ignore_ascii_case(model_id)
+            && model_profile
+                .map(|profile| profile.trim().eq_ignore_ascii_case(def.model_profile))
+                .unwrap_or(true)
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -2878,9 +2978,8 @@ fn redact_private_claude_code_text_details(result: &mut ProviderBoxResult) {
         result.durable_source = Some("claude_code_session_jsonl_cursor".to_string());
     }
     for diagnostic in &mut result.diagnostics {
-        diagnostic.details = redact_private_paths_in_value(redact_slot_ids_in_value(
-            diagnostic.details.clone(),
-        ));
+        diagnostic.details =
+            redact_private_paths_in_value(redact_slot_ids_in_value(diagnostic.details.clone()));
     }
 }
 
@@ -2918,9 +3017,12 @@ fn redact_private_paths_in_value(value: Value) -> Value {
                 .map(|(key, value)| (key, redact_private_paths_in_value(value)))
                 .collect(),
         ),
-        Value::Array(items) => {
-            Value::Array(items.into_iter().map(redact_private_paths_in_value).collect())
-        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(redact_private_paths_in_value)
+                .collect(),
+        ),
         other => other,
     }
 }
@@ -3079,6 +3181,8 @@ fn provider_box_internal_token() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::provider_box::types::DIAG_PROVIDER_UPSTREAM_UNAVAILABLE;
+
     use super::*;
 
     #[test]
@@ -3184,6 +3288,63 @@ mod tests {
         assert!(request.no_tools);
         assert!(request.no_shell);
         assert!(request.model_switch_policy.is_none());
+    }
+
+    #[test]
+    fn claude_code_text_only_body_builds_guarded_logical_request() {
+        let body = json!({
+            "schema": "missiond.provider-box.text-only-completion-request.v1",
+            "provider": "claude_code_text",
+            "engine": "claude_code",
+            "model": "claude-code-opus-4-8-xhigh",
+            "model_profile": "xhigh",
+            "correlation_id": "corr-claude-text",
+            "messages": [{"role": "user", "content": "hello"}],
+            "pure_text": true
+        });
+
+        let request = text_only_interaction_from_body(&body).expect("request");
+
+        assert_eq!(request.engine, CliEngine::ClaudeCode);
+        assert_eq!(request.provider.as_deref(), Some("claude_code_text"));
+        assert_eq!(request.model.as_deref(), Some("claude-code-opus-4-8-xhigh"));
+        assert_eq!(request.model_profile.as_deref(), Some("xhigh"));
+        assert_eq!(request.prompt.as_deref(), Some("hello"));
+        assert!(request.slot_id.is_none());
+        assert!(request.no_tools);
+        assert!(request.no_mcp);
+        assert!(request.no_shell);
+        assert!(request.no_file_access);
+        assert!(request.model_switch_policy.is_none());
+    }
+
+    #[test]
+    fn claude_code_text_only_body_rejects_unexported_default_model() {
+        let body = json!({
+            "schema": "missiond.provider-box.text-only-completion-request.v1",
+            "provider": "claude_code_text",
+            "engine": "claude_code",
+            "model": "claude-code-default",
+            "messages": [{"role": "user", "content": "hello"}],
+            "pure_text": true
+        });
+
+        assert!(text_only_interaction_from_body(&body).is_none());
+    }
+
+    #[test]
+    fn claude_code_text_only_body_rejects_mismatched_profile() {
+        let body = json!({
+            "schema": "missiond.provider-box.text-only-completion-request.v1",
+            "provider": "claude_code_text",
+            "engine": "claude_code",
+            "model": "claude-code-opus-4-8-xhigh",
+            "model_profile": "high",
+            "messages": [{"role": "user", "content": "hello"}],
+            "pure_text": true
+        });
+
+        assert!(text_only_interaction_from_body(&body).is_none());
     }
 
     #[test]
@@ -3378,6 +3539,151 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_text_sources_export_three_guarded_logical_models() {
+        let mut body = json!({
+            "data": [],
+            "provider_text_only_sources": [],
+            "router_model_sources": []
+        });
+
+        append_claude_code_text_exports(&mut body);
+        append_claude_code_text_router_sources(&mut body);
+
+        let data = body["data"].as_array().expect("data");
+        let claude_models = data
+            .iter()
+            .filter(|entry| entry["provider"] == CLAUDE_CODE_TEXT_PROVIDER)
+            .collect::<Vec<_>>();
+        assert_eq!(claude_models.len(), 3);
+        assert!(claude_models
+            .iter()
+            .any(|entry| entry["id"] == "claude-code-opus-4-8-xhigh"
+                && entry["provider_model_id"] == "claude-opus-4-8"
+                && entry["model_profile"] == "xhigh"));
+        assert!(claude_models
+            .iter()
+            .any(|entry| entry["id"] == "claude-code-opus-4-6-high"
+                && entry["provider_model_id"] == "claude-opus-4-6"
+                && entry["model_profile"] == "high"));
+        assert!(claude_models
+            .iter()
+            .any(|entry| entry["id"] == "claude-code-sonnet-4-6-high"
+                && entry["provider_model_id"] == "claude-sonnet-4-6"
+                && entry["model_profile"] == "high"));
+        assert!(!data
+            .iter()
+            .any(|entry| entry["id"] == "claude-code-default"));
+
+        let sources = body["provider_text_only_sources"]
+            .as_array()
+            .expect("sources");
+        assert_eq!(sources.len(), 3);
+        for source in sources {
+            assert_eq!(source["provider"], CLAUDE_CODE_TEXT_PROVIDER);
+            assert_eq!(source["engine"], "claude_code");
+            assert_eq!(source["capabilities"]["text"], true);
+            assert_eq!(source["capabilities"]["tools"], false);
+            assert_eq!(source["capabilities"]["files"], false);
+            assert_eq!(source["capabilities"]["mcp"], false);
+            assert_eq!(source["capabilities"]["shell"], false);
+            assert_eq!(source["capabilities"]["vision"], false);
+            assert_eq!(source["guard"]["interactive_pty"], true);
+            assert_eq!(source["guard"]["uses_print_mode"], false);
+            assert_eq!(source["guard"]["per_request_session_id"], true);
+            assert_eq!(source["guard"]["mcp_config_empty"], true);
+            assert_eq!(source["guard"]["strict_mcp_config"], true);
+            assert_eq!(source["guard"]["tools_flag"], "--tools ''");
+            assert_eq!(source["guard"]["slash_commands_disabled"], true);
+            assert_eq!(source["guard"]["durable_jsonl_guard"], true);
+            assert_eq!(
+                source["queue"]["max_concurrent"],
+                CLAUDE_CODE_TEXT_MAX_CONCURRENT
+            );
+            assert!(source["queue"]["key"]
+                .as_str()
+                .expect("queue key")
+                .starts_with("claude_code_text:claude-code-"));
+            assert!(source["request_template"].get("slot_id").is_none());
+            assert_eq!(
+                source["slot_policy"]["kind"],
+                "provider_box_managed_ephemeral_private_slot"
+            );
+            assert_eq!(source["slot_policy"]["private_slot_exposed"], false);
+        }
+
+        let router_sources = body["router_model_sources"]
+            .as_array()
+            .expect("router sources");
+        assert_eq!(router_sources.len(), 3);
+        assert!(router_sources.iter().all(|entry| {
+            entry["route"]["provider"] == CLAUDE_CODE_TEXT_PROVIDER
+                && entry["text_only_source"]["slot_policy"]["private_slot_exposed"] == false
+        }));
+    }
+
+    #[test]
+    fn static_model_export_fallback_still_exposes_claude_code_sources() {
+        let request =
+            ProviderInteractionRequest::new(BoxCommand::ModelCatalogExport, CliEngine::Agy);
+        let result = static_models_export_result(
+            &request,
+            ProviderBoxDiagnostic::warning(
+                "MODEL_CATALOG_LIVE_EXPORT_TIMEOUT",
+                "live export timeout",
+                json!({"timeout_secs": 1}),
+            ),
+        );
+
+        let response = result_response(result);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body["diagnostics"][0]["code"],
+            "MODEL_CATALOG_LIVE_EXPORT_TIMEOUT"
+        );
+        let claude_sources = response.body["provider_text_only_sources"]
+            .as_array()
+            .expect("sources")
+            .iter()
+            .filter(|entry| entry["provider"] == CLAUDE_CODE_TEXT_PROVIDER)
+            .collect::<Vec<_>>();
+        assert_eq!(claude_sources.len(), 3);
+        assert!(response.body["router_model_sources"]
+            .as_array()
+            .expect("router sources")
+            .iter()
+            .any(|entry| entry["model_id"] == "claude-code-opus-4-8-xhigh"));
+    }
+
+    #[test]
+    fn failed_provider_box_response_exposes_error_code_and_top_level_diagnostics() {
+        let request =
+            ProviderInteractionRequest::new(BoxCommand::PureTextSingleTurn, CliEngine::ClaudeCode);
+        let mut result = ProviderBoxResult::base(&request, ProviderBoxStatus::Failed);
+        result.add_diagnostic(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_UPSTREAM_UNAVAILABLE,
+            "upstream unavailable",
+            json!({"status": 529}),
+        ));
+
+        let response = result_response(result);
+
+        assert_eq!(response.status, 502);
+        assert_eq!(
+            response.body["error"]["code"],
+            DIAG_PROVIDER_UPSTREAM_UNAVAILABLE
+        );
+        assert_eq!(
+            response.body["error"]["diagnostics"][0]["code"],
+            DIAG_PROVIDER_UPSTREAM_UNAVAILABLE
+        );
+        assert_eq!(
+            response.body["diagnostics"][0]["code"],
+            DIAG_PROVIDER_UPSTREAM_UNAVAILABLE
+        );
+    }
+
+    #[test]
     fn text_only_body_can_explicitly_allow_model_switch() {
         let body = json!({
             "engine": "agy",
@@ -3465,6 +3771,42 @@ mod tests {
             response.body["error"]["diagnostics"][0]["code"],
             DIAG_PROVIDER_BOX_INVALID_REQUEST
         );
+    }
+
+    #[tokio::test]
+    async fn claude_code_text_only_rejects_external_slot_id() {
+        let adapter = ProviderBoxHttpAdapter::new(std::sync::Arc::new(
+            ProviderInteractionBox::without_artifacts(),
+        ));
+        let request = ProviderBoxHttpRequest {
+            method: "POST".to_string(),
+            path: "/provider-box/v1/text-only/completions".to_string(),
+            headers: HashMap::new(),
+            body: json!({
+                "provider": "claude_code_text",
+                "engine": "claude_code",
+                "model": "claude-code-opus-4-8-xhigh",
+                "model_profile": "xhigh",
+                "slot_id": "slot-claude-code-text-leaked",
+                "messages": [{"role": "user", "content": "hello"}],
+                "pure_text": true
+            }),
+        };
+
+        let response = adapter
+            .handle_text_only_completion(request)
+            .await
+            .expect("response");
+
+        assert_eq!(response.status, 502);
+        assert_eq!(
+            response.body["error"]["diagnostics"][0]["code"],
+            DIAG_PROVIDER_BOX_INVALID_REQUEST
+        );
+        assert!(response.body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("does not accept external slot_id"));
     }
 
     #[tokio::test]

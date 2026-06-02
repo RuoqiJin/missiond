@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;

@@ -439,7 +439,10 @@ fn build_cli_command_with_claude_options(
 
     match engine {
         CliEngine::ClaudeCode => {
-            let mut parts = format!("claude --add-dir {}", shell_quote(&cwd.display().to_string()));
+            let mut parts = format!(
+                "claude --add-dir {}",
+                shell_quote(&cwd.display().to_string())
+            );
             if let Some(mcp) = mcp_config {
                 parts.push_str(&format!(
                     " --mcp-config {}",

@@ -21,7 +21,7 @@ use super::types::{
     DIAG_MODEL_SWITCH_UNVERIFIED, DIAG_PROVIDER_BOX_INVALID_REQUEST,
     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE, DIAG_PROVIDER_CONTROL_ACTION_UNSUPPORTED,
     DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED, DIAG_PROVIDER_DURABLE_FINAL_MISSING,
-    DIAG_PROVIDER_TEXT_ONLY_VIOLATION,
+    DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_UPSTREAM_UNAVAILABLE,
 };
 
 const DEFAULT_CLAUDE_CODE_SLOT: &str = "slot-claude-code-default";
@@ -79,6 +79,7 @@ struct ClaudeCodeJsonlAnalysis {
     line_count: usize,
     final_text: Option<String>,
     violation: Option<Value>,
+    upstream_error: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1415,6 +1416,33 @@ impl ClaudeCodeProviderDriver {
                 ));
                 return false;
             }
+            if let Some(upstream_error) = analysis.upstream_error {
+                let status = upstream_error
+                    .pointer("/error/status")
+                    .or_else(|| upstream_error.get("status"))
+                    .and_then(Value::as_i64);
+                let formatted = upstream_error
+                    .pointer("/error/formatted")
+                    .or_else(|| upstream_error.get("formatted"))
+                    .and_then(Value::as_str);
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_UPSTREAM_UNAVAILABLE,
+                    "ClaudeCode upstream provider returned an API error before durable final",
+                    json!({
+                        "provider": CLAUDE_CODE_TEXT_PROVIDER,
+                        "model_id": source.model_id,
+                        "provider_model_id": source.provider_model_id,
+                        "session_id": session_id,
+                        "status": status,
+                        "formatted": formatted,
+                        "event": upstream_error,
+                        "line_count": analysis.line_count,
+                        "rule": "provider-box fails closed on ClaudeCode API errors and does not synthesize a final from PTY screen text"
+                    }),
+                ));
+                return false;
+            }
 
             if let Some(final_text) = analysis
                 .final_text
@@ -2275,6 +2303,12 @@ fn analyze_claude_code_jsonl_after_cursor(
             analysis.violation = Some(event.clone());
             continue;
         }
+        if analysis.upstream_error.is_none() {
+            if let Some(upstream_error) = claude_code_jsonl_event_upstream_error(&event) {
+                analysis.upstream_error = Some(upstream_error);
+                continue;
+            }
+        }
         if let Some(final_text) = claude_code_assistant_end_turn_text(&event) {
             if !final_text.trim().is_empty() {
                 analysis.final_text = Some(final_text.trim().to_string());
@@ -2337,6 +2371,54 @@ fn claude_code_jsonl_event_is_text_only_violation(event: &Value) -> bool {
         return true;
     }
     json_value_has_disallowed_claude_code_tool_evidence(event)
+}
+
+fn claude_code_jsonl_event_upstream_error(event: &Value) -> Option<Value> {
+    if event
+        .get("isApiErrorMessage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some(event.clone());
+    }
+
+    let error = event.get("error")?;
+    match error {
+        Value::Object(map) => {
+            if map
+                .get("status")
+                .and_then(Value::as_i64)
+                .is_some_and(|status| status >= 400)
+            {
+                return Some(event.clone());
+            }
+            if map
+                .get("formatted")
+                .and_then(Value::as_str)
+                .is_some_and(|formatted| {
+                    let formatted = formatted.to_ascii_lowercase();
+                    formatted.contains("overloaded")
+                        || formatted.contains("rate limit")
+                        || formatted.contains("server error")
+                        || formatted.contains("api error")
+                })
+            {
+                return Some(event.clone());
+            }
+        }
+        Value::String(error) => {
+            let error = error.to_ascii_lowercase();
+            if error.contains("server_error")
+                || error.contains("overloaded")
+                || error.contains("rate limit")
+                || error.contains("api error")
+            {
+                return Some(event.clone());
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 fn json_value_has_disallowed_claude_code_tool_evidence(value: &Value) -> bool {
@@ -2758,5 +2840,41 @@ mod tests {
             analysis.final_text.as_deref(),
             Some("should not be trusted")
         );
+    }
+
+    #[test]
+    fn claude_code_jsonl_scanner_detects_upstream_api_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = "019e82f0-0000-7000-8000-000000000004";
+        let project_dir = temp.path().join("projects").join("missiond");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let jsonl = project_dir.join(format!("{session_id}.jsonl"));
+        fs::write(
+            &jsonl,
+            concat!(
+                "{\"type\":\"system\",\"error\":{\"status\":529,\"formatted\":\"529 Overloaded\",\"requestId\":\"req_1\"}}\n",
+                "{\"type\":\"assistant\",\"isApiErrorMessage\":true,\"error\":\"server_error\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"stop_sequence\",\"content\":[{\"type\":\"text\",\"text\":\"API Error: 529 Overloaded\"}]}}\n"
+            ),
+        )
+        .expect("jsonl");
+
+        let analysis = analyze_claude_code_jsonl_after_cursor(
+            temp.path(),
+            session_id,
+            &ClaudeCodeJsonlCursor {
+                path: None,
+                offset: 0,
+            },
+        );
+
+        let upstream = analysis
+            .upstream_error
+            .expect("upstream API error should be detected");
+        assert_eq!(
+            upstream.pointer("/error/status").and_then(|v| v.as_i64()),
+            Some(529)
+        );
+        assert!(analysis.violation.is_none());
+        assert!(analysis.final_text.is_none());
     }
 }

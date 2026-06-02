@@ -1,10 +1,10 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use crate::context::v3_blueprint_runtime::{
-    CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry, load_compiled_project_universe,
+    load_compiled_project_universe, CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry,
 };
 use crate::state::AppState;
 
