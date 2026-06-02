@@ -1644,6 +1644,7 @@ fn compiled_service_to_value(service: &CompiledServiceRuntimeEntry) -> Value {
         "dependencies": service.dependencies.clone(),
         "ops_capability": service.ops_capability.clone(),
         "surface": service.surface.clone(),
+        "supportCatalog": service.support_catalog.clone(),
     })
 }
 
@@ -2044,6 +2045,7 @@ mod tests {
             dependencies: Vec::new(),
             ops_capability: None,
             surface: None,
+            support_catalog: None,
         }
     }
 

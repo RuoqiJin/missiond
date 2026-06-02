@@ -8,6 +8,7 @@ export const RUNTIME_DOMAIN_SPECS = Object.freeze([
   { id: 'project-registry', payloadKey: 'projectRegistry', file: 'compiled-runtime-project-registry.json' },
   { id: 'capability-governance', payloadKey: 'capabilityGovernance', file: 'compiled-runtime-capability-governance.json' },
   { id: 'memory-kb', payloadKey: 'memoryKb', file: 'compiled-runtime-memory-kb.json' },
+  { id: 'evidence-lane-policy', payloadKey: 'evidenceLanePolicy', file: 'compiled-runtime-evidence-lane-policy.json' },
   { id: 'conversation-ingestion', payloadKey: 'conversationIngestion', file: 'compiled-runtime-conversation-ingestion.json' },
   { id: 'autopilot', payloadKey: 'autopilot', file: 'compiled-runtime-autopilot.json' },
   { id: 'control-plane-kernel', payloadKey: 'controlPlaneKernel', file: 'compiled-runtime-control-plane-kernel.json' },

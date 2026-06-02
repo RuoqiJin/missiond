@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::context::v3_contracts::generated as v3_contracts;
 use crate::context::v3_runtime_defaults;
@@ -344,6 +344,41 @@ pub(crate) struct MemoryKbRuntimeConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct EvidenceLaneRuntimeConfig {
+    #[serde(default)]
+    pub lanes: Vec<EvidenceLaneRuntimeEntry>,
+    #[serde(default)]
+    pub profiles: Vec<EvidenceLaneProfileRuntimeEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct EvidenceLaneRuntimeEntry {
+    pub lane_id: String,
+    pub authority_class: String,
+    #[serde(default)]
+    pub source_types: Vec<String>,
+    #[serde(default)]
+    pub default_profiles: Vec<String>,
+    pub raw_policy: String,
+    pub privacy_class: String,
+    #[serde(default)]
+    pub validity: Vec<String>,
+    pub freshness: String,
+    pub injectable_by_default: bool,
+    #[serde(default)]
+    pub promotion_rules: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct EvidenceLaneProfileRuntimeEntry {
+    pub profile: String,
+    #[serde(default)]
+    pub allowed_lanes: Vec<String>,
+    pub raw_sources: bool,
+    pub credential_values: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct ConversationIngestionRuntimeConfig {
     pub conversation_get_tail_default: i64,
     pub conversation_search_default_limit: i64,
@@ -554,6 +589,36 @@ pub(crate) struct CompiledServiceRuntimeEntry {
     pub dependencies: Vec<String>,
     pub ops_capability: Option<String>,
     pub surface: Option<String>,
+    #[serde(default)]
+    pub support_catalog: Option<CompiledServiceSupportCatalog>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct CompiledServiceSupportCatalog {
+    pub service_id: Option<String>,
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    pub public_base_url: Option<String>,
+    pub frontend_url: Option<String>,
+    pub api_base_url: Option<String>,
+    #[serde(default)]
+    pub health: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    pub deploy_center_slug: Option<String>,
+    pub runtime_target: Option<String>,
+    pub executor: Option<String>,
+    pub container: Option<String>,
+    #[serde(default)]
+    pub service_manifest_refs: Vec<String>,
+    #[serde(default)]
+    pub credential_refs: Vec<String>,
+    #[serde(default)]
+    pub source_evidence: Vec<String>,
+    pub db_migration_namespace: Option<String>,
+    pub database_namespace: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -768,6 +833,314 @@ impl Default for CapabilityGovernanceRuntimeConfig {
 impl Default for MemoryKbRuntimeConfig {
     fn default() -> Self {
         generated_default_runtime_config().memory_kb
+    }
+}
+
+impl Default for EvidenceLaneRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            lanes: vec![
+                evidence_lane_default(
+                    "runtime_truth",
+                    "runtime_truth",
+                    &[
+                        "runtime_environment",
+                        "deploy_release_manifest",
+                        "deploy_center_provenance",
+                        "health_smoke",
+                        "runtime_status",
+                    ],
+                    &[
+                        "intent_default",
+                        "deploy_ops",
+                        "conversation_audit",
+                        "full_debug",
+                    ],
+                    "compact_only",
+                    "operational",
+                    &["current_rule"],
+                    "hot_runtime",
+                    true,
+                    &["already-authoritative", "no-kb-promotion"],
+                ),
+                evidence_lane_default(
+                    "project_ssot",
+                    "file_first_lisp_and_compiled_project_universe",
+                    &[
+                        "project_resolution",
+                        "project_registry",
+                        "ssot",
+                        "compiled_project_universe",
+                        "service_runtime_universe",
+                    ],
+                    &[
+                        "intent_default",
+                        "deploy_ops",
+                        "conversation_audit",
+                        "full_debug",
+                    ],
+                    "compact_only",
+                    "internal",
+                    &["current_rule", "project_specific"],
+                    "compiled_runtime_bound",
+                    true,
+                    &["already-authoritative", "no-conversation-override"],
+                ),
+                evidence_lane_default(
+                    "reviewed_kb",
+                    "knowledge_review_state",
+                    &[
+                        "knowledge",
+                        "knowledge_review_state",
+                        "promoted_decision",
+                        "incident_pattern",
+                        "active_fact",
+                    ],
+                    &[
+                        "intent_default",
+                        "deploy_ops",
+                        "conversation_audit",
+                        "full_debug",
+                    ],
+                    "compact_only",
+                    "internal",
+                    &["active_fact", "decision", "incident_pattern"],
+                    "ttl_or_version_bound",
+                    true,
+                    &[
+                        "review-required",
+                        "ttl-required-for-deploy-config-dependency",
+                    ],
+                ),
+                evidence_lane_default(
+                    "active_board",
+                    "board_projection",
+                    &[
+                        "board_task",
+                        "workflow_run",
+                        "incident",
+                        "deploy_work_order",
+                        "task_result_projection",
+                    ],
+                    &[
+                        "intent_default",
+                        "deploy_ops",
+                        "conversation_audit",
+                        "full_debug",
+                    ],
+                    "compact_only",
+                    "internal",
+                    &["current_state", "active_work_order"],
+                    "active_task_bound",
+                    true,
+                    &["artifact-before-kb"],
+                ),
+                evidence_lane_default(
+                    "skill_evidence",
+                    "evidence_only",
+                    &[
+                        "skill_metadata",
+                        "skill_procedure",
+                        "skill_operational_fact",
+                        "skill_warning",
+                        "skill_credential_ref",
+                        "infra_evidence",
+                    ],
+                    &["deploy_ops", "full_debug"],
+                    "compact_only",
+                    "internal",
+                    &[
+                        "current_rule",
+                        "historical_pattern",
+                        "deprecated",
+                        "project_specific",
+                        "evidence_only",
+                    ],
+                    "version_bound_or_historical",
+                    false,
+                    &[
+                        "needs_review-before-kb",
+                        "operational-fact-samples-high-confidence-only",
+                    ],
+                ),
+                evidence_lane_default(
+                    "conversation_audit",
+                    "provider_durable_conversation_read_model",
+                    &[
+                        "conversation_episode",
+                        "conversation_fact_extract",
+                        "conversation_duplicate_group",
+                        "conversation_message_raw",
+                    ],
+                    &["conversation_audit", "full_debug"],
+                    "raw_opt_in_only",
+                    "audit",
+                    &[
+                        "derived_from_conversation",
+                        "historical_pattern",
+                        "needs_review",
+                    ],
+                    "time_range_bound",
+                    false,
+                    &[
+                        "episode-first",
+                        "raw-message-audit-only",
+                        "fact-extract-needs-review",
+                    ],
+                ),
+                evidence_lane_default(
+                    "cold_archive",
+                    "forensics_only_cold_archive",
+                    &[
+                        "archived_session",
+                        "true_user_utterance",
+                        "transcript_dump",
+                        "research_dump",
+                        "raw_provider_log",
+                        "old_compiled_projection",
+                    ],
+                    &["full_debug"],
+                    "explicit_path_or_full_debug_only",
+                    "audit",
+                    &["historical_evidence", "stale", "duplicate", "superseded"],
+                    "cold_archive",
+                    false,
+                    &["never-default", "no-auto-promotion"],
+                ),
+                evidence_lane_default(
+                    "support_refs",
+                    "redacted_support_catalog",
+                    &[
+                        "support_catalog",
+                        "deploy_center_service",
+                        "github_workflow",
+                        "service_manifest",
+                        "db_migration_namespace",
+                        "health_endpoint",
+                        "smoke_endpoint",
+                        "agent_ref",
+                        "secret_ref",
+                    ],
+                    &[
+                        "intent_default",
+                        "deploy_ops",
+                        "conversation_audit",
+                        "full_debug",
+                    ],
+                    "secret_refs_only",
+                    "reference",
+                    &["current_reference", "project_specific"],
+                    "runtime_or_catalog_bound",
+                    true,
+                    &["secret-values-never-indexed", "provenance-required"],
+                ),
+            ],
+            profiles: vec![
+                evidence_lane_profile_default(
+                    "intent_default",
+                    &[
+                        "runtime_truth",
+                        "project_ssot",
+                        "reviewed_kb",
+                        "active_board",
+                        "support_refs",
+                    ],
+                    false,
+                    false,
+                ),
+                evidence_lane_profile_default(
+                    "deploy_ops",
+                    &[
+                        "runtime_truth",
+                        "project_ssot",
+                        "reviewed_kb",
+                        "active_board",
+                        "support_refs",
+                        "skill_evidence",
+                    ],
+                    false,
+                    false,
+                ),
+                evidence_lane_profile_default(
+                    "conversation_audit",
+                    &[
+                        "runtime_truth",
+                        "project_ssot",
+                        "reviewed_kb",
+                        "active_board",
+                        "support_refs",
+                        "conversation_audit",
+                    ],
+                    false,
+                    false,
+                ),
+                evidence_lane_profile_default(
+                    "full_debug",
+                    &[
+                        "runtime_truth",
+                        "project_ssot",
+                        "reviewed_kb",
+                        "active_board",
+                        "support_refs",
+                        "skill_evidence",
+                        "conversation_audit",
+                        "cold_archive",
+                    ],
+                    true,
+                    false,
+                ),
+            ],
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evidence_lane_default(
+    lane_id: &str,
+    authority_class: &str,
+    source_types: &[&str],
+    default_profiles: &[&str],
+    raw_policy: &str,
+    privacy_class: &str,
+    validity: &[&str],
+    freshness: &str,
+    injectable_by_default: bool,
+    promotion_rules: &[&str],
+) -> EvidenceLaneRuntimeEntry {
+    EvidenceLaneRuntimeEntry {
+        lane_id: lane_id.to_string(),
+        authority_class: authority_class.to_string(),
+        source_types: source_types.iter().map(|value| value.to_string()).collect(),
+        default_profiles: default_profiles
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        raw_policy: raw_policy.to_string(),
+        privacy_class: privacy_class.to_string(),
+        validity: validity.iter().map(|value| value.to_string()).collect(),
+        freshness: freshness.to_string(),
+        injectable_by_default,
+        promotion_rules: promotion_rules
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+    }
+}
+
+fn evidence_lane_profile_default(
+    profile: &str,
+    allowed_lanes: &[&str],
+    raw_sources: bool,
+    credential_values: bool,
+) -> EvidenceLaneProfileRuntimeEntry {
+    EvidenceLaneProfileRuntimeEntry {
+        profile: profile.to_string(),
+        allowed_lanes: allowed_lanes
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        raw_sources,
+        credential_values,
     }
 }
 
@@ -1369,6 +1742,32 @@ impl MemoryKbRuntimeConfig {
         if let Some(compiled) =
             required_compiled_runtime_domain(project_root, "memory-kb", |payload| {
                 payload.memory_kb.clone()
+            })?
+        {
+            return Ok(compiled);
+        }
+        Ok(Self::default())
+    }
+}
+
+impl EvidenceLaneRuntimeConfig {
+    #[allow(dead_code)]
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        if let Some(compiled) =
+            required_compiled_runtime_domain(project_root, "evidence-lane-policy", |payload| {
+                payload.evidence_lane_policy.clone()
             })?
         {
             return Ok(compiled);

@@ -5,7 +5,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition::new(
             "mission_context_gather",
-            "高频上下文聚合入口：一次性查询 KB、SSOT intent、project registry、skill operational evidence、infra evidence、Board task records 和 bounded conversation logs，用于 intent.lisp/plan.lisp 前的事实补齐。",
+            "高频上下文聚合入口：profile-first 查询 runtime_truth、project_ssot、reviewed_kb、active_board、support_refs，以及可选 skill_evidence / conversation_audit / cold_archive，并返回 compact evidence_lanes、evidence_items、support_catalog 和 context_noise_metrics。",
             json!({
                 "type": "object",
                 "properties": {
@@ -14,7 +14,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "enum": ["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
                         "default": "intent_default",
-                        "description": "Authority-aware source profile. intent_default excludes conversation/infra/credentials; deploy_ops enables skill+infra+credential evidence; conversation_audit enables bounded conversations; full_debug preserves broad diagnostic behavior."
+                        "description": "Evidence lane profile. intent_default allows runtime_truth/project_ssot/reviewed_kb/active_board/support_refs; deploy_ops adds scoped skill_evidence and redacted credential refs; conversation_audit adds bounded conversation evidence; full_debug preserves raw/cold forensics."
                     },
                     "sourceProfile": {
                         "type": "string",
@@ -43,7 +43,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "includeConversations": {"type": "boolean", "description": "include_conversations alias"},
                     "include_credentials": {"type": "boolean", "default": false, "description": "Include credential ref lane; disabled unless deploy_ops/full_debug or explicit opt-in"},
                     "includeCredentials": {"type": "boolean", "default": false, "description": "include_credentials alias"},
-                    "include_raw_sources": {"type": "boolean", "default": false, "description": "Persist raw legacy sources into worker context pack; default artifact uses compact evidence_lanes"},
+                    "include_raw_sources": {"type": "boolean", "default": false, "description": "Include raw legacy sources in response/context pack; default artifact uses compact evidence_lanes/evidence_items/support_catalog only"},
                     "includeRawSources": {"type": "boolean", "default": false, "description": "include_raw_sources alias"},
                     "conversation_time_range": {"type": "string", "default": "last_30d", "description": "Conversation search window: last_24h, last_7d, last_30d"},
                     "conversationTimeRange": {"type": "string", "default": "last_30d", "description": "conversation_time_range alias"},

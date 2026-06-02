@@ -1270,7 +1270,8 @@ impl ClaudeCodeProviderDriver {
                     }),
                 ));
                 let status = self.pty.get_status(slot_id).await;
-                result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
                 result.mcp_status = Some(claude_code_mcp_status_value(
                     request,
                     slot_id,
@@ -2737,7 +2738,8 @@ fn claude_code_mcp_detail_action_positions(
 
     for line in observation.text.lines() {
         let trimmed = line.trim_start();
-        let selected = trimmed.starts_with('❯') || trimmed.starts_with('>') || trimmed.starts_with('›');
+        let selected =
+            trimmed.starts_with('❯') || trimmed.starts_with('>') || trimmed.starts_with('›');
         let candidate = if selected {
             trimmed
                 .chars()
@@ -3336,12 +3338,11 @@ mod tests {
 
     use super::{
         analyze_claude_code_jsonl_after_cursor, claude_code_jsonl_cursor_for_session,
-        claude_code_jsonl_event_is_text_only_violation,
-        claude_code_mcp_detail_action_positions, claude_code_mcp_reconnect_action_selected,
-        claude_code_mcp_reconnect_action_visible, claude_code_mcp_reconnect_line,
-        claude_code_mcp_reconnect_outcome, claude_code_mcp_status_value,
-        claude_code_provider_capabilities,
-        claude_code_permission_cycle_steps, claude_code_staged_command_matches,
+        claude_code_jsonl_event_is_text_only_violation, claude_code_mcp_detail_action_positions,
+        claude_code_mcp_reconnect_action_selected, claude_code_mcp_reconnect_action_visible,
+        claude_code_mcp_reconnect_line, claude_code_mcp_reconnect_outcome,
+        claude_code_mcp_status_value, claude_code_permission_cycle_steps,
+        claude_code_provider_capabilities, claude_code_staged_command_matches,
         extract_claude_code_mcp_server_entries_from_screen, find_claude_code_session_jsonl,
         is_claude_code_logout_success, normalize_claude_code_model_target,
         normalize_claude_code_permission_mode, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,

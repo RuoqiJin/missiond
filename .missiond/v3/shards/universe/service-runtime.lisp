@@ -106,6 +106,7 @@
 (service-runtime-universe
     :schema "missiond.service-runtime-universe.v1"
     :rule "Production service runtime facts are Lisp-owned Universe data: project/service roots, domains, deployments, health, DNS capability, and ops owner are visible to resident master and workers through mission_project(action=universe). Secrets stay outside Lisp."
+    :compiled-support-catalog-fields [support_catalog deploy_center_slug service_manifest_refs health smoke runtime_target db_migration_namespace credential_refs]
     (service :id auth
       :project xiaojinpro-backend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth"

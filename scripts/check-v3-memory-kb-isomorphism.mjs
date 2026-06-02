@@ -34,6 +34,10 @@ const DEFAULT_FILES = {
   kbReview: 'crates/missiond-daemon/src/handlers/knowledge/kb/review.rs',
   contextGather: 'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
   mcpContextGather: 'crates/missiond-mcp/src/tools/knowledge/context_gather.rs',
+  evidenceMigration: 'crates/missiond-core/migrations/20260602000000_evidence_lane_read_models.sql',
+  runtimeDomains: 'scripts/lib/v3_runtime_domains.mjs',
+  runtimeConfigPayload: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/runtime_config_payload.rs',
+  lispcEmit: 'tools/missiond_lispc/bin/emit_json.ml',
   toolDirectory: 'crates/missiond-daemon/src/handlers/comm/tool_directory.rs',
   kbReviewMigration: 'crates/missiond-core/migrations/20260508001000_knowledge_review_state.sql',
   kbReviewTypes: 'crates/missiond-core/src/types/knowledge.rs',
@@ -195,6 +199,20 @@ function checkFiles(root, files) {
     'mission_kb_review MUST write a non-destructive knowledge_review_state overlay; it MUST NOT mutate or delete the original knowledge row.',
     'mission_kb_query default retrieval MUST honor the review overlay while include_archived=true and state_filter preserve audit access to historical evidence.',
     'grounding-search-aggregate',
+    'evidence-lane-policy',
+    'runtime_truth',
+    'project_ssot',
+    'reviewed_kb',
+    'active_board',
+    'skill_evidence',
+    'conversation_audit',
+    'cold_archive',
+    'support_refs',
+    'evidence_items',
+    'context_gather_runs',
+    'conversation_episodes',
+    'conversation_fact_extracts',
+    'skill_evidence_items',
     'source_profile',
     'intent_default',
     'deploy_ops',
@@ -210,7 +228,9 @@ function checkFiles(root, files) {
     'task-record-indexing',
     'active Board task records',
     'bounded conversation logs',
-    'Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources',
+    'Worker context packs MUST include evidence_lanes, evidence_items, and support_catalog lane summaries by default and omit raw sources',
+    'mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes',
+    'mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections',
     'mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes',
     'Board/task/workflow records are searchable retrieval evidence',
     'Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane.',
@@ -236,9 +256,24 @@ function checkFiles(root, files) {
     'include_conversations',
     'conversation_time_range',
     'evidence_lanes',
+    'evidence_items',
+    'support_catalog',
     'authority_order',
     'noise_diagnostics',
     'context_noise_metrics',
+    'build_support_catalog',
+    'build_evidence_items',
+    'persist_evidence_lane_projection',
+    'record_context_gather_run',
+    'upsert_evidence_items',
+    'runtime_truth',
+    'project_ssot',
+    'reviewed_kb',
+    'active_board',
+    'skill_evidence',
+    'conversation_audit',
+    'cold_archive',
+    'support_refs',
     'context_pack_artifact_payload',
     'credential_lane_opt_in',
     'selection.include_credentials',
@@ -255,8 +290,17 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.mcpContextGather, sources.mcpContextGather, [
-    'Board task records',
-    'bounded conversation logs',
+    'runtime_truth',
+    'project_ssot',
+    'reviewed_kb',
+    'active_board',
+    'support_refs',
+    'skill_evidence',
+    'conversation_audit',
+    'cold_archive',
+    'evidence_lanes',
+    'evidence_items',
+    'support_catalog',
     'source_profile',
     'sourceProfile',
     'intent_default',
@@ -281,6 +325,11 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
     'MemoryKbRuntimeConfig',
+    'EvidenceLaneRuntimeConfig',
+    'EvidenceLaneRuntimeEntry',
+    'EvidenceLaneProfileRuntimeEntry',
+    'evidence-lane-policy',
+    'payload.evidence_lane_policy.clone()',
     'LearningEngineRuntimeConfig',
     'parse_memory_kb_policy',
     'parse_learning_engine_policy',
@@ -309,6 +358,44 @@ function checkFiles(root, files) {
     ':token-spend-guard-window-secs',
     ':token-spend-guard-soft-limit',
     ':cooccurrence-refresh-interval-secs',
+  ]);
+
+  requireAll(diagnostics, files.runtimeConfigPayload, sources.runtimeConfigPayload, [
+    'evidenceLanePolicy',
+    'evidence_lane_policy',
+    'EvidenceLaneRuntimeConfig',
+    '#[serde(rename = "evidenceLanePolicy", default)]',
+  ]);
+
+  requireAll(diagnostics, files.runtimeDomains, sources.runtimeDomains, [
+    'evidence-lane-policy',
+    'evidenceLanePolicy',
+    'compiled-runtime-evidence-lane-policy.json',
+  ]);
+
+  requireAll(diagnostics, files.lispcEmit, sources.lispcEmit, [
+    'evidence_lane_policy_runtime_config_json',
+    'evidence_lane_entry_json',
+    'evidence_lane_profile_json',
+    'evidenceLanePolicy',
+    'find_child root "evidence-lane-policy"',
+  ]);
+
+  requireAll(diagnostics, files.evidenceMigration, sources.evidenceMigration, [
+    'CREATE TABLE IF NOT EXISTS evidence_items',
+    'CREATE TABLE IF NOT EXISTS context_gather_runs',
+    'CREATE TABLE IF NOT EXISTS conversation_episodes',
+    'CREATE TABLE IF NOT EXISTS conversation_fact_extracts',
+    'CREATE TABLE IF NOT EXISTS conversation_duplicate_groups',
+    'CREATE TABLE IF NOT EXISTS skill_evidence_items',
+    "'runtime_truth'",
+    "'project_ssot'",
+    "'reviewed_kb'",
+    "'active_board'",
+    "'skill_evidence'",
+    "'conversation_audit'",
+    "'cold_archive'",
+    "'support_refs'",
   ]);
 
   requireAll(diagnostics, files.kbFacade, sources.kbFacade, [
@@ -868,12 +955,28 @@ function buildFixture() {
 	                 "Timeline Analyst MUST check the Gemini provider gate before collecting timeline evidence or calling Gemini"])
 	  (grounding-search-aggregate
 	    :source_profile [intent_default deploy_ops conversation_audit full_debug]
-	    :fields [evidence_lanes authority_order noise_diagnostics context_noise_metrics include_raw_sources]
+	    :fields [evidence_lanes evidence_items support_catalog authority_order noise_diagnostics context_noise_metrics include_raw_sources]
 	    :invariants ["credential_refs MUST NOT be emitted unless include_credentials=true"
-	                 "Worker context packs MUST include evidence_lanes lane summaries by default and omit raw sources"
+	                 "Worker context packs MUST include evidence_lanes, evidence_items, and support_catalog lane summaries by default and omit raw sources"
+	                 "mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes"
+	                 "mission_context_gather(persist=true) MUST persist context_gather_runs metrics and evidence_items compact projections"
 	                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
 	                 "Board/task/workflow records are searchable retrieval evidence"
 	                 "Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane."])
+	  (evidence-lane-policy
+	    :schema "missiond.evidence-lane-policy.v1"
+	    :primary-read-model evidence_items
+	    :run-metrics-read-model context_gather_runs
+	    (lane runtime_truth :authority-class runtime_truth :source-types [runtime_environment] :default-profiles [intent_default] :raw-policy compact_only :privacy-class operational :validity [current_rule] :freshness hot_runtime :injectable-by-default true :promotion-rules [already-authoritative])
+	    (lane project_ssot :authority-class file_first_lisp_and_compiled_project_universe :source-types [project_resolution project_registry ssot] :default-profiles [intent_default] :raw-policy compact_only :privacy-class internal :validity [current_rule] :freshness compiled_runtime_bound :injectable-by-default true :promotion-rules [already-authoritative])
+	    (lane reviewed_kb :authority-class knowledge_review_state :source-types [knowledge] :default-profiles [intent_default] :raw-policy compact_only :privacy-class internal :validity [active_fact] :freshness ttl_or_version_bound :injectable-by-default true :promotion-rules [review-required])
+	    (lane active_board :authority-class board_projection :source-types [board_task] :default-profiles [intent_default] :raw-policy compact_only :privacy-class internal :validity [current_state] :freshness active_task_bound :injectable-by-default true :promotion-rules [artifact-before-kb])
+	    (lane skill_evidence :authority-class evidence_only :source-types [skill_metadata skill_procedure skill_operational_fact skill_warning skill_credential_ref] :default-profiles [deploy_ops] :raw-policy compact_only :privacy-class internal :validity [evidence_only] :freshness version_bound_or_historical :injectable-by-default false :promotion-rules [needs_review-before-kb])
+	    (lane conversation_audit :authority-class provider_durable_conversation_read_model :source-types [conversation_episode conversation_fact_extract conversation_duplicate_group] :default-profiles [conversation_audit] :raw-policy raw_opt_in_only :privacy-class audit :validity [derived_from_conversation] :freshness time_range_bound :injectable-by-default false :promotion-rules [episode-first])
+	    (lane cold_archive :authority-class forensics_only_cold_archive :source-types [archived_session true_user_utterance transcript_dump research_dump raw_provider_log] :default-profiles [full_debug] :raw-policy explicit_path_or_full_debug_only :privacy-class audit :validity [historical_evidence] :freshness cold_archive :injectable-by-default false :promotion-rules [never-default])
+	    (lane support_refs :authority-class redacted_support_catalog :source-types [support_catalog secret_ref] :default-profiles [intent_default] :raw-policy secret_refs_only :privacy-class reference :validity [current_reference] :freshness runtime_or_catalog_bound :injectable-by-default true :promotion-rules [secret-values-never-indexed])
+	    :read-models ((table conversation_episodes) (table conversation_fact_extracts) (table skill_evidence_items))
+	    :invariants ["support_refs MUST expose secret_ref namespace/key/provenance/availability only"])
 	  (skill-edit-delegation-policy)
 	  (task-record-indexing :records ["active Board task records" "bounded conversation logs"])
 	  (fixture-contract-text
@@ -957,17 +1060,36 @@ pub(crate) async fn handle() {
   "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_kb_review"; "mission_beacon"; "mission_kb_remember";
 }`);
 	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
-	MemoryKbRuntimeConfig; LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS; DEFAULT_LEARNING_TOKEN_SPEND_GUARD_WINDOW_SECS; DEFAULT_LEARNING_TOKEN_SPEND_GUARD_SOFT_LIMIT; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :realtime-empty-backoff-base-secs; :realtime-empty-backoff-max-secs; :deep-analysis-zero-output-fuse-threshold; :deep-analysis-zero-output-fuse-secs; :token-spend-guard-window-secs; :token-spend-guard-soft-limit; :cooccurrence-refresh-interval-secs;
+	MemoryKbRuntimeConfig; EvidenceLaneRuntimeConfig; EvidenceLaneRuntimeEntry; EvidenceLaneProfileRuntimeEntry; evidence-lane-policy; payload.evidence_lane_policy.clone(); LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_BASE_SECS; DEFAULT_LEARNING_REALTIME_EMPTY_BACKOFF_MAX_SECS; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_THRESHOLD; DEFAULT_LEARNING_DEEP_ANALYSIS_ZERO_OUTPUT_FUSE_SECS; DEFAULT_LEARNING_TOKEN_SPEND_GUARD_WINDOW_SECS; DEFAULT_LEARNING_TOKEN_SPEND_GUARD_SOFT_LIMIT; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :realtime-empty-backoff-base-secs; :realtime-empty-backoff-max-secs; :deep-analysis-zero-output-fuse-threshold; :deep-analysis-zero-output-fuse-secs; :token-spend-guard-window-secs; :token-spend-guard-soft-limit; :cooccurrence-refresh-interval-secs;
 	`);
+  writeFixture(root, DEFAULT_FILES.runtimeConfigPayload, `
+#[serde(rename = "evidenceLanePolicy", default)]
+evidenceLanePolicy; evidence_lane_policy; EvidenceLaneRuntimeConfig;
+`);
+  writeFixture(root, DEFAULT_FILES.runtimeDomains, `
+evidence-lane-policy; evidenceLanePolicy; compiled-runtime-evidence-lane-policy.json;
+`);
+  writeFixture(root, DEFAULT_FILES.lispcEmit, `
+evidence_lane_policy_runtime_config_json; evidence_lane_entry_json; evidence_lane_profile_json; evidenceLanePolicy; find_child root "evidence-lane-policy";
+`);
+  writeFixture(root, DEFAULT_FILES.evidenceMigration, `
+CREATE TABLE IF NOT EXISTS evidence_items;
+CREATE TABLE IF NOT EXISTS context_gather_runs;
+CREATE TABLE IF NOT EXISTS conversation_episodes;
+CREATE TABLE IF NOT EXISTS conversation_fact_extracts;
+CREATE TABLE IF NOT EXISTS conversation_duplicate_groups;
+CREATE TABLE IF NOT EXISTS skill_evidence_items;
+'runtime_truth'; 'project_ssot'; 'reviewed_kb'; 'active_board'; 'skill_evidence'; 'conversation_audit'; 'cold_archive'; 'support_refs';
+`);
   writeFixture(root, DEFAULT_FILES.contextGather, `
 SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources;
 include_board; include_conversations; conversation_time_range;
-evidence_lanes; authority_order; noise_diagnostics; context_noise_metrics; context_pack_artifact_payload;
+evidence_lanes; evidence_items; support_catalog; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; build_evidence_items; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
 credential_lane_opt_in; selection.include_credentials; selection.include_raw_sources; raw_sources_omitted;
 "board_tasks"; "conversation_logs"; "credential_refs"; "mission_board_query"; "mission_conversation_query"; "scope": "active"; "time_range"; last_30d;
 `);
   writeFixture(root, DEFAULT_FILES.mcpContextGather, `
-Board task records; bounded conversation logs; source_profile; sourceProfile; intent_default; deploy_ops; conversation_audit; full_debug;
+runtime_truth; project_ssot; reviewed_kb; active_board; support_refs; skill_evidence; conversation_audit; cold_archive; evidence_lanes; evidence_items; support_catalog; source_profile; sourceProfile; intent_default; deploy_ops; conversation_audit; full_debug;
 include_credentials; includeCredentials; include_raw_sources; includeRawSources;
 include_board; include_conversations; conversation_time_range;
 `);

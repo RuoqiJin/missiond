@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   mutate: 'crates/missiond-daemon/src/handlers/knowledge/skill/mutate.rs',
   exec: 'crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs',
   pgSkill: 'crates/missiond-core/src/db/pg/skill.rs',
+  evidenceMigration: 'crates/missiond-core/migrations/20260602000000_evidence_lane_read_models.sql',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/skill.rs',
 };
 
@@ -100,6 +101,12 @@ function checkFiles(root, files) {
     'optional-query resolve by project_id or skill',
     'project_skill_links evidence',
     'skill-derived operational_facts',
+    'skill_evidence_items',
+    'skill_metadata',
+    'skill_procedure',
+    'skill_operational_fact',
+    'skill_warning',
+    'skill_credential_ref',
     'remote-host/deploy-agent/router embedding/rerank/12900kf lookups',
     'clean-machine skill SQL counter reads MUST cast integer counters to bigint before decoding into SkillTopic i64 fields',
     'mission_skill_context.operational_facts',
@@ -204,6 +211,16 @@ function checkFiles(root, files) {
     'total_lines::bigint AS total_lines',
   ]);
 
+  requireAll(diagnostics, files.evidenceMigration, sources.evidenceMigration, [
+    'CREATE TABLE IF NOT EXISTS skill_evidence_items',
+    "'metadata'",
+    "'procedure'",
+    "'operational_fact'",
+    "'warning'",
+    "'credential_ref'",
+    'validity',
+  ]);
+
   requireAll(diagnostics, files.mcp, sources.mcp, [
     'ToolDefinition::new',
     '"mission_skill_query"',
@@ -254,7 +271,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs"
              "crates/missiond-mcp/src/tools/knowledge/skill.rs"
              "scripts/check-v3-skill-runtime-isomorphism.mjs"]
-      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats/project_links, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; clean-machine skill SQL counter reads MUST cast integer counters to bigint before decoding into SkillTopic i64 fields; skill/context.rs owns context build/resolve plus project-aware context resolution, optional-query resolve by project_id or skill, project_skill_links evidence, skill-derived operational_facts for remote-host/deploy-agent/router embedding/rerank/12900kf lookups, and explicit opt-in KB dependency aggregation; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
+      :note "skill.rs is the thin mission_skill facade; skill/query.rs owns list/search/topics/actions/stats/project_links, composite registry/topic/action/embedding/execution statistics, and derived project-skill links; clean-machine skill SQL counter reads MUST cast integer counters to bigint before decoding into SkillTopic i64 fields; skill/context.rs owns context build/resolve plus project-aware context resolution, optional-query resolve by project_id or skill, project_skill_links evidence, skill-derived operational_facts for remote-host/deploy-agent/router embedding/rerank/12900kf lookups, and explicit opt-in KB dependency aggregation; skill_evidence_items split skill_metadata, skill_procedure, skill_operational_fact, skill_warning, and skill_credential_ref; skill/mutate.rs owns upsert/record/render/rollback; skill/exec.rs owns mission_skill_exec."))
   (runtime-projection [mission_skill_context.operational_facts])
   (compression-contract
     :checks ["node scripts/check-v3-skill-runtime-isomorphism.mjs"]))`);
@@ -305,6 +322,13 @@ handle_exec execute_workflow dry_run approve params Workflow execution failed
 hit_count::bigint AS hit_count
 fragment_count::bigint AS fragment_count
 total_lines::bigint AS total_lines
+`);
+
+  writeFixture(root, DEFAULT_FILES.evidenceMigration, `
+CREATE TABLE IF NOT EXISTS skill_evidence_items (
+  item_type TEXT CHECK (item_type IN ('metadata', 'procedure', 'operational_fact', 'warning', 'credential_ref')),
+  validity TEXT
+);
 `);
 
   writeFixture(root, DEFAULT_FILES.mcp, `

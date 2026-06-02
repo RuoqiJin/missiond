@@ -700,6 +700,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
 
+        let artifact_hash = context_pack_file
+            .as_ref()
+            .map(|(hash, _)| hash.as_str())
+            .or_else(|| artifact.get("hash").and_then(Value::as_str));
+        let context_gather_run =
+            build_context_gather_run_input(&payload, profile, selection, artifact_hash);
+        let evidence_lane_persistence =
+            persist_evidence_lane_projection(state, &context_gather_run, &evidence_item_inputs)
+                .await;
+
         if let Some(object) = payload.as_object_mut() {
             if let Some((hash, context_pack_file)) = context_pack_file.as_ref() {
                 object.insert(
@@ -725,6 +735,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "context_capsule_hash".to_string(),
                 Value::String(capsule_hash),
             );
+            object.insert(
+                "evidence_lane_persistence".to_string(),
+                evidence_lane_persistence,
+            );
             if let Ok(path) = capsule_path {
                 object.insert(
                     "context_capsule_file".to_string(),
@@ -739,12 +753,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
 fn authority_order() -> Value {
     json!([
-        "runtime_environment",
-        "ssot_project_facts",
-        "reviewed_kb_memory",
-        "active_board_projection",
-        "conversation_read_model",
-        "skill_infra_evidence"
+        "runtime_truth",
+        "project_ssot",
+        "reviewed_kb",
+        "active_board",
+        "support_refs",
+        "skill_evidence",
+        "conversation_audit",
+        "cold_archive"
     ])
 }
 
@@ -752,41 +768,109 @@ fn build_evidence_lanes(sources: &serde_json::Map<String, Value>) -> Value {
     json!({
         "schema": "missiond.context-gather-evidence-lanes.v1",
         "lanes": {
-            "runtime_environment": evidence_lane(
+            "runtime_truth": evidence_lane(
                 sources,
+                "runtime_truth",
                 "runtime-env-and-monitor",
-                "deployed runtime paths, compiled runtime locations, and monitor endpoints",
+                "deployed runtime paths, compiled runtime locations, release/health/smoke status, and monitor endpoints",
                 &["runtime_environment"],
+                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
+                "compact_only",
+                "operational",
+                "current_rule",
+                "hot_runtime",
+                true,
             ),
-            "ssot_project_facts": evidence_lane(
+            "project_ssot": evidence_lane(
                 sources,
+                "project_ssot",
                 "file-first-lisp-and-compiled-project-universe",
                 "project identity plus active Lisp/compiled project facts",
                 &["project_resolution", "project_registry", "ssot"],
+                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
+                "compact_only",
+                "internal",
+                "current_rule",
+                "compiled_runtime_bound",
+                true,
             ),
-            "reviewed_kb_memory": evidence_lane(
+            "reviewed_kb": evidence_lane(
                 sources,
+                "reviewed_kb",
                 "knowledge_review_state",
                 "curated active KB retrieval after review overlay",
                 &["kb"],
+                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
+                "compact_only",
+                "internal",
+                "active_fact",
+                "ttl_or_review_bound",
+                true,
             ),
-            "active_board_projection": evidence_lane(
+            "active_board": evidence_lane(
                 sources,
+                "active_board",
                 "board_projection",
                 "active Board task coordination records",
                 &["board_tasks"],
+                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
+                "compact_only",
+                "internal",
+                "current_state",
+                "active_task_bound",
+                true,
             ),
-            "conversation_read_model": evidence_lane(
+            "skill_evidence": evidence_lane(
                 sources,
-                "provider_durable_conversation_read_model",
-                "bounded query-scoped conversation audit evidence",
-                &["conversation_logs"],
-            ),
-            "skill_infra_evidence": evidence_lane(
-                sources,
+                "skill_evidence",
                 "evidence-only",
                 "skill and infra operational hints; not runtime truth",
-                &["skill_context", "infra", "credential_refs"],
+                &["skill_context", "infra"],
+                &["deploy_ops", "full_debug"],
+                "compact_only",
+                "internal",
+                "evidence_only",
+                "version_bound_or_historical",
+                false,
+            ),
+            "conversation_audit": evidence_lane(
+                sources,
+                "conversation_audit",
+                "provider_durable_conversation_read_model",
+                "bounded query-scoped conversation episode/fact evidence; raw messages remain opt-in",
+                &["conversation_logs"],
+                &["conversation_audit", "full_debug"],
+                "raw_opt_in_only",
+                "audit",
+                "derived_from_conversation",
+                "time_range_bound",
+                false,
+            ),
+            "cold_archive": evidence_lane(
+                sources,
+                "cold_archive",
+                "forensics-only-cold-archive",
+                "archived sessions, transcript dumps, raw provider logs, and research dumps",
+                &[],
+                &["full_debug"],
+                "explicit_path_or_full_debug_only",
+                "audit",
+                "historical_evidence",
+                "cold_archive",
+                false,
+            ),
+            "support_refs": evidence_lane(
+                sources,
+                "support_refs",
+                "redacted-support-catalog",
+                "deploy center, service manifest, endpoint, database/migration, agent, and secret-ref provenance",
+                &["project_resolution", "project_registry", "credential_refs"],
+                &["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
+                "secret_refs_only",
+                "reference",
+                "current_reference",
+                "runtime_or_catalog_bound",
+                true,
             ),
         }
     })
@@ -794,9 +878,16 @@ fn build_evidence_lanes(sources: &serde_json::Map<String, Value>) -> Value {
 
 fn evidence_lane(
     sources: &serde_json::Map<String, Value>,
-    authority: &str,
+    lane_id: &str,
+    authority_class: &str,
     role: &str,
     keys: &[&str],
+    default_profiles: &[&str],
+    raw_policy: &str,
+    privacy_class: &str,
+    validity: &str,
+    freshness: &str,
+    injectable_by_default: bool,
 ) -> Value {
     let mut source_keys = Vec::new();
     let mut item_count = 0usize;
@@ -811,8 +902,15 @@ fn evidence_lane(
         }
     }
     json!({
-        "authority": authority,
+        "lane_id": lane_id,
+        "authority_class": authority_class,
         "role": role,
+        "default_profiles": default_profiles,
+        "raw_policy": raw_policy,
+        "privacy_class": privacy_class,
+        "validity": validity,
+        "freshness": freshness,
+        "injectable_by_default": injectable_by_default,
         "source_count": source_keys.len(),
         "item_count": item_count,
         "source_keys": source_keys,
@@ -845,6 +943,690 @@ fn evidence_source_item_count(key: &str, value: &Value) -> usize {
         _ if value.as_object().is_some_and(|object| object.is_empty()) => 0,
         _ => 1,
     }
+}
+
+fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
+    let project = first_project_payload(sources);
+    let service = first_service_runtime_payload(sources);
+    let service_catalog = service.and_then(|value| {
+        value
+            .get("supportCatalog")
+            .or_else(|| value.get("support_catalog"))
+    });
+    let credential_refs = redacted_credential_refs(sources);
+    let credential_ref_count = credential_refs.len();
+
+    json!({
+        "schema": "missiond.support-catalog.v1",
+        "authority": "compiled-project-service-runtime-plus-redacted-support-refs",
+        "project_id": text_from_sources(&[project], &["id", "project_id", "projectId"])
+            .or_else(|| text_from_sources(&[service], &["project"])),
+        "service_id": text_from_sources(&[service, service_catalog], &["id", "service_id", "serviceId"]),
+        "resolver_source": text_from_sources(&[project], &["source"])
+            .or_else(|| text_from_sources(&[service_catalog], &["resolver_source", "resolverSource"])),
+        "deploy_center_slug": text_from_sources(
+            &[service_catalog, service],
+            &["deploy_center_slug", "deployCenterSlug", "deployCenter", "deploy_center"],
+        ),
+        "runtime_target": {
+            "environment": text_from_sources(&[service_catalog, service], &["environment"]),
+            "target": text_from_sources(&[service_catalog, service], &["runtime_target", "runtimeTarget", "surface"]),
+            "ops_capability": text_from_sources(&[service_catalog, service], &["ops_capability", "opsCapability"]),
+        },
+        "urls": {
+            "public_base_url": text_from_sources(&[service_catalog, service], &["public_base_url", "publicBaseUrl"]),
+            "frontend_url": text_from_sources(&[service_catalog, service], &["frontend_url", "frontendUrl"]),
+            "api_base_url": text_from_sources(&[service_catalog, service], &["api_base_url", "apiBaseUrl"]),
+        },
+        "domains": string_list_from_sources(&[service_catalog, service], &["domains"]),
+        "manifest_refs": {
+            "root": text_from_sources(&[service_catalog, service], &["root"]),
+            "intent": text_from_sources(&[service_catalog, service], &["intent"]),
+            "backend": text_from_sources(&[service_catalog, service], &["backend"]),
+            "frontend": text_from_sources(&[service_catalog, service], &["frontend"]),
+            "operations": text_from_sources(&[service_catalog, service], &["operations"]),
+            "service_manifest_refs": string_list_from_sources(
+                &[service_catalog, service],
+                &["service_manifest_refs", "serviceManifestRefs", "source_evidence", "sourceEvidence"],
+            ),
+        },
+        "endpoints": {
+            "health": string_list_from_sources(&[service_catalog, service], &["health", "health_endpoints", "healthEndpoints"]),
+            "smoke": string_list_from_sources(&[service_catalog, service], &["smoke", "smoke_endpoints", "smokeEndpoints"]),
+        },
+        "dependencies": string_list_from_sources(&[service_catalog, service], &["dependencies"]),
+        "database": {
+            "migration_namespace": text_from_sources(
+                &[service_catalog, service],
+                &["db_migration_namespace", "dbMigrationNamespace", "migration_namespace", "migrationNamespace"],
+            ),
+            "database_namespace": text_from_sources(
+                &[service_catalog, service],
+                &["db_namespace", "dbNamespace", "database_namespace", "databaseNamespace"],
+            ),
+        },
+        "agent_refs": string_list_from_sources(&[service_catalog, service], &["agent_refs", "agentRefs", "vm_refs", "vmRefs"]),
+        "credential_refs": credential_refs,
+        "credential_ref_count": credential_ref_count,
+        "secret_policy": "Only secret namespace/key references and availability state are exposed. Secret values are not indexed or injected."
+    })
+}
+
+fn first_project_payload<'a>(sources: &'a serde_json::Map<String, Value>) -> Option<&'a Value> {
+    sources
+        .get("project_resolution")
+        .and_then(|value| {
+            value
+                .get("matched_project")
+                .or_else(|| value.get("matchedProject"))
+        })
+        .or_else(|| sources.get("project_registry"))
+}
+
+fn first_service_runtime_payload<'a>(
+    sources: &'a serde_json::Map<String, Value>,
+) -> Option<&'a Value> {
+    first_project_payload(sources)
+        .and_then(|value| {
+            value
+                .get("serviceRuntime")
+                .or_else(|| value.get("service_runtime"))
+        })
+        .or_else(|| {
+            sources.get("project_resolution").and_then(|value| {
+                value
+                    .get("matched_project")
+                    .or_else(|| value.get("matchedProject"))
+                    .and_then(|project| {
+                        project
+                            .get("serviceRuntime")
+                            .or_else(|| project.get("service_runtime"))
+                    })
+            })
+        })
+}
+
+fn text_from_sources(sources: &[Option<&Value>], keys: &[&str]) -> Option<String> {
+    sources.iter().find_map(|source| {
+        let source = source.as_ref()?;
+        keys.iter().find_map(|key| text_field(source, key))
+    })
+}
+
+fn text_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn string_list_from_sources(sources: &[Option<&Value>], keys: &[&str]) -> Vec<String> {
+    for source in sources.iter().flatten() {
+        for key in keys {
+            let values = string_list_field(source, key);
+            if !values.is_empty() {
+                return values;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn string_list_field(value: &Value, key: &str) -> Vec<String> {
+    match value.get(key) {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|item| {
+                item.as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+            .collect(),
+        Some(Value::String(text)) if !text.trim().is_empty() => vec![text.trim().to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn redacted_credential_refs(sources: &serde_json::Map<String, Value>) -> Vec<Value> {
+    let Some(source) = sources.get("credential_refs") else {
+        return Vec::new();
+    };
+    credential_ref_items(source)
+        .into_iter()
+        .take(20)
+        .map(redacted_credential_ref)
+        .collect()
+}
+
+fn credential_ref_items(value: &Value) -> Vec<&Value> {
+    value
+        .get("credentialRefs")
+        .or_else(|| value.get("credential_refs"))
+        .and_then(Value::as_array)
+        .map(|items| items.iter().collect())
+        .or_else(|| value.as_array().map(|items| items.iter().collect()))
+        .unwrap_or_default()
+}
+
+fn redacted_credential_ref(item: &Value) -> Value {
+    json!({
+        "namespace": text_field(item, "namespace"),
+        "key_name": text_field(item, "keyName").or_else(|| text_field(item, "key_name")),
+        "target_id": text_field(item, "targetId").or_else(|| text_field(item, "target_id")),
+        "required_capability": text_field(item, "requiredCapability")
+            .or_else(|| text_field(item, "required_capability")),
+        "availability": text_field(item, "availability"),
+        "purpose": text_field(item, "purpose").map(|value| compact_text(&value, 220)),
+        "provenance": text_field(item, "provenance")
+            .or_else(|| text_field(item, "source"))
+            .or_else(|| text_field(item, "sourcePath"))
+            .or_else(|| text_field(item, "source_path")),
+    })
+}
+
+fn build_evidence_items(
+    sources: &serde_json::Map<String, Value>,
+    source_summaries: &Value,
+    support_catalog: &Value,
+    profile: SourceProfile,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+) -> Vec<EvidenceItemInput> {
+    let mut items = Vec::new();
+
+    add_source_summary_item(
+        &mut items,
+        source_summaries,
+        "runtime_environment",
+        "runtime_truth",
+        "runtime_environment",
+        "Runtime truth",
+        "Current runtime environment, compiled runtime locations, and monitor endpoints.",
+        profile,
+        project_id,
+        task_id,
+    );
+    for source_key in ["project_resolution", "project_registry", "ssot"] {
+        add_source_summary_item(
+            &mut items,
+            source_summaries,
+            source_key,
+            "project_ssot",
+            source_key,
+            "Project SSOT",
+            "Project resolver, registry, and Lisp/compiled project universe facts.",
+            profile,
+            project_id,
+            task_id,
+        );
+    }
+    add_summary_collection_items(
+        &mut items,
+        source_summaries,
+        "kb",
+        "items",
+        "reviewed_kb",
+        "knowledge",
+        profile,
+        project_id,
+        task_id,
+        10,
+    );
+    add_summary_collection_items(
+        &mut items,
+        source_summaries,
+        "board_tasks",
+        "items",
+        "active_board",
+        "board_task",
+        profile,
+        project_id,
+        task_id,
+        10,
+    );
+    add_summary_collection_items(
+        &mut items,
+        source_summaries,
+        "skill_context",
+        "skills",
+        "skill_evidence",
+        "skill_metadata",
+        profile,
+        project_id,
+        task_id,
+        10,
+    );
+    add_summary_collection_items(
+        &mut items,
+        source_summaries,
+        "skill_context",
+        "project_skill_links",
+        "skill_evidence",
+        "skill_project_link",
+        profile,
+        project_id,
+        task_id,
+        10,
+    );
+    add_summary_collection_items(
+        &mut items,
+        source_summaries,
+        "infra",
+        "items",
+        "skill_evidence",
+        "skill_operational_fact",
+        profile,
+        project_id,
+        task_id,
+        10,
+    );
+    add_summary_collection_items(
+        &mut items,
+        source_summaries,
+        "conversation_logs",
+        "items",
+        "conversation_audit",
+        "conversation_fact_extract",
+        profile,
+        project_id,
+        task_id,
+        10,
+    );
+
+    if support_catalog_has_content(support_catalog) {
+        let source_id = text_field(support_catalog, "service_id")
+            .or_else(|| text_field(support_catalog, "project_id"));
+        push_evidence_item(
+            &mut items,
+            "support_refs",
+            "support_catalog",
+            source_id.as_deref(),
+            None,
+            project_id,
+            task_id,
+            "Support catalog",
+            "Domain, service, deploy, endpoint, DB/migration, agent, and redacted secret-reference support catalog.",
+            support_catalog,
+            profile,
+            None,
+        );
+    }
+
+    if let Some(source) = sources.get("credential_refs") {
+        for credential in credential_ref_items(source).into_iter().take(20) {
+            let redacted = redacted_credential_ref(credential);
+            let source_id = credential_ref_source_id(&redacted);
+            push_evidence_item(
+                &mut items,
+                "support_refs",
+                "skill_credential_ref",
+                source_id.as_deref(),
+                source_id.as_deref(),
+                project_id,
+                task_id,
+                "Credential reference",
+                "Redacted credential reference. Secret value is intentionally unavailable to retrieval and worker context.",
+                &redacted,
+                profile,
+                None,
+            );
+        }
+    }
+
+    items
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_source_summary_item(
+    items: &mut Vec<EvidenceItemInput>,
+    source_summaries: &Value,
+    source_key: &str,
+    lane_id: &str,
+    source_type: &str,
+    title: &str,
+    fallback_summary: &str,
+    profile: SourceProfile,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+) {
+    let Some(summary) = source_summaries.get(source_key) else {
+        return;
+    };
+    if summary_is_empty(summary) {
+        return;
+    }
+    let summary_text =
+        compact_json_text(summary, 900).unwrap_or_else(|| fallback_summary.to_string());
+    let source_id = text_from_sources(
+        &[Some(summary)],
+        &["id", "matched_project_id", "matchedProjectId"],
+    );
+    let source_ref = source_ref_from_value(summary);
+    push_evidence_item(
+        items,
+        lane_id,
+        source_type,
+        source_id.as_deref(),
+        source_ref.as_deref(),
+        project_id,
+        task_id,
+        title,
+        &summary_text,
+        summary,
+        profile,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_summary_collection_items(
+    items: &mut Vec<EvidenceItemInput>,
+    source_summaries: &Value,
+    source_key: &str,
+    collection_key: &str,
+    lane_id: &str,
+    source_type: &str,
+    profile: SourceProfile,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    limit: usize,
+) {
+    let Some(collection) = source_summaries
+        .get(source_key)
+        .and_then(|summary| summary.get(collection_key))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for item in collection.iter().take(limit) {
+        let title = evidence_title(item, source_type);
+        let summary = evidence_summary(item);
+        let source_id = source_id_from_value(item);
+        let source_ref = source_ref_from_value(item);
+        let score = numeric_field(item, &["score", "confidence"]);
+        push_evidence_item(
+            items,
+            lane_id,
+            source_type,
+            source_id.as_deref(),
+            source_ref.as_deref(),
+            project_id,
+            task_id,
+            &title,
+            &summary,
+            item,
+            profile,
+            score,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_evidence_item(
+    items: &mut Vec<EvidenceItemInput>,
+    lane_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+    source_ref: Option<&str>,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    title: &str,
+    summary: &str,
+    evidence_value: &Value,
+    profile: SourceProfile,
+    score: Option<f64>,
+) {
+    let title = compact_text(title, 180);
+    let summary = compact_text(summary, 1200);
+    let id = evidence_item_id(
+        lane_id,
+        source_type,
+        source_id,
+        source_ref,
+        &title,
+        &summary,
+    );
+    let mut refs = collect_evidence_refs_from_value(evidence_value);
+    refs.truncate(12);
+    let (authority_class, validity, privacy_class, freshness, raw_policy) =
+        evidence_item_policy(lane_id);
+    items.push(EvidenceItemInput {
+        id,
+        lane_id: lane_id.to_string(),
+        source_type: source_type.to_string(),
+        source_id: source_id.map(ToOwned::to_owned),
+        source_ref: source_ref.map(ToOwned::to_owned),
+        project_id: project_id.map(ToOwned::to_owned),
+        task_id: task_id.map(ToOwned::to_owned),
+        title,
+        summary,
+        authority_class: authority_class.to_string(),
+        validity: validity.to_string(),
+        privacy_class: privacy_class.to_string(),
+        freshness: freshness.to_string(),
+        score,
+        raw_policy: raw_policy.to_string(),
+        evidence_refs: Value::Array(refs),
+        metadata: json!({
+            "source_profile": profile.as_str(),
+            "projection": "mission_context_gather.compact_evidence",
+            "derived_from_raw_source": lane_id == "conversation_audit" || lane_id == "skill_evidence",
+        }),
+    });
+}
+
+fn evidence_item_policy(
+    lane_id: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    match lane_id {
+        "runtime_truth" => (
+            "runtime-env-and-monitor",
+            "current_rule",
+            "operational",
+            "hot_runtime",
+            "compact_only",
+        ),
+        "project_ssot" => (
+            "file-first-lisp-and-compiled-project-universe",
+            "current_rule",
+            "internal",
+            "compiled_runtime_bound",
+            "compact_only",
+        ),
+        "reviewed_kb" => (
+            "knowledge_review_state",
+            "active_fact",
+            "internal",
+            "ttl_or_review_bound",
+            "compact_only",
+        ),
+        "active_board" => (
+            "board_projection",
+            "current_state",
+            "internal",
+            "active_task_bound",
+            "compact_only",
+        ),
+        "skill_evidence" => (
+            "evidence-only",
+            "evidence_only",
+            "internal",
+            "version_bound_or_historical",
+            "compact_only",
+        ),
+        "conversation_audit" => (
+            "provider_durable_conversation_read_model",
+            "derived_from_conversation",
+            "audit",
+            "time_range_bound",
+            "raw_opt_in_only",
+        ),
+        "support_refs" => (
+            "redacted-support-catalog",
+            "current_reference",
+            "reference",
+            "runtime_or_catalog_bound",
+            "secret_refs_only",
+        ),
+        _ => (
+            "forensics-only-cold-archive",
+            "historical_evidence",
+            "audit",
+            "cold_archive",
+            "explicit_path_or_full_debug_only",
+        ),
+    }
+}
+
+fn evidence_item_id(
+    lane_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+    source_ref: Option<&str>,
+    title: &str,
+    summary: &str,
+) -> String {
+    let input = format!(
+        "{lane_id}|{source_type}|{}|{}|{title}|{summary}",
+        source_id.unwrap_or(""),
+        source_ref.unwrap_or("")
+    );
+    format!("evi-{}", short_sha256(&input, 16))
+}
+
+fn short_sha256(input: &str, hex_chars: usize) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .chars()
+        .take(hex_chars)
+        .collect()
+}
+
+fn support_catalog_has_content(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.iter().any(|(key, value)| {
+            !matches!(key.as_str(), "schema" | "authority" | "secret_policy")
+                && !json_value_is_empty(value)
+        })
+    })
+}
+
+fn summary_is_empty(value: &Value) -> bool {
+    json_value_is_empty(value)
+        || value
+            .as_object()
+            .is_some_and(|object| object.keys().all(|key| key == "schema" || key == "kind"))
+}
+
+fn json_value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(object) => object.is_empty() || object.values().all(json_value_is_empty),
+        _ => false,
+    }
+}
+
+fn compact_json_text(value: &Value, max_chars: usize) -> Option<String> {
+    serde_json::to_string(value)
+        .ok()
+        .map(|text| compact_text(&text, max_chars))
+        .filter(|text| !text.is_empty())
+}
+
+fn evidence_title(value: &Value, fallback: &str) -> String {
+    text_from_sources(
+        &[Some(value)],
+        &[
+            "title",
+            "key",
+            "name",
+            "id",
+            "conversation_id",
+            "conversationId",
+            "session_id",
+            "sessionId",
+            "sourceSkill",
+        ],
+    )
+    .unwrap_or_else(|| fallback.to_string())
+}
+
+fn evidence_summary(value: &Value) -> String {
+    text_from_sources(
+        &[Some(value)],
+        &[
+            "summary",
+            "description",
+            "snippet",
+            "content",
+            "text",
+            "excerpt",
+            "purpose",
+        ],
+    )
+    .map(|text| compact_text(&text, 900))
+    .or_else(|| compact_json_text(value, 900))
+    .unwrap_or_else(|| "Compact evidence summary".to_string())
+}
+
+fn source_id_from_value(value: &Value) -> Option<String> {
+    text_from_sources(
+        &[Some(value)],
+        &[
+            "id",
+            "key",
+            "conversation_id",
+            "conversationId",
+            "session_id",
+            "sessionId",
+            "name",
+            "sourceSkill",
+            "targetId",
+            "target_id",
+        ],
+    )
+}
+
+fn source_ref_from_value(value: &Value) -> Option<String> {
+    text_from_sources(
+        &[Some(value)],
+        &[
+            "source_ref",
+            "sourceRef",
+            "source_path",
+            "sourcePath",
+            "path",
+            "intent_path",
+            "intentPath",
+            "file_path",
+            "source_file",
+        ],
+    )
+}
+
+fn numeric_field(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_f64))
+}
+
+fn credential_ref_source_id(value: &Value) -> Option<String> {
+    let namespace = text_field(value, "namespace")?;
+    let key_name = text_field(value, "key_name").or_else(|| text_field(value, "keyName"))?;
+    Some(format!("{namespace}:{key_name}"))
 }
 
 fn noise_diagnostics(
@@ -896,10 +1678,16 @@ fn context_noise_metrics(
                 .map(|(lane, value)| {
                     (
                         lane.clone(),
-                        value
-                            .get("source_count")
-                            .cloned()
-                            .unwrap_or_else(|| json!(0)),
+                        json!({
+                            "source_count": value
+                                .get("source_count")
+                                .cloned()
+                                .unwrap_or_else(|| json!(0)),
+                            "item_count": value
+                                .get("item_count")
+                                .cloned()
+                                .unwrap_or_else(|| json!(0)),
+                        }),
                     )
                 })
                 .collect::<serde_json::Map<_, _>>()
@@ -1295,6 +2083,191 @@ fn context_pack_artifact_payload(payload: &Value, include_raw_sources: bool) -> 
     compact
 }
 
+fn build_context_gather_run_input(
+    payload: &Value,
+    profile: SourceProfile,
+    selection: SourceSelection,
+    artifact_hash: Option<&str>,
+) -> ContextGatherRunInput {
+    let query = payload
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let project_id = payload
+        .get("project_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let task_id = payload
+        .get("task_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let lane_counts = payload
+        .get("context_noise_metrics")
+        .and_then(|value| value.get("lane_counts"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let mut metrics = payload
+        .get("context_noise_metrics")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if let Some(object) = metrics.as_object_mut() {
+        object.insert(
+            "raw_source_injected".to_string(),
+            Value::Bool(selection.include_raw_sources),
+        );
+        object.insert(
+            "credential_opt_in".to_string(),
+            Value::Bool(selection.include_credentials),
+        );
+        object.insert(
+            "conversation_opt_in".to_string(),
+            Value::Bool(selection.include_conversations),
+        );
+        object.insert(
+            "support_ref_count".to_string(),
+            payload
+                .get("support_catalog")
+                .and_then(|value| value.get("credential_ref_count"))
+                .cloned()
+                .unwrap_or_else(|| json!(0)),
+        );
+        object.insert(
+            "resolver_source".to_string(),
+            resolver_source_from_payload(payload)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "runtime_root_consistent".to_string(),
+            runtime_root_consistent_from_payload(payload)
+                .map(Value::Bool)
+                .unwrap_or(Value::Null),
+        );
+    }
+    ContextGatherRunInput {
+        id: stable_context_gather_run_id(
+            &query,
+            project_id.as_deref(),
+            task_id.as_deref(),
+            profile,
+            artifact_hash,
+        ),
+        query,
+        project_id,
+        task_id,
+        source_profile: profile.as_str().to_string(),
+        lane_counts,
+        metrics,
+        raw_sources_included: selection.include_raw_sources,
+        credential_opt_in: selection.include_credentials,
+        conversation_opt_in: selection.include_conversations,
+        resolver_source: resolver_source_from_payload(payload),
+        runtime_root_consistent: runtime_root_consistent_from_payload(payload),
+        artifact_hash: artifact_hash.map(ToOwned::to_owned),
+        diagnostics: payload
+            .get("diagnostics")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    }
+}
+
+fn stable_context_gather_run_id(
+    query: &str,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    profile: SourceProfile,
+    artifact_hash: Option<&str>,
+) -> String {
+    let input = format!(
+        "{}|{}|{}|{}|{}",
+        query,
+        project_id.unwrap_or(""),
+        task_id.unwrap_or(""),
+        profile.as_str(),
+        artifact_hash.unwrap_or("")
+    );
+    format!("context-gather-{}", short_sha256(&input, 16))
+}
+
+fn resolver_source_from_payload(payload: &Value) -> Option<String> {
+    payload
+        .get("source_summaries")
+        .and_then(|summaries| summaries.get("project_resolution"))
+        .and_then(|summary| summary.get("matched_project"))
+        .and_then(|project| project.get("source"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            payload
+                .get("source_summaries")
+                .and_then(|summaries| summaries.get("project_registry"))
+                .and_then(|summary| summary.get("source"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            payload
+                .get("support_catalog")
+                .and_then(|catalog| catalog.get("resolver_source"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn runtime_root_consistent_from_payload(payload: &Value) -> Option<bool> {
+    let runtime = payload.get("runtime_environment")?;
+    let project_root = runtime.get("project_root").and_then(Value::as_str)?;
+    let runtime_dir = runtime.get("runtime_dir").and_then(Value::as_str)?;
+    let compiled_runtime_dir = runtime
+        .get("compiled_runtime_dir")
+        .and_then(Value::as_str)?;
+    let env_runtime = runtime
+        .get("env_presence")
+        .and_then(|env| env.get("MISSIOND_RUNTIME_DIR"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let env_compiled = runtime
+        .get("env_presence")
+        .and_then(|env| env.get("MISSIOND_COMPILED_RUNTIME_DIR"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if env_runtime || env_compiled {
+        return Some(!runtime_dir.trim().is_empty() && !compiled_runtime_dir.trim().is_empty());
+    }
+    Some(runtime_dir.starts_with(project_root) && compiled_runtime_dir.starts_with(runtime_dir))
+}
+
+async fn persist_evidence_lane_projection(
+    state: &AppState,
+    run: &ContextGatherRunInput,
+    items: &[EvidenceItemInput],
+) -> Value {
+    let mut errors = Vec::new();
+    let mut evidence_items_written = 0usize;
+    if let Err(err) = state.store.record_context_gather_run(run).await {
+        tracing::warn!(run_id = run.id.as_str(), error = %err, "failed to persist context_gather_runs row");
+        errors.push(json!({"target": "context_gather_runs", "error": err.to_string()}));
+    }
+    if !items.is_empty() {
+        match state.store.upsert_evidence_items(items).await {
+            Ok(count) => evidence_items_written = count,
+            Err(err) => {
+                tracing::warn!(run_id = run.id.as_str(), error = %err, "failed to persist evidence_items projection");
+                errors.push(json!({"target": "evidence_items", "error": err.to_string()}));
+            }
+        }
+    }
+    json!({
+        "schema": "missiond.evidence-lane-persistence.v1",
+        "ok": errors.is_empty(),
+        "context_gather_run_id": run.id.as_str(),
+        "evidence_item_count": items.len(),
+        "evidence_items_written": evidence_items_written,
+        "errors": errors,
+    })
+}
+
 fn handle_context_boot(args: Value) -> Result<ToolResult> {
     let args: ContextBootArgs = serde_json::from_value(args).unwrap_or_default();
     let (capsule, source_path) = read_codex_boot_context();
@@ -1599,12 +2572,12 @@ fn collect_evidence_refs_inner(value: &Value, path: &str, refs: &mut Vec<Value>)
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
-        build_evidence_lanes, build_source_summaries, collect_evidence_refs_from_value,
-        context_noise_metrics, context_pack_artifact_payload, response_sources, source_selection,
-        ContextGatherArgs, SourceProfile,
+        build_evidence_items, build_evidence_lanes, build_source_summaries, build_support_catalog,
+        collect_evidence_refs_from_value, context_noise_metrics, context_pack_artifact_payload,
+        response_sources, source_selection, ContextGatherArgs, SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -1720,12 +2693,16 @@ mod tests {
         );
         sources.insert(
             "runtime_environment".to_string(),
-            json!({"schema": "missiond.runtime-environment-context.v1"}),
+            json!({
+                "schema": "missiond.runtime-environment-context.v1",
+                "authority": "runtime-env-and-monitor",
+                "runtime_dir": "/runtime/missiond"
+            }),
         );
         let lanes = build_evidence_lanes(&sources);
         let conversation_lane = lanes
             .get("lanes")
-            .and_then(|value| value.get("conversation_read_model"))
+            .and_then(|value| value.get("conversation_audit"))
             .expect("conversation lane");
         assert_eq!(
             conversation_lane
@@ -1742,7 +2719,7 @@ mod tests {
 
         let runtime_lane = lanes
             .get("lanes")
-            .and_then(|value| value.get("runtime_environment"))
+            .and_then(|value| value.get("runtime_truth"))
             .expect("runtime lane");
         assert_eq!(
             runtime_lane
@@ -1770,5 +2747,76 @@ mod tests {
                 .and_then(|value| value.as_u64()),
             Some(4)
         );
+    }
+
+    #[test]
+    fn support_catalog_redacts_credential_refs() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "project_registry".to_string(),
+            json!({
+                "id": "payments",
+                "source": "compiled-service-runtime",
+                "serviceRuntime": {
+                    "id": "payments-api",
+                    "project": "payments",
+                    "domains": ["pay.example.com"],
+                    "health": ["/health"],
+                    "public_base_url": "https://pay.example.com"
+                }
+            }),
+        );
+        sources.insert(
+            "credential_refs".to_string(),
+            json!({
+                "credentialRefs": [{
+                    "namespace": "secret-store",
+                    "keyName": "PAYMENTS_DB_URL",
+                    "value": "postgres://should-not-appear",
+                    "availability": "available"
+                }]
+            }),
+        );
+
+        let catalog = build_support_catalog(&sources);
+        assert_eq!(
+            catalog.get("service_id").and_then(Value::as_str),
+            Some("payments-api")
+        );
+        let rendered = serde_json::to_string(&catalog).expect("support catalog json");
+        assert!(rendered.contains("PAYMENTS_DB_URL"));
+        assert!(!rendered.contains("postgres://should-not-appear"));
+    }
+
+    #[test]
+    fn evidence_items_use_typed_lanes_and_compact_sources() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "runtime_environment".to_string(),
+            json!({
+                "schema": "missiond.runtime-environment-context.v1",
+                "authority": "runtime-env-and-monitor",
+                "runtime_dir": "/runtime/missiond",
+                "compiled_runtime_dir": "/runtime/missiond/compiled"
+            }),
+        );
+        sources.insert(
+            "conversation_logs".to_string(),
+            json!({"results": [{"conversation_id": "c1", "content": "bounded audit summary"}]}),
+        );
+        let summaries = build_source_summaries(&sources);
+        let catalog = build_support_catalog(&sources);
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::ConversationAudit,
+            Some("payments"),
+            None,
+        );
+        assert!(items.iter().any(|item| item.lane_id == "runtime_truth"));
+        assert!(items.iter().any(
+            |item| item.lane_id == "conversation_audit" && item.raw_policy == "raw_opt_in_only"
+        ));
     }
 }

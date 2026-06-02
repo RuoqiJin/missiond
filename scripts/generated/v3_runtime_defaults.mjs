@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 export const SCHEMA_VERSION = "missiond.compiled-runtime-config.v1";
-export const SOURCE_HASH = "25051bba699c6b135bcb18f09be9a49f";
+export const SOURCE_HASH = "1582402aff3e6feaeeae5680349b4078";
 export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -27,7 +27,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 7,
-      "source_hash": "12927edfde1a9a35818480c3abe026b1"
+      "source_hash": "fef564ab89b01b3856e07afb13327449"
     },
     {
       "file": ".missiond/v3/shards/workstation-runtime.lisp",
@@ -48,7 +48,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 28,
-      "source_hash": "88569322fb04362ec555274f705bb9f3"
+      "source_hash": "88182347818297dbb20d11859fd848a7"
     },
     {
       "file": ".missiond/v3/shards/agent-navigation.lisp",
@@ -83,7 +83,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 63,
-      "source_hash": "2a87cc90ffc61ecb14e3912f75f9ac0c"
+      "source_hash": "3fc545bd3c29052f1b183ff5168f9804"
     },
     {
       "file": ".missiond/v3/shards/universe/service-layer-template.lisp",
@@ -186,14 +186,14 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
     },
     {
       "id": "control-plane-runtime",
-      "source_hash": "1f5b65779757af3d0f9a6c0fc2c98c17",
+      "source_hash": "4f7b47e8c8e39973bb3d5feca1ab781a",
       "source_units": [
         {
           "file": ".missiond/v3/shards/request-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 7,
-          "source_hash": "12927edfde1a9a35818480c3abe026b1"
+          "source_hash": "fef564ab89b01b3856e07afb13327449"
         },
         {
           "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -219,14 +219,14 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
     },
     {
       "id": "memory-knowledge-runtime",
-      "source_hash": "8d5f592f54728b9b60f2ff20c7836d98",
+      "source_hash": "d4a1d4e9b38fd83cac2f287160483147",
       "source_units": [
         {
           "file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 28,
-          "source_hash": "88569322fb04362ec555274f705bb9f3"
+          "source_hash": "88182347818297dbb20d11859fd848a7"
         }
       ]
     },
@@ -284,14 +284,14 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
     },
     {
       "id": "universe",
-      "source_hash": "2942adcdb9056a13ee28c2625a3abee6",
+      "source_hash": "374c907f3f7b9a4d58f36fa374fb73b6",
       "source_units": [
         {
           "file": ".missiond/v3/shards/universe/service-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 63,
-          "source_hash": "2a87cc90ffc61ecb14e3912f75f9ac0c"
+          "source_hash": "3fc545bd3c29052f1b183ff5168f9804"
         },
         {
           "file": ".missiond/v3/shards/universe/service-layer-template.lisp",
@@ -407,7 +407,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -432,7 +432,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -454,7 +454,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -473,7 +473,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -494,7 +494,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -537,7 +537,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -559,7 +559,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -579,7 +579,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -604,9 +604,9 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       ],
       "source": {
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
-        "source_line": 137,
+        "source_line": 264,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -641,9 +641,9 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "nested_forms": [],
       "source": {
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
-        "source_line": 204,
+        "source_line": 331,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     },
     {
@@ -685,9 +685,9 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "nested_forms": [],
       "source": {
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
-        "source_line": 160,
+        "source_line": 287,
         "source_column": 3,
-        "source_hash": "25051bba699c6b135bcb18f09be9a49f"
+        "source_hash": "1582402aff3e6feaeeae5680349b4078"
       }
     }
   ],
@@ -1259,6 +1259,301 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
     "pending_message_limit": 60,
     "tool_result_preview_chars": 1000,
     "assistant_preview_chars": 500
+  },
+  "evidenceLanePolicy": {
+    "lanes": [
+      {
+        "lane_id": "runtime_truth",
+        "authority_class": "runtime_truth",
+        "source_types": [
+          "runtime_environment",
+          "deploy_release_manifest",
+          "deploy_center_provenance",
+          "health_smoke",
+          "runtime_status"
+        ],
+        "default_profiles": [
+          "intent_default",
+          "deploy_ops",
+          "conversation_audit",
+          "full_debug"
+        ],
+        "raw_policy": "compact_only",
+        "privacy_class": "operational",
+        "validity": [
+          "current_rule"
+        ],
+        "freshness": "hot_runtime",
+        "injectable_by_default": true,
+        "promotion_rules": [
+          "already-authoritative",
+          "no-kb-promotion"
+        ]
+      },
+      {
+        "lane_id": "project_ssot",
+        "authority_class": "file_first_lisp_and_compiled_project_universe",
+        "source_types": [
+          "project_resolution",
+          "project_registry",
+          "ssot",
+          "compiled_project_universe",
+          "service_runtime_universe"
+        ],
+        "default_profiles": [
+          "intent_default",
+          "deploy_ops",
+          "conversation_audit",
+          "full_debug"
+        ],
+        "raw_policy": "compact_only",
+        "privacy_class": "internal",
+        "validity": [
+          "current_rule",
+          "project_specific"
+        ],
+        "freshness": "compiled_runtime_bound",
+        "injectable_by_default": true,
+        "promotion_rules": [
+          "already-authoritative",
+          "no-conversation-override"
+        ]
+      },
+      {
+        "lane_id": "reviewed_kb",
+        "authority_class": "knowledge_review_state",
+        "source_types": [
+          "knowledge",
+          "knowledge_review_state",
+          "promoted_decision",
+          "incident_pattern",
+          "active_fact"
+        ],
+        "default_profiles": [
+          "intent_default",
+          "deploy_ops",
+          "conversation_audit",
+          "full_debug"
+        ],
+        "raw_policy": "compact_only",
+        "privacy_class": "internal",
+        "validity": [
+          "active_fact",
+          "decision",
+          "incident_pattern"
+        ],
+        "freshness": "ttl_or_version_bound",
+        "injectable_by_default": true,
+        "promotion_rules": [
+          "review-required",
+          "ttl-required-for-deploy-config-dependency"
+        ]
+      },
+      {
+        "lane_id": "active_board",
+        "authority_class": "board_projection",
+        "source_types": [
+          "board_task",
+          "workflow_run",
+          "incident",
+          "deploy_work_order",
+          "task_result_projection"
+        ],
+        "default_profiles": [
+          "intent_default",
+          "deploy_ops",
+          "conversation_audit",
+          "full_debug"
+        ],
+        "raw_policy": "compact_only",
+        "privacy_class": "internal",
+        "validity": [
+          "current_state",
+          "active_work_order"
+        ],
+        "freshness": "active_task_bound",
+        "injectable_by_default": true,
+        "promotion_rules": [
+          "artifact-before-kb"
+        ]
+      },
+      {
+        "lane_id": "skill_evidence",
+        "authority_class": "evidence_only",
+        "source_types": [
+          "skill_metadata",
+          "skill_procedure",
+          "skill_operational_fact",
+          "skill_warning",
+          "skill_credential_ref",
+          "infra_evidence"
+        ],
+        "default_profiles": [
+          "deploy_ops",
+          "full_debug"
+        ],
+        "raw_policy": "compact_only",
+        "privacy_class": "internal",
+        "validity": [
+          "current_rule",
+          "historical_pattern",
+          "deprecated",
+          "project_specific",
+          "evidence_only"
+        ],
+        "freshness": "version_bound_or_historical",
+        "injectable_by_default": false,
+        "promotion_rules": [
+          "needs_review-before-kb",
+          "operational-fact-samples-high-confidence-only"
+        ]
+      },
+      {
+        "lane_id": "conversation_audit",
+        "authority_class": "provider_durable_conversation_read_model",
+        "source_types": [
+          "conversation_episode",
+          "conversation_fact_extract",
+          "conversation_duplicate_group",
+          "conversation_message_raw"
+        ],
+        "default_profiles": [
+          "conversation_audit",
+          "full_debug"
+        ],
+        "raw_policy": "raw_opt_in_only",
+        "privacy_class": "audit",
+        "validity": [
+          "derived_from_conversation",
+          "historical_pattern",
+          "needs_review"
+        ],
+        "freshness": "time_range_bound",
+        "injectable_by_default": false,
+        "promotion_rules": [
+          "episode-first",
+          "raw-message-audit-only",
+          "fact-extract-needs-review"
+        ]
+      },
+      {
+        "lane_id": "cold_archive",
+        "authority_class": "forensics_only_cold_archive",
+        "source_types": [
+          "archived_session",
+          "true_user_utterance",
+          "transcript_dump",
+          "research_dump",
+          "raw_provider_log",
+          "old_compiled_projection"
+        ],
+        "default_profiles": [
+          "full_debug"
+        ],
+        "raw_policy": "explicit_path_or_full_debug_only",
+        "privacy_class": "audit",
+        "validity": [
+          "historical_evidence",
+          "stale",
+          "duplicate",
+          "superseded"
+        ],
+        "freshness": "cold_archive",
+        "injectable_by_default": false,
+        "promotion_rules": [
+          "never-default",
+          "no-auto-promotion"
+        ]
+      },
+      {
+        "lane_id": "support_refs",
+        "authority_class": "redacted_support_catalog",
+        "source_types": [
+          "support_catalog",
+          "deploy_center_service",
+          "github_workflow",
+          "service_manifest",
+          "db_migration_namespace",
+          "health_endpoint",
+          "smoke_endpoint",
+          "agent_ref",
+          "secret_ref"
+        ],
+        "default_profiles": [
+          "intent_default",
+          "deploy_ops",
+          "conversation_audit",
+          "full_debug"
+        ],
+        "raw_policy": "secret_refs_only",
+        "privacy_class": "reference",
+        "validity": [
+          "current_reference",
+          "project_specific"
+        ],
+        "freshness": "runtime_or_catalog_bound",
+        "injectable_by_default": true,
+        "promotion_rules": [
+          "secret-values-never-indexed",
+          "provenance-required"
+        ]
+      }
+    ],
+    "profiles": [
+      {
+        "profile": "intent_default",
+        "allowed_lanes": [
+          "runtime_truth",
+          "project_ssot",
+          "reviewed_kb",
+          "active_board",
+          "support_refs"
+        ],
+        "raw_sources": false,
+        "credential_values": false
+      },
+      {
+        "profile": "deploy_ops",
+        "allowed_lanes": [
+          "runtime_truth",
+          "project_ssot",
+          "reviewed_kb",
+          "active_board",
+          "support_refs",
+          "skill_evidence"
+        ],
+        "raw_sources": false,
+        "credential_values": false
+      },
+      {
+        "profile": "conversation_audit",
+        "allowed_lanes": [
+          "runtime_truth",
+          "project_ssot",
+          "reviewed_kb",
+          "active_board",
+          "support_refs",
+          "conversation_audit"
+        ],
+        "raw_sources": false,
+        "credential_values": false
+      },
+      {
+        "profile": "full_debug",
+        "allowed_lanes": [
+          "runtime_truth",
+          "project_ssot",
+          "reviewed_kb",
+          "active_board",
+          "support_refs",
+          "skill_evidence",
+          "conversation_audit",
+          "cold_archive"
+        ],
+        "raw_sources": true,
+        "credential_values": false
+      }
+    ]
   },
   "conversationIngestion": {
     "conversation_get_tail_default": 50,

@@ -134,6 +134,133 @@
        "Default context-pack generation MUST NOT preload KB/history/provider logs; memory is opt-in by workflow and scope."]
     :checker "node scripts/check-v3-service-extraction-isomorphism.mjs")
 
+  (evidence-lane-policy
+    :schema "missiond.evidence-lane-policy.v1"
+    :purpose "Typed evidence lanes govern MissionD retrieval, context injection, raw-source access, privacy, freshness, and promotion. Search is profile-first and filter-before-vector; source-group calls are compatibility adapters into compact EvidenceItem projections."
+    :primary-read-model evidence_items
+    :run-metrics-read-model context_gather_runs
+    :profile-order [intent_default deploy_ops conversation_audit full_debug]
+    (lane runtime_truth
+      :authority-class runtime_truth
+      :source-types [runtime_environment deploy_release_manifest deploy_center_provenance health_smoke runtime_status]
+      :default-profiles [intent_default deploy_ops conversation_audit full_debug]
+      :raw-policy compact_only
+      :privacy-class operational
+      :validity [current_rule]
+      :freshness hot_runtime
+      :injectable-by-default true
+      :promotion-rules [already-authoritative no-kb-promotion])
+    (lane project_ssot
+      :authority-class file_first_lisp_and_compiled_project_universe
+      :source-types [project_resolution project_registry ssot compiled_project_universe service_runtime_universe]
+      :default-profiles [intent_default deploy_ops conversation_audit full_debug]
+      :raw-policy compact_only
+      :privacy-class internal
+      :validity [current_rule project_specific]
+      :freshness compiled_runtime_bound
+      :injectable-by-default true
+      :promotion-rules [already-authoritative no-conversation-override])
+    (lane reviewed_kb
+      :authority-class knowledge_review_state
+      :source-types [knowledge knowledge_review_state promoted_decision incident_pattern active_fact]
+      :default-profiles [intent_default deploy_ops conversation_audit full_debug]
+      :raw-policy compact_only
+      :privacy-class internal
+      :validity [active_fact decision incident_pattern]
+      :freshness ttl_or_version_bound
+      :injectable-by-default true
+      :promotion-rules [review-required ttl-required-for-deploy-config-dependency])
+    (lane active_board
+      :authority-class board_projection
+      :source-types [board_task workflow_run incident deploy_work_order task_result_projection]
+      :default-profiles [intent_default deploy_ops conversation_audit full_debug]
+      :raw-policy compact_only
+      :privacy-class internal
+      :validity [current_state active_work_order]
+      :freshness active_task_bound
+      :injectable-by-default true
+      :promotion-rules [artifact-before-kb])
+    (lane skill_evidence
+      :authority-class evidence_only
+      :source-types [skill_metadata skill_procedure skill_operational_fact skill_warning skill_credential_ref infra_evidence]
+      :default-profiles [deploy_ops full_debug]
+      :raw-policy compact_only
+      :privacy-class internal
+      :validity [current_rule historical_pattern deprecated project_specific evidence_only]
+      :freshness version_bound_or_historical
+      :injectable-by-default false
+      :promotion-rules [needs_review-before-kb operational-fact-samples-high-confidence-only])
+    (lane conversation_audit
+      :authority-class provider_durable_conversation_read_model
+      :source-types [conversation_episode conversation_fact_extract conversation_duplicate_group conversation_message_raw]
+      :default-profiles [conversation_audit full_debug]
+      :raw-policy raw_opt_in_only
+      :privacy-class audit
+      :validity [derived_from_conversation historical_pattern needs_review]
+      :freshness time_range_bound
+      :injectable-by-default false
+      :promotion-rules [episode-first raw-message-audit-only fact-extract-needs-review])
+    (lane cold_archive
+      :authority-class forensics_only_cold_archive
+      :source-types [archived_session true_user_utterance transcript_dump research_dump raw_provider_log old_compiled_projection]
+      :default-profiles [full_debug]
+      :raw-policy explicit_path_or_full_debug_only
+      :privacy-class audit
+      :validity [historical_evidence stale duplicate superseded]
+      :freshness cold_archive
+      :injectable-by-default false
+      :promotion-rules [never-default no-auto-promotion])
+    (lane support_refs
+      :authority-class redacted_support_catalog
+      :source-types [support_catalog deploy_center_service github_workflow service_manifest db_migration_namespace health_endpoint smoke_endpoint agent_ref secret_ref]
+      :default-profiles [intent_default deploy_ops conversation_audit full_debug]
+      :raw-policy secret_refs_only
+      :privacy-class reference
+      :validity [current_reference project_specific]
+      :freshness runtime_or_catalog_bound
+      :injectable-by-default true
+      :promotion-rules [secret-values-never-indexed provenance-required])
+    :profiles
+      ((profile intent_default
+         :allowed-lanes [runtime_truth project_ssot reviewed_kb active_board support_refs]
+         :raw-sources false
+         :credential-values false)
+       (profile deploy_ops
+         :allowed-lanes [runtime_truth project_ssot reviewed_kb active_board support_refs skill_evidence]
+         :raw-sources false
+         :credential-values false
+         :credential-refs true)
+       (profile conversation_audit
+         :allowed-lanes [runtime_truth project_ssot reviewed_kb active_board support_refs conversation_audit]
+         :raw-sources false
+         :raw-message-access explicit_opt_in)
+       (profile full_debug
+         :allowed-lanes [runtime_truth project_ssot reviewed_kb active_board support_refs skill_evidence conversation_audit cold_archive]
+         :raw-sources true
+         :credential-values false))
+    :read-models
+      ((table evidence_items
+         :lane-field lane_id
+         :fields [lane_id authority_class source_type source_id source_ref project_id task_id title summary validity privacy_class freshness score raw_policy evidence_refs metadata]
+         :rule "All searchable compact evidence lands here; raw conversations, raw skills, and cold archives remain in their original stores.")
+       (table context_gather_runs
+         :fields [source_profile lane_counts filtered_hits raw_sources_included credential_opt_in conversation_opt_in resolver_source runtime_root_consistent artifact_hash diagnostics]
+         :rule "Every persisted context gather records lane counts, raw-source injection state, semantic filtering, credential opt-in, resolver source, and runtime/root consistency.")
+       (table conversation_episodes
+         :rule "Reusable conversation summaries are searchable; conversation_messages remains the raw audit layer.")
+       (table conversation_fact_extracts
+         :rule "Facts derived from conversations are tagged derived_from_conversation and needs_review until promoted.")
+       (table skill_evidence_items
+         :rule "Skills split into metadata, procedure, operational_fact, warning, and credential_ref items with validity states."))
+    :invariants
+      ["mission_context_gather MUST resolve project/service before FTS/vector search and MUST apply profile lane allowlists before any semantic retrieval."
+       "Default worker context MUST inject compact evidence_items/support_catalog/evidence_lanes only; raw source payloads are excluded unless include_raw_sources=true or full_debug."
+       "conversation_message_raw and cold_archive data MUST NOT enter intent_default or deploy_ops retrieval. conversation_audit may use bounded episode/fact extracts; raw messages require explicit opt-in."
+       "skill_evidence is evidence-only unless a review/promotion workflow promotes an item into reviewed_kb with TTL or version bounds for deploy/config/dependency facts."
+       "support_refs MUST expose secret_ref namespace/key/provenance/availability only; secret values are never indexed, embedded, or injected."
+       "context_gather_runs MUST persist lane counts, raw source inclusion, conversation cross-project drops when available, filtered semantic hit counts, credential opt-in, low-confidence skill evidence drops when available, resolver source, and runtime/root consistency."]
+    :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")
+
   (memory-kb-policy
     :desc "Lisp-owned memory extraction budget for the memory-kb surface."
     :pending-message-limit 60

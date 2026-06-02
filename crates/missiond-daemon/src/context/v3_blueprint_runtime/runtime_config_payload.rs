@@ -20,6 +20,8 @@ pub(super) struct CompiledRuntimeConfigPayload {
     pub(super) capability_governance: CapabilityGovernanceRuntimeConfig,
     #[serde(rename = "memoryKb")]
     pub(super) memory_kb: MemoryKbRuntimeConfig,
+    #[serde(rename = "evidenceLanePolicy", default)]
+    pub(super) evidence_lane_policy: EvidenceLaneRuntimeConfig,
     #[serde(rename = "conversationIngestion")]
     pub(super) conversation_ingestion: ConversationIngestionRuntimeConfig,
     pub(super) autopilot: AutopilotRuntimeConfig,

@@ -98,6 +98,9 @@ function checkFiles(root, files) {
     ':entrypoint mission_project.resolve',
     ':resolver-statuses [resolved ambiguous unregistered_candidate not_found stale_runtime]',
     ':compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url]',
+    'support_catalog',
+    'deploy_center_slug',
+    'service_manifest_refs',
     'mission_context_gather MUST call mission_project resolve',
     ':intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]',
     ':default-universe-manifest "$MISSIOND_PROJECTS_DIR/universe.intent.lisp"',
@@ -209,6 +212,8 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.runtimeConfig, sources.runtimeConfig, [
     'ProjectRegistryRuntimeConfig',
+    'CompiledServiceSupportCatalog',
+    'support_catalog',
     'DEFAULT_PROJECT_UNIVERSE_MANIFEST',
     'DEFAULT_PROJECT_INTENT_PATH_CANDIDATES',
     '.missiond/intent.lisp',
@@ -261,6 +266,7 @@ function checkFiles(root, files) {
     'handle_import_universe',
     'load_compiled_project_universe',
     'CompiledServiceRuntimeEntry',
+    'supportCatalog',
     'compiled_project_to_config',
     '"source": "compiled-project-universe"',
     '"schema": "missiond.project-import.compiled-universe.v1"',

@@ -2262,6 +2262,7 @@ impl PgMissionStore {
     }
 }
 
+#[cfg(feature = "postgres")]
 #[async_trait]
 impl EvidenceLaneStore for PgMissionStore {
     async fn upsert_evidence_items(&self, items: &[EvidenceItemInput]) -> DbResult<usize> {

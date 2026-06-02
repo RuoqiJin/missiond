@@ -805,10 +805,48 @@ let project_entry_to_json node =
     (json_opt_string (prop_text ":missiond-role" props))
     (json_string_list checks)
 
+let nested_keyword_props keys props =
+  prop_any keys props |> Option.map (keyword_props ~start:0) |> Option.value ~default:[]
+
+let service_manifest_refs props =
+  let direct =
+    [
+      prop_text ":intent" props;
+      prop_text ":backend" props;
+      prop_text ":frontend" props;
+      prop_text ":operations" props;
+    ]
+    |> List.filter_map (fun value -> value)
+  in
+  direct @ prop_text_list ":source-evidence" props
+
+let service_support_catalog_json props =
+  let deployment_props = nested_keyword_props [ ":deployment" ] props in
+  json_assoc
+    [
+      ("service_id", json_opt_string (prop_text ":id" props));
+      ("project_id", json_opt_string (prop_text ":project" props));
+      ("domains", json_string_list_token [ ":domains" ] props);
+      ("public_base_url", json_opt_string (prop_text ":public-base-url" props));
+      ("frontend_url", json_opt_string (prop_text ":frontend-url" props));
+      ("api_base_url", json_opt_string (prop_text ":api-base-url" props));
+      ("health", json_string_list_token [ ":health" ] props);
+      ("dependencies", json_string_list_token [ ":dependencies" ] props);
+      ("deploy_center_slug", json_opt_string (prop_text_any [ ":dc_slug"; ":dc-slug" ] deployment_props));
+      ("runtime_target", json_opt_string (prop_text_any [ ":runtime-target"; ":runtime_target" ] deployment_props));
+      ("executor", json_opt_string (prop_text ":executor" deployment_props));
+      ("container", json_opt_string (prop_text_any [ ":container"; ":container_name"; ":container-name" ] deployment_props));
+      ("service_manifest_refs", json_string_list (service_manifest_refs props));
+      ("credential_refs", json_string_list_token [ ":credential-refs"; ":credential_refs" ] props);
+      ("source_evidence", json_string_list_token [ ":source-evidence"; ":source_evidence" ] props);
+      ("db_migration_namespace", json_opt_string (prop_text_any [ ":db-migration-namespace"; ":db_migration_namespace"; ":database" ] deployment_props));
+      ("database_namespace", json_opt_string (prop_text_any [ ":database-namespace"; ":database_namespace"; ":database" ] props));
+    ]
+
 let service_entry_to_json node =
   let props = keyword_props ~start:1 node in
   Printf.sprintf
-    {|{"id":%s,"project":%s,"root":%s,"intent":%s,"backend":%s,"frontend":%s,"operations":%s,"environment":%s,"public_base_url":%s,"frontend_url":%s,"api_base_url":%s,"domains":%s,"health":%s,"dependencies":%s,"ops_capability":%s,"surface":%s}|}
+    {|{"id":%s,"project":%s,"root":%s,"intent":%s,"backend":%s,"frontend":%s,"operations":%s,"environment":%s,"public_base_url":%s,"frontend_url":%s,"api_base_url":%s,"domains":%s,"health":%s,"dependencies":%s,"ops_capability":%s,"surface":%s,"support_catalog":%s}|}
     (json_opt_string (prop_text ":id" props))
     (json_opt_string (prop_text ":project" props))
     (json_opt_string (prop_text ":root" props))
@@ -825,6 +863,7 @@ let service_entry_to_json node =
     (json_string_list_token [ ":dependencies" ] props)
     (json_opt_string (prop_text ":ops-capability" props))
     (json_opt_string (prop_text ":surface" props))
+    (service_support_catalog_json props)
 
 let maturity_entry_to_json node =
   let props = keyword_props ~start:1 node in
@@ -1182,6 +1221,48 @@ let memory_kb_runtime_config_json root =
           ("assistant_preview_chars", json_number_token [ ":assistant-preview-chars" ] props);
         ]
 
+let evidence_lane_entry_json node =
+  let props = keyword_props ~start:2 node in
+  json_assoc
+    [
+      ("lane_id", json_opt_string (form_id node));
+      ("authority_class", json_string_token [ ":authority-class"; ":authority_class" ] props);
+      ("source_types", json_string_list_token [ ":source-types"; ":source_types" ] props);
+      ("default_profiles", json_string_list_token [ ":default-profiles"; ":default_profiles" ] props);
+      ("raw_policy", json_string_token [ ":raw-policy"; ":raw_policy" ] props);
+      ("privacy_class", json_string_token [ ":privacy-class"; ":privacy_class" ] props);
+      ("validity", json_string_list_token [ ":validity" ] props);
+      ("freshness", json_string_token [ ":freshness" ] props);
+      ("injectable_by_default", json_bool_token [ ":injectable-by-default"; ":injectable_by_default" ] props);
+      ("promotion_rules", json_string_list_token [ ":promotion-rules"; ":promotion_rules" ] props);
+    ]
+
+let evidence_lane_profile_json node =
+  let props = keyword_props ~start:2 node in
+  json_assoc
+    [
+      ("profile", json_opt_string (form_id node));
+      ("allowed_lanes", json_string_list_token [ ":allowed-lanes"; ":allowed_lanes" ] props);
+      ("raw_sources", json_bool_token [ ":raw-sources"; ":raw_sources" ] props);
+      ("credential_values", json_bool_token [ ":credential-values"; ":credential_values" ] props);
+    ]
+
+let evidence_lane_policy_runtime_config_json root =
+  match Option.bind root (fun root -> find_child root "evidence-lane-policy") with
+  | None -> "{}"
+  | Some node ->
+      let props = keyword_props ~start:1 node in
+      let profiles =
+        match prop ":profiles" props with
+        | Some value -> collect_forms "profile" value |> List.map evidence_lane_profile_json
+        | None -> []
+      in
+      json_assoc
+        [
+          ("lanes", list_forms "lane" node |> List.map evidence_lane_entry_json |> json_array);
+          ("profiles", json_array profiles);
+        ]
+
 let conversation_ingestion_runtime_config_json root =
   match policy_props root "conversation-ingestion-policy" with
   | None -> "{}"
@@ -1340,6 +1421,7 @@ let runtime_config_payload_json blueprint source_hash source_units source_domain
       ("projectRegistry", project_registry_runtime_config_json root);
       ("capabilityGovernance", capability_governance_runtime_config_json root);
       ("memoryKb", memory_kb_runtime_config_json root);
+      ("evidenceLanePolicy", evidence_lane_policy_runtime_config_json root);
       ("conversationIngestion", conversation_ingestion_runtime_config_json root);
       ("autopilot", autopilot_runtime_config_json root);
       ("controlPlaneKernel", control_plane_kernel_runtime_config_json root);
