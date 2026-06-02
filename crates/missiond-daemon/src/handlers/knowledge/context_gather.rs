@@ -361,7 +361,8 @@ async fn search_evidence_item_read_model(
     match state.store.search_evidence_items(&input).await {
         Ok(items) => {
             let raw_hit_count = items.len();
-            let (items, deduplicated_count) = dedupe_evidence_search_items(items, limit);
+            let (items, deduplicated_count, truncated_count) =
+                dedupe_evidence_search_items(items, limit);
             let lane_counts = lane_counts_for_evidence_items(&items);
             (
                 items,
@@ -372,15 +373,16 @@ async fn search_evidence_item_read_model(
                     "query": query,
                     "allowed_lanes": allowed_lanes,
                     "project_id": project_id,
-                        "task_id": task_id,
-                        "include_global": true,
-                        "limit": limit,
-                        "read_limit": input.limit,
-                        "raw_hit_count": raw_hit_count,
-                        "deduplicated_count": deduplicated_count,
-                        "hit_count": lane_counts.values().filter_map(Value::as_u64).sum::<u64>(),
-                        "lane_counts": lane_counts,
-                        "filter_before_vector": true,
+                    "task_id": task_id,
+                    "include_global": true,
+                    "limit": limit,
+                    "read_limit": input.limit,
+                    "raw_hit_count": raw_hit_count,
+                    "deduplicated_count": deduplicated_count,
+                    "truncated_count": truncated_count,
+                    "hit_count": lane_counts.values().filter_map(Value::as_u64).sum::<u64>(),
+                    "lane_counts": lane_counts,
+                    "filter_before_vector": true,
                 }),
             )
         }
@@ -396,6 +398,9 @@ async fn search_evidence_item_read_model(
                 "task_id": task_id,
                 "include_global": true,
                 "limit": input.limit,
+                "raw_hit_count": 0,
+                "deduplicated_count": 0,
+                "truncated_count": 0,
                 "hit_count": 0,
                 "lane_counts": {},
                 "filter_before_vector": true,
@@ -408,22 +413,25 @@ async fn search_evidence_item_read_model(
 fn dedupe_evidence_search_items(
     items: Vec<EvidenceItemInput>,
     limit: usize,
-) -> (Vec<EvidenceItemInput>, usize) {
+) -> (Vec<EvidenceItemInput>, usize, usize) {
     let mut seen = HashSet::new();
     let mut deduplicated_count = 0usize;
+    let mut unique_count = 0usize;
     let mut out = Vec::new();
+    let return_limit = limit.max(1);
     for item in items {
         let key = evidence_search_dedupe_key(&item);
         if !seen.insert(key) {
             deduplicated_count += 1;
             continue;
         }
-        out.push(item);
-        if out.len() >= limit {
-            break;
+        unique_count += 1;
+        if out.len() < return_limit {
+            out.push(item);
         }
     }
-    (out, deduplicated_count)
+    let truncated_count = unique_count.saturating_sub(out.len());
+    (out, deduplicated_count, truncated_count)
 }
 
 fn evidence_search_dedupe_key(item: &EvidenceItemInput) -> String {
@@ -2443,6 +2451,10 @@ fn context_noise_metrics(
                     .get("deduplicated_count")
                     .cloned()
                     .unwrap_or_else(|| json!(0)),
+                "truncated_count": evidence_item_search
+                    .get("truncated_count")
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
                 "lane_counts": evidence_item_search
                 .get("lane_counts")
                 .cloned()
@@ -3663,10 +3675,27 @@ mod tests {
         duplicate.source_ref = Some("/srv/payments".to_string());
         duplicate.summary = "compiled backfill projection".to_string();
 
-        let (items, deduplicated_count) = dedupe_evidence_search_items(vec![first, duplicate], 10);
+        let (items, deduplicated_count, truncated_count) =
+            dedupe_evidence_search_items(vec![first.clone(), duplicate.clone()], 10);
         assert_eq!(items.len(), 1);
         assert_eq!(deduplicated_count, 1);
+        assert_eq!(truncated_count, 0);
         assert_eq!(items[0].id, "evi-a");
+
+        let mut second_unique = first.clone();
+        second_unique.id = "evi-c".to_string();
+        second_unique.source_type = "support_catalog".to_string();
+        let mut third_unique = first;
+        third_unique.id = "evi-d".to_string();
+        third_unique.source_type = "service_runtime".to_string();
+
+        let (items, deduplicated_count, truncated_count) = dedupe_evidence_search_items(
+            vec![items[0].clone(), duplicate, second_unique, third_unique],
+            2,
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(deduplicated_count, 1);
+        assert_eq!(truncated_count, 1);
     }
 
     #[test]

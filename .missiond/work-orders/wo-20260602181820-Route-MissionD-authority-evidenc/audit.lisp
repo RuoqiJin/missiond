@@ -17,4 +17,8 @@
            (event context-gather-infra-fallback
              :at "2026-06-02T18:55:24Z"
              :actor codex
-             :summary "context_gather deploy_ops now preserves infra-os feature_disabled diagnostics while exposing scoped support_catalog/deployment_closure fallback_items and raw/dedup evidence read-model metrics.")))
+             :summary "context_gather deploy_ops now preserves infra-os feature_disabled diagnostics while exposing scoped support_catalog/deployment_closure fallback_items and raw/dedup evidence read-model metrics.")
+           (event context-gather-noise-metrics
+             :at "2026-06-02T19:04:24Z"
+             :actor codex
+             :summary "context_gather evidence read-model search now scans the full read window for duplicate projections and reports truncated_count separately from deduplicated_count.")))
