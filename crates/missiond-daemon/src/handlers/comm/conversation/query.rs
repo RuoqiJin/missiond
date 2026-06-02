@@ -63,6 +63,19 @@ fn keep_conversation_hybrid_candidate(
     similarity.is_some_and(|sim| sim >= MIN_HYBRID_VECTOR_ONLY_SIMILARITY)
 }
 
+fn normalize_search_conversation_type(conversation_type: Option<String>) -> Option<String> {
+    let raw = conversation_type?.trim().to_string();
+    if raw.is_empty() || raw == "all" {
+        return None;
+    }
+    Some(match raw.as_str() {
+        "gemini" => "gemini_chat,router_chat".to_string(),
+        "system" => "meta,worker".to_string(),
+        "codex" => "codex_chat".to_string(),
+        _ => raw,
+    })
+}
+
 pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     let config = load_conversation_config()?;
     match name {
@@ -613,13 +626,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             let skip = offset.unwrap_or(0) as usize;
             let mode = query_mode.as_deref().unwrap_or("hybrid");
 
-            // Map conversationType shorthand to actual DB values (comma-separated for IN clause)
-            let conversation_type = conversation_type.map(|ct| match ct.as_str() {
-                "gemini" => "gemini_chat,router_chat".to_string(),
-                "system" => "meta,worker".to_string(),
-                "user" | "jarvis" | "all" => ct,
-                _ => ct,
-            });
+            let conversation_type = normalize_search_conversation_type(conversation_type);
 
             // Resolve timeRange to ISO timestamp
             let time_after: Option<String> = time_range.as_deref().and_then(|tr| {
@@ -905,6 +912,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 results.push(serde_json::json!({
                     "sessionId": sid,
                     "project": conv.as_ref().and_then(|c| c.project.as_deref()),
+                    "conversationType": conv.as_ref().map(|c| c.conversation_type.as_str()),
                     "status": conv.as_ref().map(|c| c.status.as_str()),
                     "slotId": conv.as_ref().and_then(|c| c.slot_id.as_deref()),
                     "summary": conv.as_ref().and_then(|c| c.llm_summary.as_deref()),
@@ -1224,7 +1232,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
 mod tests {
     use super::{
         conversation_search_score, keep_conversation_hybrid_candidate,
-        MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
+        normalize_search_conversation_type, MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
     };
 
     #[test]
@@ -1259,5 +1267,28 @@ mod tests {
             None,
             Some(0.1)
         ));
+    }
+
+    #[test]
+    fn search_conversation_type_all_means_unfiltered() {
+        assert_eq!(normalize_search_conversation_type(None), None);
+        assert_eq!(normalize_search_conversation_type(Some("".into())), None);
+        assert_eq!(normalize_search_conversation_type(Some("all".into())), None);
+        assert_eq!(
+            normalize_search_conversation_type(Some("system".into())),
+            Some("meta,worker".into())
+        );
+        assert_eq!(
+            normalize_search_conversation_type(Some("gemini".into())),
+            Some("gemini_chat,router_chat".into())
+        );
+        assert_eq!(
+            normalize_search_conversation_type(Some("codex".into())),
+            Some("codex_chat".into())
+        );
+        assert_eq!(
+            normalize_search_conversation_type(Some("user".into())),
+            Some("user".into())
+        );
     }
 }
