@@ -33,8 +33,13 @@
 #   MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT  expected launchd_project_root for
 #                               the currently active release before mutating
 #                               active/apply-cleanup; default: deploy owner root
+#   MISSIOND_DEPLOY_EXPECTED_ACTIVE_RELEASE  expected active release directory
+#                               before active switch; default: active link
+#                               observed at script start
 #   MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER  explicit 1/true override for
 #                               switching active from another project root
+#   MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE  explicit 1/true override for
+#                               switching active after another deploy changed it
 #   MISSIOND_RELEASE_SOURCE_SNAPSHOT  when truthy, launchd points to
 #                               <release>/source, an immutable git-archive
 #                               snapshot matching compiled runtime; default: 1
@@ -132,6 +137,8 @@ APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
 PREVIOUS_LAUNCHD_PROJECT_ROOT=""
 PREVIOUS_RUNTIME_DIR=""
 PREVIOUS_COMPILED_RUNTIME_DIR=""
+INITIAL_ACTIVE_RELEASE=""
+EXPECTED_ACTIVE_RELEASE=""
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -257,6 +264,7 @@ LAUNCHD_PROJECT_ROOT="$(select_launchd_project_root)"
 DEPLOY_OWNER_ROOT="$(select_deploy_owner_root)"
 MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$DEPLOY_OWNER_ROOT}"
 MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER="${MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER:-0}"
+MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE="${MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE:-0}"
 MISSIOND_RELEASE_SOURCE_SNAPSHOT="${MISSIOND_RELEASE_SOURCE_SNAPSHOT:-1}"
 REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")"
 RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
@@ -772,6 +780,38 @@ truthy_env_value() {
   esac
 }
 
+capture_expected_active_release() {
+  INITIAL_ACTIVE_RELEASE="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  EXPECTED_ACTIVE_RELEASE="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_RELEASE:-$INITIAL_ACTIVE_RELEASE}"
+  if [ -n "$EXPECTED_ACTIVE_RELEASE" ]; then
+    log "ownership: expected active release $EXPECTED_ACTIVE_RELEASE"
+  else
+    log "ownership: expected no active release"
+  fi
+}
+
+assert_active_release_matches_expected() {
+  local phase="$1"
+  local current
+  if truthy_env_value "$MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE"; then
+    log "ownership: active release race override phase=$phase expected=${EXPECTED_ACTIVE_RELEASE:-none}"
+    return 0
+  fi
+  current="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  if [ -z "$EXPECTED_ACTIVE_RELEASE" ]; then
+    if [ -n "$current" ]; then
+      log "ownership: active release appeared phase=$phase expected=none current=$current"
+      log "ownership: set MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE=1 only for an intentional concurrent active switch"
+      return 1
+    fi
+  elif [ "$current" != "$EXPECTED_ACTIVE_RELEASE" ]; then
+    log "ownership: active release changed phase=$phase expected=$EXPECTED_ACTIVE_RELEASE current=${current:-none}"
+    log "ownership: set MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE=1 only for an intentional concurrent active switch"
+    return 1
+  fi
+  log "ownership: active release generation guard verified phase=$phase active=${current:-none}"
+}
+
 should_ensure_jarvis_slot() {
   case "$(printf '%s' "$MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT" | tr '[:upper:]' '[:lower:]')" in
     0|false|no|off) return 1 ;;
@@ -987,6 +1027,8 @@ write_self_deploy_closure_files() {
   SELF_DEPLOY_NEXT_ACTION="$next_action" \
   SELF_DEPLOY_ACTIVE_LINK="$ACTIVE_LINK" \
   SELF_DEPLOY_PREVIOUS_ACTIVE="${PREVIOUS_ACTIVE:-}" \
+  SELF_DEPLOY_INITIAL_ACTIVE="${INITIAL_ACTIVE_RELEASE:-}" \
+  SELF_DEPLOY_EXPECTED_ACTIVE_RELEASE="${EXPECTED_ACTIVE_RELEASE:-}" \
   SELF_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$LAUNCHD_PROJECT_ROOT}" \
   node <<'NODE'
 const fs = require('node:fs');
@@ -1027,9 +1069,11 @@ const evidence = {
     runtime_target: 'local-launchd',
     owner: 'scripts/deploy-daemon.sh',
     expected_active_root: process.env.SELF_DEPLOY_EXPECTED_ACTIVE_ROOT || null,
+    expected_active_release: process.env.SELF_DEPLOY_EXPECTED_ACTIVE_RELEASE || null,
+    initial_active_release: process.env.SELF_DEPLOY_INITIAL_ACTIVE || null,
     active_link: process.env.SELF_DEPLOY_ACTIVE_LINK || null,
     previous_active: process.env.SELF_DEPLOY_PREVIOUS_ACTIVE || null,
-    conflict_policy: 'fail-closed-project-root-guard',
+    conflict_policy: 'fail-closed-project-root-and-active-release-generation-guard',
   },
   runtime_observation: {
     active_release_dir: dir,
@@ -1154,10 +1198,13 @@ cleanup_repo_runtime_cache() {
 }
 
 mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")" "$COMPILED_RUNTIME_DIR"
+capture_expected_active_release
 
 if [ "$DO_DEPLOY" -eq 1 ] || { [ "$CLEANUP_ONLY" -eq 1 ] && [ "$APPLY_CLEANUP" -eq 1 ]; }; then
   assert_active_project_root_can_mutate "pre-mutation" ||
     fail "active release belongs to another project root; refusing to mutate active without MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1" 1
+  assert_active_release_matches_expected "pre-mutation" ||
+    fail "active release differs from expected release before mutation; refusing without MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE=1" 1
 fi
 
 if [ "$CLEANUP_ONLY" -eq 1 ]; then
@@ -1244,7 +1291,7 @@ xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/missiond" 2>/dev/null || true
 xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/mission-mcp" 2>/dev/null || true
 
 cat > "$CANDIDATE_DIR/release-manifest.json" <<EOF
-{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"release_owner_root":"$DEPLOY_OWNER_ROOT","launchd_project_root":"$CANDIDATE_LAUNCHD_PROJECT_ROOT","runtime_dir":"$RUNTIME_DIR","compiled_runtime_dir":"$COMPILED_RUNTIME_DIR","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
+{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"release_owner_root":"$DEPLOY_OWNER_ROOT","launchd_project_root":"$CANDIDATE_LAUNCHD_PROJECT_ROOT","runtime_dir":"$RUNTIME_DIR","compiled_runtime_dir":"$COMPILED_RUNTIME_DIR","expected_active_release":"${EXPECTED_ACTIVE_RELEASE:-}","previous_active":"${PREVIOUS_ACTIVE:-}","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
 EOF
 write_self_deploy_closure_files "$CANDIDATE_DIR" "blocked" "pending" "complete pre-switch/post-switch smoke before closure"
 log "candidate: $CANDIDATE_DIR"
@@ -1258,6 +1305,8 @@ record_timing "pre-switch-mcp-smoke" "$PRE_SWITCH_SMOKE_START"
 
 assert_active_project_root_can_mutate "pre-switch" ||
   fail "active release changed to another project root before switch; refusing to continue" 4
+assert_active_release_matches_expected "pre-switch" ||
+  fail "active release changed during deploy build; refusing to overwrite without MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE=1" 4
 switch_active_release "$CANDIDATE_DIR"
 ensure_default_mcp_config
 
