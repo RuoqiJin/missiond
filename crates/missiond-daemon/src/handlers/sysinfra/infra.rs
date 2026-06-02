@@ -1214,6 +1214,9 @@ fn skill_target_context_allows_deploy_closure_line(
     {
         return false;
     }
+    if !is_deploy_skill_context_source(skill_name) {
+        return false;
+    }
     if !skill_content_has_query_target(skill_content, filter) {
         return false;
     }
@@ -1240,6 +1243,21 @@ fn skill_target_context_allows_deploy_closure_line(
     true
 }
 
+fn is_deploy_skill_context_source(skill_name: &str) -> bool {
+    matches!(
+        skill_name,
+        "deploy-ops"
+            | "backend-deploy"
+            | "deployment-troubleshoot"
+            | "xjp-deploy-agent"
+            | "xjp-deploy-center"
+            | "deploy-center"
+            | "xiaojinpro-backend"
+            | "sqlx-cache"
+            | "payments"
+    )
+}
+
 fn skill_content_has_query_target(content: &str, filter: &InfraEvidenceFilter) -> bool {
     let Some(query) = filter.query.as_deref() else {
         return false;
@@ -1264,7 +1282,6 @@ fn deployment_closure_phrase_overlap(query: &str, line: &str) -> bool {
         &["service.manifest.toml", "manifest gate", "manifest"] as &[&str],
         &["canary", "smoke", "healthcheck", "health check"],
         &["migration", "sqlx migrate", "relation"],
-        &["compose", "docker-compose", "docker compose"],
         &[
             "old binary",
             "binary",
@@ -2304,6 +2321,18 @@ mod tests {
             "deploy-ops",
             "CI green only means the image built; Deploy Center canary and smoke decide CD truth",
             "Payments has an independent Cargo.lock and is deployed through Deploy Center.",
+            &manifest_filter,
+        ));
+        assert!(!skill_target_context_allows_deploy_closure_line(
+            "deploy-ops",
+            "/opt/xiaojinpro/docker-compose.yml -- monolith, router, payments, investor-panel",
+            "Payments has an independent Cargo.lock and is deployed through Deploy Center.",
+            &manifest_filter,
+        ));
+        assert!(!skill_target_context_allows_deploy_closure_line(
+            "independent-app-bootstrap",
+            "Keep ALTER migrations idempotent: ALTER TABLE ... ADD COLUMN IF NOT EXISTS.",
+            "Payments appears here only as generic app bootstrap documentation.",
             &manifest_filter,
         ));
         assert!(!skill_target_context_allows_deploy_closure_line(
