@@ -2926,6 +2926,13 @@ fn deployment_event_kind_is_relevant(event_kind: &str) -> bool {
             | "deploy_started"
             | "deploy_succeeded"
             | "deploy_failed"
+            | "workflow_run_created"
+            | "workflow_job_started"
+            | "workflow_job_succeeded"
+            | "workflow_job_failed"
+            | "workflow_job_cancelled"
+            | "workflow_job_lease_expired"
+            | "artifact_recorded"
             | "smoke_succeeded"
             | "smoke_failed"
             | "rollback_started"
@@ -5431,6 +5438,65 @@ mod tests {
         assert_eq!(
             event.get("event_kind").and_then(Value::as_str),
             Some("smoke_failed")
+        );
+        assert_eq!(
+            event.get("project_id").and_then(Value::as_str),
+            Some("payments")
+        );
+        assert_eq!(
+            event.get("correlation_id").and_then(Value::as_str),
+            Some("run-42")
+        );
+    }
+
+    #[test]
+    fn deployment_event_filter_keeps_scoped_deploy_center_workflow_provenance() {
+        let payload_json = json!({
+            "_envelope": {
+                "project_id": "payments",
+                "subject": "workflow-job-42",
+                "correlation_id": "run-42",
+                "source": "deploy-center",
+                "authority": "deploy-center.deploy_events"
+            },
+            "deploy_event_id": 43,
+            "project_slug": "payments",
+            "workflow_run_id": "workflow-run-1",
+            "workflow_job_id": "workflow-job-42",
+            "target_service_id": "payments"
+        })
+        .to_string();
+        let row = missiond_core::db::TimelineRow {
+            seq: 43,
+            trace_id: Some("trace-2".to_string()),
+            span_id: None,
+            parent_span_id: None,
+            event_type: "external_service_event".to_string(),
+            summary: Some("Payments workflow job succeeded".to_string()),
+            payload: json!({
+                "service_id": "deploy-center",
+                "event_id": "deploy-center:deploy_events:43",
+                "event_kind": "workflow_job_succeeded",
+                "summary": "Payments deploy-center workflow job succeeded",
+                "trace_id": "trace-2",
+                "payload_json": payload_json,
+            })
+            .to_string(),
+            created_at: "2026-06-02 20:08:17".to_string(),
+        };
+
+        let event = deployment_event_item_from_timeline_row(
+            &row,
+            Some("payments"),
+            Some("payments"),
+            Some("xjp-payments"),
+            "Payments workflow job",
+        )
+        .expect("scoped deploy-center workflow provenance event");
+
+        assert_eq!(
+            event.get("event_kind").and_then(Value::as_str),
+            Some("workflow_job_succeeded")
         );
         assert_eq!(
             event.get("project_id").and_then(Value::as_str),

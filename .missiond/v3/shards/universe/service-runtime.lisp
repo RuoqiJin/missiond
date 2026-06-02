@@ -136,7 +136,7 @@
       :deployment (:substrate deploy-center :authority release-provenance :provenance-api "/api/deploy/provenance/:project")
       :deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json" :status-api "/api/deploy/status" :rollout-workflow ".missiond/workflows/m6-deployment-rollout.lisp")
       :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent :source deploy_events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN :authority deploy-center.deploy_events :rule "deploy-center relays durable deploy_events rows into MissionD EventBridge with stable event_id and MissionD idempotency; MissionD must not infer production release state by stitching GitHub/curl/git when deploy-center has provenance.")
-      :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
+      :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed workflow_run_created workflow_job_started workflow_job_succeeded workflow_job_failed workflow_job_cancelled workflow_job_lease_expired artifact_recorded smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
       :ops-capability deploy-ops
       :surface service-runtime-universe)
     (service :id missiond-jarvis-edge

@@ -9,9 +9,12 @@
        :read_scope ["."]
        :write_scope
          [".missiond/v3/shards/request-runtime.lisp"
+          ".missiond/v3/shards/universe/infrastructure.lisp"
+          ".missiond/v3/shards/universe/service-runtime.lisp"
           "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
           "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
           "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"
+          "scripts/check-v3-eventbridge-isomorphism.mjs"
           "scripts/check-v3-memory-kb-isomorphism.mjs"
           "scripts/generated/v3_contracts.d.ts"
           "scripts/generated/v3_contracts.mjs"
@@ -19,6 +22,7 @@
        :acceptance
          ["node scripts/check-v3-memory-kb-isomorphism.mjs --json"
           "node scripts/check-v3-memory-kb-isomorphism.mjs --dry-fixture --json"
+          "node scripts/check-v3-eventbridge-isomorphism.mjs --json"
           "node scripts/project-v3-contracts.mjs --check --json"
           "cargo test -p missiond-daemon --bin missiond context_gather"
           "cargo check -p missiond-daemon"
