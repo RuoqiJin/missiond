@@ -107,6 +107,8 @@ function checkFiles(root, files) {
     'Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root',
     'Deploy owner root MUST default to the current stable git root',
     'release source snapshots MUST NOT become the next release_owner_root',
+    'Self-deploy MUST reject same-owner stale commit deploys',
+    'MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1',
     'Default MISSIOND_RUNTIME_DIR namespace MUST derive from DEPLOY_OWNER_ROOT',
     'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
     'M6 MissionD formatting MUST be converged',
@@ -138,6 +140,7 @@ function checkFiles(root, files) {
     'MISSIOND_RELEASE_KEEP',
     'MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT',
     'MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER',
+    'MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION',
     'PREVIOUS_LAUNCHD_PROJECT_ROOT',
     'PREVIOUS_RUNTIME_DIR',
     'PREVIOUS_COMPILED_RUNTIME_DIR',
@@ -157,11 +160,19 @@ function checkFiles(root, files) {
     'release-manifest.json',
     'REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")"',
     '"launchd_project_root"',
+    '"git_full_sha"',
+    '"active_git_sha"',
+    '"commit_regression_override"',
     '"runtime_dir"',
     '"compiled_runtime_dir"',
     'atomic_symlink_update',
     'switch_active_release',
     'assert_active_project_root_can_mutate',
+    'assert_candidate_commit_not_behind_active',
+    'active_release_git_sha',
+    'git merge-base --is-ancestor',
+    'active commit ancestry guard verified',
+    'candidate commit is not a descendant of active release commit',
     'select_deploy_owner_root',
     'read_active_manifest_string_early',
     'is_stable_owner_root_candidate',
@@ -334,6 +345,7 @@ function buildFixture() {
        "Dev-only fast deploy may select debug profile and sccache."
        "Deploy scripts MUST reject active/apply-cleanup mutations when the current active release manifest or launchd WorkingDirectory belongs to a different project root."
        "Deploy owner root MUST default to the current stable git root; release source snapshots MUST NOT become the next release_owner_root."
+       "Self-deploy MUST reject same-owner stale commit deploys unless MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1 is explicit."
        "Default MISSIOND_RUNTIME_DIR namespace MUST derive from DEPLOY_OWNER_ROOT."
        "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
        "M6 MissionD formatting MUST be converged."
@@ -365,7 +377,7 @@ function buildFixture() {
   writeFixture(root, DEFAULT_FILES.deployDaemon, `
 scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke
 --build-only --no-smoke --debug --fast --cleanup-only --apply-cleanup
-MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER MISSIOND_BACKUP_RETENTION_DAYS
+MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION MISSIOND_BACKUP_RETENTION_DAYS
 PREVIOUS_LAUNCHD_PROJECT_ROOT PREVIOUS_RUNTIME_DIR PREVIOUS_COMPILED_RUNTIME_DIR
 MISSIOND_BIN_PATH MISSIOND_MCP_BIN_PATH MISSIOND_SOCKET_PATH MISSIOND_LAUNCHCTL_LABEL MISSIOND_DEPLOY_TIMEOUT MISSIOND_DEPLOY_SMOKE_TIMEOUT
 MISSIOND_USE_SCCACHE
@@ -378,11 +390,19 @@ RUSTC_WRAPPER
 release-manifest.json
 REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")"
 "launchd_project_root"
+"git_full_sha"
+"active_git_sha"
+"commit_regression_override"
 "runtime_dir"
 "compiled_runtime_dir"
 atomic_symlink_update
 switch_active_release
 assert_active_project_root_can_mutate
+assert_candidate_commit_not_behind_active
+active_release_git_sha
+git merge-base --is-ancestor
+active commit ancestry guard verified
+candidate commit is not a descendant of active release commit
 select_deploy_owner_root
 read_active_manifest_string_early
 is_stable_owner_root_candidate

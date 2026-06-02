@@ -21,6 +21,8 @@ const required = [
   ['shard', 'ReleaseLease'],
   ['shard', 'runtime_digest_mismatch'],
   ['shard', 'release_lease_conflict'],
+  ['shard', 'candidate git_full_sha'],
+  ['shard', 'commit-regression override'],
   ['blueprint', 'deployment-closure-plane'],
   ['blueprint', 'shards/deployment-closure-plane.lisp'],
   ['index', 'shards/deployment-closure-plane.lisp'],
@@ -40,6 +42,9 @@ const required = [
   ['deployDaemon', 'closure-verdict.json'],
   ['deployDaemon', 'missiond.release-evidence.v1'],
   ['deployDaemon', 'missiond.closure-verdict.v1'],
+  ['deployDaemon', 'expected_active_commit'],
+  ['deployDaemon', 'git_full_sha'],
+  ['deployDaemon', 'commit-ancestry-guard'],
 ];
 
 const diagnostics = [];

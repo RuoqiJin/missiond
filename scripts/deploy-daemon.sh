@@ -40,6 +40,11 @@
 #                               switching active from another project root
 #   MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE  explicit 1/true override for
 #                               switching active after another deploy changed it
+#   MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION  explicit 1/true override for
+#                               switching active to a candidate commit that is
+#                               not a descendant of the current active release
+#                               commit. Required for intentional rollback or
+#                               branch-divergence deploys from the same owner root.
 #   MISSIOND_RELEASE_SOURCE_SNAPSHOT  when truthy, launchd points to
 #                               <release>/source, an immutable git-archive
 #                               snapshot matching compiled runtime; default: 1
@@ -265,6 +270,7 @@ DEPLOY_OWNER_ROOT="$(select_deploy_owner_root)"
 MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$DEPLOY_OWNER_ROOT}"
 MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER="${MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER:-0}"
 MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE="${MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE:-0}"
+MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION="${MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION:-0}"
 MISSIOND_RELEASE_SOURCE_SNAPSHOT="${MISSIOND_RELEASE_SOURCE_SNAPSHOT:-1}"
 REPO_ID="$(basename "$DEPLOY_OWNER_ROOT")"
 RUNTIME_DIR="${MISSIOND_RUNTIME_DIR:-${HOME}/.missiond/runtime/${REPO_ID}}"
@@ -812,6 +818,57 @@ assert_active_release_matches_expected() {
   log "ownership: active release generation guard verified phase=$phase active=${current:-none}"
 }
 
+active_release_git_sha() {
+  local active manifest sha
+  active="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  [ -n "$active" ] || return 1
+  manifest="$active/release-manifest.json"
+  [ -f "$manifest" ] || return 1
+  sha="$(json_string_field "$manifest" "git_full_sha" 2>/dev/null || true)"
+  [ -n "$sha" ] || sha="$(json_string_field "$manifest" "git_sha" 2>/dev/null || true)"
+  [ -n "$sha" ] || return 1
+  printf '%s\n' "$sha"
+}
+
+git_commit_resolves() {
+  local sha="$1"
+  [ -n "$sha" ] || return 1
+  [ "$sha" != "unknown" ] || return 1
+  git rev-parse --verify "${sha}^{commit}" >/dev/null 2>&1
+}
+
+assert_candidate_commit_not_behind_active() {
+  local phase="$1"
+  local candidate_sha="$2"
+  local active_sha
+  if truthy_env_value "$MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION"; then
+    log "ownership: commit regression override phase=$phase candidate=$candidate_sha"
+    return 0
+  fi
+  active_sha="$(active_release_git_sha || true)"
+  if [ -z "$active_sha" ] || [ "$active_sha" = "unknown" ]; then
+    log "ownership: active commit unavailable phase=$phase; commit ancestry guard allows legacy/initial deploy"
+    return 0
+  fi
+  if ! git_commit_resolves "$candidate_sha"; then
+    log "ownership: candidate commit cannot be resolved phase=$phase candidate=$candidate_sha"
+    log "ownership: set MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1 only for an intentional rollback or branch-divergence deploy"
+    return 1
+  fi
+  if ! git_commit_resolves "$active_sha"; then
+    log "ownership: active commit cannot be resolved phase=$phase active_commit=$active_sha"
+    log "ownership: set MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1 only when active provenance cannot be verified but rollback/divergence is intentional"
+    return 1
+  fi
+  if git merge-base --is-ancestor "$active_sha" "$candidate_sha" >/dev/null 2>&1; then
+    log "ownership: active commit ancestry guard verified phase=$phase active_commit=$active_sha candidate=$candidate_sha"
+    return 0
+  fi
+  log "ownership: candidate commit is not a descendant of active release commit phase=$phase active_commit=$active_sha candidate=$candidate_sha"
+  log "ownership: set MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1 only for an intentional rollback or branch-divergence deploy"
+  return 1
+}
+
 should_ensure_jarvis_slot() {
   case "$(printf '%s' "$MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT" | tr '[:upper:]' '[:lower:]')" in
     0|false|no|off) return 1 ;;
@@ -1052,7 +1109,7 @@ const evidence = {
     service: 'missiond-daemon',
     runtime_target: 'local-launchd',
     change_class: 'missiond-self-update',
-    desired_commit: manifest.git_sha,
+    desired_commit: manifest.git_full_sha || manifest.git_sha,
     deployment_policy_hash: manifest.typed_lisp_runtime?.projections?.deploymentPolicy?.source_hash ?? null,
   },
   release_candidate: {
@@ -1070,13 +1127,15 @@ const evidence = {
     owner: 'scripts/deploy-daemon.sh',
     expected_active_root: process.env.SELF_DEPLOY_EXPECTED_ACTIVE_ROOT || null,
     expected_active_release: process.env.SELF_DEPLOY_EXPECTED_ACTIVE_RELEASE || null,
+    expected_active_commit: manifest.active_git_sha || null,
     initial_active_release: process.env.SELF_DEPLOY_INITIAL_ACTIVE || null,
     active_link: process.env.SELF_DEPLOY_ACTIVE_LINK || null,
     previous_active: process.env.SELF_DEPLOY_PREVIOUS_ACTIVE || null,
-    conflict_policy: 'fail-closed-project-root-and-active-release-generation-guard',
+    conflict_policy: 'fail-closed-project-root-active-release-generation-and-commit-ancestry-guard',
   },
   runtime_observation: {
     active_release_dir: dir,
+    git_full_sha: manifest.git_full_sha || null,
     release_owner_root: manifest.release_owner_root ?? manifest.launchd_project_root,
     launchd_project_root: manifest.launchd_project_root,
     runtime_dir: manifest.runtime_dir,
@@ -1197,6 +1256,9 @@ cleanup_repo_runtime_cache() {
   log "runtime-cache: cleanup complete removed=$cleaned external_runtime=$RUNTIME_DIR"
 }
 
+GIT_FULL_SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+GIT_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+
 mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")" "$COMPILED_RUNTIME_DIR"
 capture_expected_active_release
 
@@ -1205,6 +1267,10 @@ if [ "$DO_DEPLOY" -eq 1 ] || { [ "$CLEANUP_ONLY" -eq 1 ] && [ "$APPLY_CLEANUP" -
     fail "active release belongs to another project root; refusing to mutate active without MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1" 1
   assert_active_release_matches_expected "pre-mutation" ||
     fail "active release differs from expected release before mutation; refusing without MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE=1" 1
+  if [ "$DO_DEPLOY" -eq 1 ]; then
+    assert_candidate_commit_not_behind_active "pre-mutation" "$GIT_FULL_SHA" ||
+      fail "candidate commit is behind or divergent from active release; refusing without MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1" 1
+  fi
 fi
 
 if [ "$CLEANUP_ONLY" -eq 1 ]; then
@@ -1267,7 +1333,6 @@ fi
 RELEASE_START="$(date +%s)"
 PREVIOUS_ACTIVE="$(create_legacy_release_if_needed || true)"
 capture_launchd_runtime_state
-GIT_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 RELEASE_ID="${MISSIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${GIT_SHA}-${PROFILE}}"
 CANDIDATE_DIR="$RELEASES_DIR/$RELEASE_ID"
 
@@ -1290,8 +1355,9 @@ fi
 xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/missiond" 2>/dev/null || true
 xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/mission-mcp" 2>/dev/null || true
 
+ACTIVE_GIT_SHA="$(active_release_git_sha || true)"
 cat > "$CANDIDATE_DIR/release-manifest.json" <<EOF
-{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"release_owner_root":"$DEPLOY_OWNER_ROOT","launchd_project_root":"$CANDIDATE_LAUNCHD_PROJECT_ROOT","runtime_dir":"$RUNTIME_DIR","compiled_runtime_dir":"$COMPILED_RUNTIME_DIR","expected_active_release":"${EXPECTED_ACTIVE_RELEASE:-}","previous_active":"${PREVIOUS_ACTIVE:-}","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
+{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","git_full_sha":"$GIT_FULL_SHA","active_git_sha":"${ACTIVE_GIT_SHA:-}","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","typed_lisp_runtime":$TYPED_LISP_RUNTIME_MANIFEST,"release_owner_root":"$DEPLOY_OWNER_ROOT","launchd_project_root":"$CANDIDATE_LAUNCHD_PROJECT_ROOT","runtime_dir":"$RUNTIME_DIR","compiled_runtime_dir":"$COMPILED_RUNTIME_DIR","expected_active_release":"${EXPECTED_ACTIVE_RELEASE:-}","previous_active":"${PREVIOUS_ACTIVE:-}","commit_regression_override":"$MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
 EOF
 write_self_deploy_closure_files "$CANDIDATE_DIR" "blocked" "pending" "complete pre-switch/post-switch smoke before closure"
 log "candidate: $CANDIDATE_DIR"
@@ -1307,6 +1373,8 @@ assert_active_project_root_can_mutate "pre-switch" ||
   fail "active release changed to another project root before switch; refusing to continue" 4
 assert_active_release_matches_expected "pre-switch" ||
   fail "active release changed during deploy build; refusing to overwrite without MISSIOND_DEPLOY_ALLOW_ACTIVE_RELEASE_RACE=1" 4
+assert_candidate_commit_not_behind_active "pre-switch" "$GIT_FULL_SHA" ||
+  fail "candidate commit is behind or divergent from active release before switch; refusing without MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1" 4
 switch_active_release "$CANDIDATE_DIR"
 ensure_default_mcp_config
 
