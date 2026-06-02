@@ -447,7 +447,8 @@
        "workflow, memory/KB, skill-store, router experiments, codex replay, self-evolution/Lisp code sync, advanced conversations, infra OS operations, and advanced Board decomposition are full-os optional layers."
        "Optional MCP tool names remain public but dispatch MUST return structured FEATURE_DISABLED unless MISSIOND_FULL_OS_ENABLE or the matching MISSIOND_FEATURE_* gate is enabled."
        "Optional startup services MUST NOT run in kernel-core mode."
-       "Blue-green launchd deployment MUST propagate MISSIOND_FULL_OS_ENABLE and individual MISSIOND_FEATURE_* gates from the caller environment so Mac mini can run full MissionD without rsync or manual plist edits."])
+       "Full-os background DB maintenance workers MUST defer and bound startup batches so post-deploy MCP read/query paths keep foreground DB capacity; MISSIOND_BACKGROUND_DB_GRACE_SECS and per-worker startup limits are explicit operator controls."
+       "Blue-green launchd deployment MUST propagate MISSIOND_FULL_OS_ENABLE, individual MISSIOND_FEATURE_* gates, DB pool sizing, and background DB grace controls from the caller environment so Mac mini can run full MissionD without rsync or manual plist edits."])
 
   (mechanic-collaboration-boundary
     :schema "missiond.mechanic-collaboration-boundary.v1"

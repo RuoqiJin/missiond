@@ -23,6 +23,12 @@ const FILES = {
   featureGates: 'crates/missiond-daemon/src/feature_gates.rs',
   handlers: 'crates/missiond-daemon/src/handlers/mod.rs',
   main: 'crates/missiond-daemon/src/main.rs',
+  localWorkers: 'crates/missiond-daemon/src/workers/local/mod.rs',
+  messageLabeler: 'crates/missiond-daemon/src/workers/local/message_labeler.rs',
+  taggerChunker: 'crates/missiond-daemon/src/workers/local/tagger_chunker.rs',
+  codexIngestion: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
+  conversationOrganizer: 'crates/missiond-daemon/src/workers/local/conversation_organizer.rs',
+  pgStore: 'crates/missiond-core/src/db/pg/mod.rs',
   deployDaemon: 'scripts/deploy-daemon.sh',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   flowEngine: 'crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs',
@@ -135,7 +141,8 @@ function checkFiles(root, files) {
     'ProjectionEngine updates board_task_views and Board-facing status from typed events/state',
     'Non-core full-os tools MUST keep their public MCP names but default to FEATURE_DISABLED',
     'Startup services for self-evolution, Lisp code sync, workflow recovery, memory embeddings, and multi-provider diagnostics MUST NOT start in kernel-core mode.',
-    'Blue-green launchd deployment MUST propagate MISSIOND_FULL_OS_ENABLE and individual MISSIOND_FEATURE_* gates',
+    'Full-os background DB maintenance workers MUST defer and bound startup batches',
+    'Blue-green launchd deployment MUST propagate MISSIOND_FULL_OS_ENABLE, individual MISSIOND_FEATURE_* gates, DB pool sizing, and background DB grace controls',
     ':checker "scripts/check-v3-control-plane-kernel-isomorphism.mjs"',
     'node scripts/check-v3-control-plane-kernel-isomorphism.mjs',
   ]);
@@ -212,6 +219,42 @@ function checkFiles(root, files) {
     'XJPCode briefing worker disabled in kernel-core mode',
   ]);
 
+  requireAll(diagnostics, files.localWorkers, sources.localWorkers, [
+    'MISSIOND_BACKGROUND_DB_GRACE_SECS',
+    'wait_for_background_db_grace',
+    'background DB worker startup grace before maintenance batch',
+  ]);
+
+  requireAll(diagnostics, files.messageLabeler, sources.messageLabeler, [
+    'MISSIOND_MESSAGE_LABELER_STARTUP_LIMIT',
+    'DEFAULT_STARTUP_BACKFILL_LIMIT: i64 = 25',
+    'wait_for_background_db_grace("message_labeler")',
+    'startup_backfill_limit()',
+  ]);
+
+  requireAll(diagnostics, files.taggerChunker, sources.taggerChunker, [
+    'MISSIOND_TAGGER_STARTUP_LIMIT',
+    'DEFAULT_STARTUP_BACKFILL_LIMIT: i64 = 50',
+    'wait_for_background_db_grace("tagger_chunker")',
+    'startup_backfill_limit()',
+  ]);
+
+  requireAll(diagnostics, files.codexIngestion, sources.codexIngestion, [
+    'background_db_grace_secs()',
+    'Codex ingestion: waiting before first provider-local poll',
+  ]);
+
+  requireAll(diagnostics, files.conversationOrganizer, sources.conversationOrganizer, [
+    'tick.tick().await;',
+  ]);
+
+  requireAll(diagnostics, files.pgStore, sources.pgStore, [
+    'MISSIOND_PG_MAX_CONNECTIONS',
+    'MISSIOND_PG_MIN_CONNECTIONS',
+    'MISSIOND_PG_ACQUIRE_TIMEOUT_SECS',
+    '.max_connections(max_connections)',
+  ]);
+
   requireAll(diagnostics, files.deployDaemon, sources.deployDaemon, [
     'MISSIOND_FULL_OS_ENABLE',
     'MISSIOND_FEATURE_WORKFLOW_ENABLE',
@@ -223,6 +266,10 @@ function checkFiles(root, files) {
     'MISSIOND_FEATURE_CONVERSATIONS_ENABLE',
     'MISSIOND_FEATURE_INFRA_OS_ENABLE',
     'MISSIOND_FEATURE_BOARD_ADVANCED_ENABLE',
+    'MISSIOND_PG_MAX_CONNECTIONS',
+    'MISSIOND_BACKGROUND_DB_GRACE_SECS',
+    'MISSIOND_MESSAGE_LABELER_STARTUP_LIMIT',
+    'MISSIOND_TAGGER_STARTUP_LIMIT',
     'plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FULL_OS_ENABLE"',
   ]);
 

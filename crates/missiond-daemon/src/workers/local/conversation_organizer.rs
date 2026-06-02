@@ -56,6 +56,7 @@ async fn run_organizer(state: Arc<AppState>, mut ctx: WorkerContext) {
 
     let mut dirty: HashSet<String> = HashSet::new();
     let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(DEBOUNCE_SECS));
+    tick.tick().await;
 
     loop {
         ctx.wait_if_paused().await;

@@ -61,6 +61,12 @@
 #   MISSIOND_FULL_OS_ENABLE     when truthy, enable optional full-os layers in
 #                               launchd. Individual MISSIOND_FEATURE_* gates
 #                               are also propagated when present.
+#   MISSIOND_PG_MAX_CONNECTIONS / MISSIOND_PG_MIN_CONNECTIONS /
+#   MISSIOND_PG_ACQUIRE_TIMEOUT_SECS optional PostgreSQL pool tuning propagated
+#                               to launchd.
+#   MISSIOND_BACKGROUND_DB_GRACE_SECS and worker startup limits tune full-os
+#                               background DB maintenance so post-deploy MCP
+#                               read/query paths keep foreground capacity.
 #   MISSION_WS_PORT             daemon HTTP/WebSocket port, default: 9120.
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 90
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 45
@@ -546,6 +552,12 @@ ensure_launchd_runtime_root() {
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_SOCKET_PATH" "$SOCK_PATH"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_RUNTIME_DIR" "$RUNTIME_DIR"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_COMPILED_RUNTIME_DIR" "$COMPILED_RUNTIME_DIR"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PG_MAX_CONNECTIONS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PG_MIN_CONNECTIONS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PG_ACQUIRE_TIMEOUT_SECS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_BACKGROUND_DB_GRACE_SECS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_MESSAGE_LABELER_STARTUP_LIMIT"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_TAGGER_STARTUP_LIMIT"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FULL_OS_ENABLE"
