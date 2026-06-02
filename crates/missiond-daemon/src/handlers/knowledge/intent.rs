@@ -3,6 +3,9 @@ use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+use crate::context::v3_blueprint_runtime::{
+    load_compiled_project_universe, CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry,
+};
 use crate::state::AppState;
 
 /// Common intent.lisp locations to scan when intent_path is not set in DB.
@@ -303,7 +306,12 @@ async fn resolve_project(
         .map_err(|e| anyhow!("DB error: {}", e))?
     {
         Some(p) => (id.clone(), p),
-        None => fuzzy_resolve_project(state, &id).await?,
+        None => {
+            if let Some(compiled) = resolve_compiled_project(&id) {
+                return compiled;
+            }
+            fuzzy_resolve_project(state, &id).await?
+        }
     };
 
     let (resolved_id, p) = project;
@@ -356,6 +364,99 @@ async fn fuzzy_resolve_project(
             ))
         }
     }
+}
+
+fn resolve_compiled_project(query: &str) -> Option<Result<(String, String, PathBuf)>> {
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let loaded = load_compiled_project_universe(&project_root, None);
+    let payload = loaded.payload?;
+    let normalized = normalize_lookup_key(query);
+
+    for project in &payload.projects {
+        if compiled_project_matches(project, &normalized) {
+            return Some(resolve_compiled_project_entry(project));
+        }
+    }
+    for service in &payload.services {
+        if compiled_service_matches(service, &normalized) {
+            return Some(resolve_compiled_service_entry(service));
+        }
+    }
+    None
+}
+
+fn resolve_compiled_project_entry(
+    project: &CompiledProjectUniverseEntry,
+) -> Result<(String, String, PathBuf)> {
+    let resolved_id = project
+        .id
+        .clone()
+        .ok_or_else(|| anyhow!("Compiled project has no id"))?;
+    let project_path = project
+        .root
+        .as_deref()
+        .or(project.path.as_deref())
+        .ok_or_else(|| anyhow!("Compiled project '{}' has no root/path", resolved_id))?;
+    let intent_file =
+        resolve_intent_path(project_path, project.intent.as_deref()).ok_or_else(|| {
+            anyhow!(
+                "No intent.lisp found for compiled project '{}' at {}. Checked: {}",
+                resolved_id,
+                project_path,
+                INTENT_CANDIDATES.join(", ")
+            )
+        })?;
+    Ok((resolved_id, project_path.to_string(), intent_file))
+}
+
+fn resolve_compiled_service_entry(
+    service: &CompiledServiceRuntimeEntry,
+) -> Result<(String, String, PathBuf)> {
+    let resolved_id = service
+        .project
+        .clone()
+        .or_else(|| service.id.clone())
+        .ok_or_else(|| anyhow!("Compiled service has no id/project"))?;
+    let project_path = service
+        .root
+        .as_deref()
+        .ok_or_else(|| anyhow!("Compiled service '{}' has no root", resolved_id))?;
+    let intent_file =
+        resolve_intent_path(project_path, service.intent.as_deref()).ok_or_else(|| {
+            anyhow!(
+                "No intent.lisp found for compiled service '{}' at {}. Checked: {}",
+                resolved_id,
+                project_path,
+                INTENT_CANDIDATES.join(", ")
+            )
+        })?;
+    Ok((resolved_id, project_path.to_string(), intent_file))
+}
+
+fn compiled_project_matches(project: &CompiledProjectUniverseEntry, normalized: &str) -> bool {
+    project.id.as_deref().map(normalize_lookup_key).as_deref() == Some(normalized)
+        || project
+            .aliases
+            .iter()
+            .any(|alias| normalize_lookup_key(alias) == normalized)
+        || project
+            .service_ids
+            .iter()
+            .any(|service_id| normalize_lookup_key(service_id) == normalized)
+}
+
+fn compiled_service_matches(service: &CompiledServiceRuntimeEntry, normalized: &str) -> bool {
+    service.id.as_deref().map(normalize_lookup_key).as_deref() == Some(normalized)
+        || service
+            .project
+            .as_deref()
+            .map(normalize_lookup_key)
+            .as_deref()
+            == Some(normalized)
+}
+
+fn normalize_lookup_key(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
 }
 
 /// Resolve the intent.lisp file path for a project.

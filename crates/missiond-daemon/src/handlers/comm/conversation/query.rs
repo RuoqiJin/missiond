@@ -7,6 +7,10 @@ use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::lenient;
 use crate::state::AppState;
 
+const CONVERSATION_HYBRID_FTS_WEIGHT: f64 = 0.65;
+const CONVERSATION_HYBRID_VEC_WEIGHT: f64 = 0.35;
+const MIN_HYBRID_VECTOR_ONLY_SIMILARITY: f32 = 0.50;
+
 fn compact_preview(content: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for ch in content.chars().take(max_chars) {
@@ -21,6 +25,42 @@ fn compact_preview(content: &str, max_chars: usize) -> String {
 fn load_conversation_config() -> Result<ConversationIngestionRuntimeConfig> {
     ConversationIngestionRuntimeConfig::load_for_current_dir()
         .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
+}
+
+fn conversation_search_score(
+    mode: &str,
+    fts_rank: Option<usize>,
+    vec_rank: Option<usize>,
+    rrf_k: usize,
+) -> f64 {
+    match mode {
+        "fts" => fts_rank
+            .map(|rank| 1.0 / (rrf_k + rank + 1) as f64)
+            .unwrap_or(0.0),
+        "semantic" => vec_rank
+            .map(|rank| 1.0 / (rrf_k + rank + 1) as f64)
+            .unwrap_or(0.0),
+        _ => {
+            let fts = fts_rank
+                .map(|rank| CONVERSATION_HYBRID_FTS_WEIGHT / (rrf_k + rank + 1) as f64)
+                .unwrap_or(0.0);
+            let vec = vec_rank
+                .map(|rank| CONVERSATION_HYBRID_VEC_WEIGHT / (rrf_k + rank + 1) as f64)
+                .unwrap_or(0.0);
+            fts + vec
+        }
+    }
+}
+
+fn keep_conversation_hybrid_candidate(
+    mode: &str,
+    fts_rank: Option<usize>,
+    similarity: Option<f32>,
+) -> bool {
+    if mode == "semantic" || fts_rank.is_some() {
+        return true;
+    }
+    similarity.is_some_and(|sim| sim >= MIN_HYBRID_VECTOR_ONLY_SIMILARITY)
 }
 
 pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
@@ -759,6 +799,9 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                         .semantic_conversation_search(
                             qe,
                             ((top_k + skip) * 3) as i64,
+                            time_after.as_deref(),
+                            project.as_deref(),
+                            conversation_type.as_deref(),
                             user_id.as_deref(),
                             tenant_id.as_deref(),
                             application_id.as_deref(),
@@ -798,18 +841,17 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 entry.2 = Some(*sim);
             }
 
+            let mut filtered_semantic_hits = 0usize;
             let mut ranked: Vec<(String, f64, Option<usize>, Option<usize>, Option<f32>)> =
                 session_scores
                     .into_iter()
-                    .map(|(sid, (fts_r, vec_r, sim))| {
-                        let score = match mode {
-                            "fts" => fts_r.map(|r| 1.0 / (rrf_k + r + 1) as f64).unwrap_or(0.0),
-                            "semantic" => {
-                                vec_r.map(|r| 1.0 / (rrf_k + r + 1) as f64).unwrap_or(0.0)
-                            }
-                            _ => missiond_core::embedding::rrf_score(fts_r, vec_r, rrf_k),
-                        };
-                        (sid, score, fts_r, vec_r, sim)
+                    .filter_map(|(sid, (fts_r, vec_r, sim))| {
+                        if !keep_conversation_hybrid_candidate(mode, fts_r, sim) {
+                            filtered_semantic_hits += 1;
+                            return None;
+                        }
+                        let score = conversation_search_score(mode, fts_r, vec_r, rrf_k);
+                        Some((sid, score, fts_r, vec_r, sim))
                     })
                     .collect();
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -881,6 +923,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 "mode": mode,
                 "ftsHits": fts_ranked.len(),
                 "vecHits": vec_ranked.len(),
+                "filteredSemanticHits": filtered_semantic_hits,
             })))
         }
 
@@ -1174,5 +1217,47 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             }
         }
         _ => Err(anyhow!("Unknown conversation query tool: {name}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        conversation_search_score, keep_conversation_hybrid_candidate,
+        MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
+    };
+
+    #[test]
+    fn hybrid_ranking_prefers_fts_over_vector_only() {
+        let fts_only = conversation_search_score("hybrid", Some(0), None, 60);
+        let vec_only = conversation_search_score("hybrid", None, Some(0), 60);
+        assert!(
+            fts_only > vec_only,
+            "exact FTS evidence should outrank vector-only conversation evidence"
+        );
+    }
+
+    #[test]
+    fn hybrid_filters_low_similarity_vector_only_hits() {
+        assert!(!keep_conversation_hybrid_candidate(
+            "hybrid",
+            None,
+            Some(MIN_HYBRID_VECTOR_ONLY_SIMILARITY - 0.01)
+        ));
+        assert!(keep_conversation_hybrid_candidate(
+            "hybrid",
+            None,
+            Some(MIN_HYBRID_VECTOR_ONLY_SIMILARITY)
+        ));
+        assert!(keep_conversation_hybrid_candidate(
+            "hybrid",
+            Some(5),
+            Some(0.1)
+        ));
+        assert!(keep_conversation_hybrid_candidate(
+            "semantic",
+            None,
+            Some(0.1)
+        ));
     }
 }

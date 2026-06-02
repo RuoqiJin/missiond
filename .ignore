@@ -9,6 +9,12 @@
 .missiond/research/memory-review/**
 .missiond/research/memory-review-v2/**
 .missiond/research/board-cleanup/**
+.missiond/research/true-user-utterances-*.md
+.missiond/research/archived-session*/**
+.missiond/research/archive*/**
+.missiond/research/*transcript*.md
+.missiond/research/*transcript*.jsonl
+.missiond/research/*conversation*.jsonl
 .missiond/research/kb-memory-triage-*/memory-export.tsv
 .missiond/research/kb-memory-triage-*/triage-decisions.jsonl
 .missiond/research/kb-memory-triage-*/applied-review-overlay.sql

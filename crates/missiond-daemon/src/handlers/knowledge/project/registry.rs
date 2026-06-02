@@ -78,7 +78,10 @@ pub(super) async fn handle_get(state: &AppState, args: Value) -> Result<ToolResu
         .map_err(|e| anyhow!("DB error: {}", e))?;
     match project {
         Some(p) => Ok(ToolResult::json_pretty(&p)),
-        None => Ok(ToolResult::error(format!("Project not found: {}", id))),
+        None => match compiled_project_lookup(id) {
+            Some(value) => Ok(ToolResult::json_pretty(&value)),
+            None => Ok(ToolResult::error(format!("Project not found: {}", id))),
+        },
     }
 }
 
@@ -1230,6 +1233,72 @@ fn compiled_service_to_value(service: &CompiledServiceRuntimeEntry) -> Value {
     })
 }
 
+fn compiled_project_lookup(id: &str) -> Option<Value> {
+    let mut diagnostics = Vec::new();
+    let compiled = load_resolution_universe(&mut diagnostics);
+    let normalized = normalize_key(id);
+    if let Some(project) = compiled
+        .projects
+        .iter()
+        .find(|project| compiled_project_lookup_matches(project, &normalized))
+    {
+        let mut value = serde_json::json!({
+            "id": project.id.clone().unwrap_or_else(|| id.to_string()),
+            "source": "compiled-project-universe",
+            "db_status": "missing",
+            "compiledProject": compiled_project_to_value(project),
+        });
+        if !diagnostics.is_empty() {
+            value["diagnostics"] = Value::Array(diagnostics);
+        }
+        return Some(value);
+    }
+
+    compiled.services.iter().find_map(|service| {
+        if !compiled_service_lookup_matches(service, &normalized) {
+            return None;
+        }
+        let project_id = service
+            .project
+            .clone()
+            .or_else(|| service.id.clone())
+            .unwrap_or_else(|| id.to_string());
+        let mut value = serde_json::json!({
+            "id": project_id,
+            "source": "compiled-service-runtime",
+            "db_status": "missing",
+            "serviceRuntime": compiled_service_to_value(service),
+        });
+        if !diagnostics.is_empty() {
+            value["diagnostics"] = Value::Array(diagnostics.clone());
+        }
+        Some(value)
+    })
+}
+
+fn compiled_project_lookup_matches(
+    project: &CompiledProjectUniverseEntry,
+    normalized: &str,
+) -> bool {
+    project.id.as_deref().map(normalize_key).as_deref() == Some(normalized)
+        || project
+            .aliases
+            .iter()
+            .any(|alias| normalize_key(alias) == normalized)
+        || project
+            .service_ids
+            .iter()
+            .any(|service_id| normalize_key(service_id) == normalized)
+}
+
+fn compiled_service_lookup_matches(
+    service: &CompiledServiceRuntimeEntry,
+    normalized: &str,
+) -> bool {
+    service.id.as_deref().map(normalize_key).as_deref() == Some(normalized)
+        || service.project.as_deref().map(normalize_key).as_deref() == Some(normalized)
+}
+
 fn path_matches_project(input: &Option<String>, project_path: &str) -> bool {
     let Some(input) = input.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
         return false;
@@ -1505,4 +1574,75 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("{} is required", key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        compiled_project_lookup_matches, compiled_service_lookup_matches,
+        CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry,
+    };
+
+    fn compiled_project() -> CompiledProjectUniverseEntry {
+        CompiledProjectUniverseEntry {
+            id: Some("asr".to_string()),
+            aliases: vec!["xjp-asr".to_string(), "speechscribe.top".to_string()],
+            service_ids: vec!["speechscribe".to_string()],
+            kind: None,
+            management_domain: None,
+            runtime_layer: None,
+            root: None,
+            path: None,
+            intent: None,
+            backend: None,
+            frontend: None,
+            operations: None,
+            status: None,
+            surface: None,
+            missiond_role: None,
+            checks: Vec::new(),
+        }
+    }
+
+    fn compiled_service() -> CompiledServiceRuntimeEntry {
+        CompiledServiceRuntimeEntry {
+            id: Some("payments-api".to_string()),
+            project: Some("payments".to_string()),
+            root: None,
+            intent: None,
+            backend: None,
+            frontend: None,
+            operations: None,
+            environment: None,
+            public_base_url: None,
+            frontend_url: None,
+            api_base_url: None,
+            domains: Vec::new(),
+            health: Vec::new(),
+            dependencies: Vec::new(),
+            ops_capability: None,
+            surface: None,
+        }
+    }
+
+    #[test]
+    fn compiled_project_lookup_matches_id_alias_and_service_id() {
+        let project = compiled_project();
+        assert!(compiled_project_lookup_matches(&project, "asr"));
+        assert!(compiled_project_lookup_matches(&project, "xjp-asr"));
+        assert!(compiled_project_lookup_matches(
+            &project,
+            "speechscribe.top"
+        ));
+        assert!(compiled_project_lookup_matches(&project, "speechscribe"));
+        assert!(!compiled_project_lookup_matches(&project, "payments"));
+    }
+
+    #[test]
+    fn compiled_service_lookup_matches_id_or_project() {
+        let service = compiled_service();
+        assert!(compiled_service_lookup_matches(&service, "payments-api"));
+        assert!(compiled_service_lookup_matches(&service, "payments"));
+        assert!(!compiled_service_lookup_matches(&service, "asr"));
+    }
 }

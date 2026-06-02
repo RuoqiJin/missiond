@@ -2,6 +2,12 @@
 memory-review/**
 memory-review-v2/**
 board-cleanup/**
+true-user-utterances-*.md
+archived-session*/**
+archive*/**
+*transcript*.md
+*transcript*.jsonl
+*conversation*.jsonl
 kb-memory-triage-*/memory-export.tsv
 kb-memory-triage-*/triage-decisions.jsonl
 kb-memory-triage-*/applied-review-overlay.sql

@@ -27,6 +27,10 @@ struct InfraEvidenceArgs {
     target_id: Option<String>,
     #[serde(default)]
     skill: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default, alias = "project", alias = "projectId")]
+    project_id: Option<String>,
     #[serde(default = "default_evidence_limit")]
     limit: usize,
 }
@@ -116,6 +120,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 InfraEvidenceFilter {
                     target_id: None,
                     skill: None,
+                    query: None,
+                    project_id: None,
                     limit: 200,
                 },
             );
@@ -145,6 +151,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 serde_json::from_value(args).unwrap_or(InfraEvidenceArgs {
                     target_id: None,
                     skill: None,
+                    query: None,
+                    project_id: None,
                     limit: default_evidence_limit(),
                 });
             let evidence = collect_skill_evidence(
@@ -152,6 +160,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 InfraEvidenceFilter {
                     target_id: args.target_id,
                     skill: args.skill,
+                    query: args.query,
+                    project_id: args.project_id,
                     limit: args.limit.min(500),
                 },
             );
@@ -167,9 +177,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 serde_json::from_value(args).unwrap_or(InfraEvidenceArgs {
                     target_id: None,
                     skill: None,
+                    query: None,
+                    project_id: None,
                     limit: default_evidence_limit(),
                 });
-            let refs = credential_refs(args.target_id.as_deref());
+            let refs = credential_refs_filtered(
+                args.target_id.as_deref(),
+                args.query.as_deref(),
+                args.project_id.as_deref(),
+            );
             Ok(ToolResult::json_pretty(&json!({
                 "schema": "missiond.credential-ref-inventory.v1",
                 "rule": "Only secret refs are returned. MissionD never returns credential values from Lisp, Board, or skills.",
@@ -203,6 +219,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 InfraEvidenceFilter {
                     target_id: None,
                     skill: None,
+                    query: None,
+                    project_id: None,
                     limit: 500,
                 },
             );
@@ -900,12 +918,15 @@ fn default_evidence_limit() -> usize {
 struct InfraEvidenceFilter {
     target_id: Option<String>,
     skill: Option<String>,
+    query: Option<String>,
+    project_id: Option<String>,
     limit: usize,
 }
 
 fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<Value> {
     let target = filter.target_id.as_deref().map(str::to_ascii_lowercase);
-    let mut items = Vec::new();
+    let mut candidates: Vec<(i64, usize, Value)> = Vec::new();
+    let mut ordinal = 0usize;
     for skill in state.skills.list() {
         let skill_name = skill.name.as_str();
         if filter
@@ -919,9 +940,6 @@ fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<
             continue;
         };
         for (idx, line) in content.lines().enumerate() {
-            if items.len() >= filter.limit {
-                return items;
-            }
             if !is_infra_evidence_line(line) {
                 continue;
             }
@@ -931,19 +949,324 @@ fn collect_skill_evidence(state: &AppState, filter: InfraEvidenceFilter) -> Vec<
                     continue;
                 }
             }
+            if !evidence_matches_scope(skill_name, &skill.path.display().to_string(), line, &filter)
+            {
+                continue;
+            }
+            let score =
+                evidence_scope_score(skill_name, &skill.path.display().to_string(), line, &filter);
             let (excerpt, credential_risk) = redact_skill_evidence_line(line);
-            items.push(json!({
-                "sourceSkill": skill_name,
-                "sourcePath": skill.path.display().to_string(),
-                "sourceLine": idx + 1,
-                "confidence": evidence_confidence(line),
-                "promoteTo": evidence_promotion_target(line),
-                "credentialInlineRisk": credential_risk,
-                "excerpt": excerpt
-            }));
+            candidates.push((
+                score,
+                ordinal,
+                json!({
+                    "sourceSkill": skill_name,
+                    "sourcePath": skill.path.display().to_string(),
+                    "sourceLine": idx + 1,
+                    "confidence": evidence_confidence(line),
+                    "promoteTo": evidence_promotion_target(line),
+                    "credentialInlineRisk": credential_risk,
+                    "excerpt": excerpt
+                }),
+            ));
+            ordinal += 1;
         }
     }
-    items
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    candidates
+        .into_iter()
+        .take(filter.limit)
+        .map(|(_, _, item)| item)
+        .collect()
+}
+
+fn evidence_matches_scope(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> bool {
+    if filter
+        .target_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || filter
+            .skill
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
+    if query_has_specific_file_token_without_match(skill_name, skill_path, line, filter) {
+        return false;
+    }
+    if line_mentions_unrequested_foreign_project(line, filter) {
+        return false;
+    }
+    if lacks_line_anchor_for_broad_deploy_query(line, filter) {
+        return false;
+    }
+    if lacks_project_anchor_and_query_term_density(skill_name, skill_path, line, filter) {
+        return false;
+    }
+    let score = evidence_scope_score(skill_name, skill_path, line, filter);
+    if filter
+        .query
+        .as_deref()
+        .map(evidence_query_tokens)
+        .is_none_or(|tokens| tokens.is_empty())
+        && normalized_evidence_token(filter.project_id.as_deref()).is_none()
+    {
+        return score > 0;
+    }
+    score >= 4
+}
+
+fn line_mentions_unrequested_foreign_project(line: &str, filter: &InfraEvidenceFilter) -> bool {
+    let Some(project) = normalized_evidence_token(filter.project_id.as_deref()) else {
+        return false;
+    };
+    let query_tokens = filter
+        .query
+        .as_deref()
+        .map(evidence_query_tokens)
+        .unwrap_or_default();
+    let line_haystack = line.to_ascii_lowercase();
+    known_project_evidence_tokens()
+        .iter()
+        .filter(|token| **token != project)
+        .filter(|token| !query_tokens.iter().any(|query_token| query_token == *token))
+        .any(|token| contains_evidence_token(&line_haystack, token))
+}
+
+fn lacks_line_anchor_for_broad_deploy_query(line: &str, filter: &InfraEvidenceFilter) -> bool {
+    let Some(query) = filter.query.as_deref() else {
+        return false;
+    };
+    let query_tokens = evidence_query_tokens(query);
+    if !query_tokens
+        .iter()
+        .any(|token| is_deploy_drift_anchor_token(token))
+    {
+        return false;
+    }
+
+    let line_haystack = line.to_ascii_lowercase();
+    query_tokens
+        .iter()
+        .filter(|token| is_deploy_drift_anchor_token(token))
+        .all(|token| !contains_evidence_token(&line_haystack, token))
+}
+
+fn lacks_project_anchor_and_query_term_density(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> bool {
+    let Some(query) = filter.query.as_deref() else {
+        return false;
+    };
+    let tokens = evidence_query_tokens(query);
+    if tokens.is_empty() {
+        return false;
+    }
+
+    let line_haystack = line.to_ascii_lowercase();
+    let project_token = normalized_evidence_token(filter.project_id.as_deref());
+    if project_token.as_deref().is_some_and(|project| {
+        project != "missiond" && contains_evidence_token(&line_haystack, project)
+    }) {
+        return false;
+    }
+
+    let match_weight = query_match_weight(skill_name, skill_path, line, filter);
+    match_weight < 3
+}
+
+fn query_match_weight(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> usize {
+    let Some(query) = filter.query.as_deref() else {
+        return 0;
+    };
+    let line_haystack = line.to_ascii_lowercase();
+    let skill_haystack = format!("{skill_name}\n{skill_path}").to_ascii_lowercase();
+    let project_token = normalized_evidence_token(filter.project_id.as_deref());
+    evidence_query_tokens(query)
+        .iter()
+        .filter(|token| project_token.as_deref() != Some(token.as_str()))
+        .filter(|token| {
+            contains_evidence_token(&line_haystack, token)
+                || contains_evidence_token(&skill_haystack, token)
+        })
+        .map(|token| {
+            if is_weak_target_evidence_token(token) {
+                1
+            } else {
+                2
+            }
+        })
+        .sum()
+}
+
+fn query_has_specific_file_token_without_match(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> bool {
+    let Some(query) = filter.query.as_deref() else {
+        return false;
+    };
+    let specific_tokens: Vec<String> = evidence_query_tokens(query)
+        .into_iter()
+        .filter(|token| token.contains('.') || token.contains('/'))
+        .collect();
+    if specific_tokens.is_empty() {
+        return false;
+    }
+
+    let haystack = format!("{skill_name}\n{skill_path}\n{line}").to_ascii_lowercase();
+    if specific_tokens
+        .iter()
+        .any(|token| contains_evidence_token(&haystack, token))
+    {
+        return false;
+    }
+
+    let line_haystack = line.to_ascii_lowercase();
+    let Some(project) = normalized_evidence_token(filter.project_id.as_deref()) else {
+        return true;
+    };
+    if project == "missiond" || !contains_evidence_token(&line_haystack, &project) {
+        return true;
+    }
+
+    let project = project.as_str();
+    !evidence_query_tokens(query)
+        .into_iter()
+        .filter(|token| !token.contains('.') && !token.contains('/'))
+        .filter(|token| token != project)
+        .any(|token| contains_evidence_token(&line_haystack, &token))
+}
+
+fn evidence_scope_score(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> i64 {
+    if filter
+        .target_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || filter
+            .skill
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return 100;
+    }
+    let haystack = format!("{skill_name}\n{skill_path}\n{line}").to_ascii_lowercase();
+    let line_haystack = line.to_ascii_lowercase();
+    let skill_haystack = format!("{skill_name}\n{skill_path}").to_ascii_lowercase();
+    let mut score = 0i64;
+
+    let project_token = normalized_evidence_token(filter.project_id.as_deref());
+    if let Some(project) = project_token.as_deref() {
+        if project != "missiond" && contains_evidence_token(&haystack, project) {
+            score += if contains_evidence_token(&line_haystack, project) {
+                4
+            } else {
+                2
+            };
+        }
+    }
+    for term in filter
+        .query
+        .as_deref()
+        .map(evidence_query_tokens)
+        .unwrap_or_default()
+    {
+        if project_token.as_deref() == Some(term.as_str()) {
+            continue;
+        }
+        let line_score = if is_weak_target_evidence_token(&term) {
+            1
+        } else {
+            8
+        };
+        let skill_score = if is_weak_target_evidence_token(&term) {
+            1
+        } else {
+            4
+        };
+        if contains_evidence_token(&line_haystack, &term) {
+            score += line_score;
+        } else if contains_evidence_token(&skill_haystack, &term) {
+            score += skill_score;
+        }
+    }
+    let query_weight = query_match_weight(skill_name, skill_path, line, filter);
+    if query_weight >= 3 {
+        score += query_weight as i64;
+    }
+    if score == 0
+        && normalized_evidence_token(filter.project_id.as_deref()).is_none()
+        && filter
+            .query
+            .as_deref()
+            .map(evidence_query_tokens)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return 1;
+    }
+    score
+}
+
+fn contains_evidence_token(haystack: &str, token: &str) -> bool {
+    if token.chars().any(|ch| matches!(ch, '-' | '_' | '.' | '/')) {
+        return haystack.contains(token);
+    }
+
+    let bytes = haystack.as_bytes();
+    let needle = token.as_bytes();
+    if needle.is_empty() || bytes.len() < needle.len() {
+        return false;
+    }
+    for idx in 0..=bytes.len() - needle.len() {
+        if &bytes[idx..idx + needle.len()] != needle {
+            continue;
+        }
+        let before = idx.checked_sub(1).and_then(|pos| bytes.get(pos)).copied();
+        let after = bytes.get(idx + needle.len()).copied();
+        if before.is_none_or(|ch| !is_evidence_word_byte(ch))
+            && after.is_none_or(|ch| !is_evidence_word_byte(ch))
+        {
+            return true;
+        }
+        if token.len() > 3
+            && token.bytes().all(|ch| ch.is_ascii_alphabetic())
+            && after == Some(b's')
+        {
+            let plural_after = bytes.get(idx + needle.len() + 1).copied();
+            if before.is_none_or(|ch| !is_evidence_word_byte(ch))
+                && plural_after.is_none_or(|ch| !is_evidence_word_byte(ch))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_evidence_word_byte(ch: u8) -> bool {
+    ch.is_ascii_alphanumeric() || ch == b'_'
 }
 
 fn is_infra_evidence_line(line: &str) -> bool {
@@ -1250,6 +1573,228 @@ fn credential_refs(target_id: Option<&str>) -> Vec<Value> {
     })
 }
 
+fn credential_refs_filtered(
+    target_id: Option<&str>,
+    query: Option<&str>,
+    _project_id: Option<&str>,
+) -> Vec<Value> {
+    let refs = credential_refs(target_id);
+    if target_id.is_some_and(|target| !target.trim().is_empty()) {
+        return refs;
+    }
+    let terms = credential_query_terms(query);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let required_capability = credential_required_capability(query);
+    if !credential_query_mentions_secret_intent(query) && !credential_query_mentions_target(query) {
+        return Vec::new();
+    }
+    if required_capability.is_none() && !credential_query_mentions_target(query) {
+        return Vec::new();
+    }
+    let target_terms = credential_target_terms(query);
+    refs.into_iter()
+        .filter(|item| {
+            if let Some(required_capability) = required_capability {
+                if item
+                    .get("requiredCapability")
+                    .and_then(|value| value.as_str())
+                    != Some(required_capability)
+                {
+                    return false;
+                }
+            }
+            let haystack = item.to_string().to_ascii_lowercase();
+            if !target_terms.is_empty() && !target_terms.iter().any(|term| haystack.contains(term))
+            {
+                return false;
+            }
+            terms.iter().any(|term| haystack.contains(term))
+        })
+        .collect()
+}
+
+fn credential_query_terms(query: Option<&str>) -> Vec<String> {
+    query.map(evidence_query_tokens).unwrap_or_default()
+}
+
+fn credential_required_capability(query: Option<&str>) -> Option<&'static str> {
+    let query = query?.to_ascii_lowercase();
+    if query.contains("cloudflare")
+        || query.contains("dns")
+        || query.contains("certificate")
+        || query.contains("cert")
+    {
+        return Some("dns-ops");
+    }
+    if query.contains("deploy")
+        || query.contains("agent")
+        || query.contains("canary")
+        || query.contains("diagnostic")
+        || query.contains("diagnostics")
+    {
+        return Some("deploy-ops");
+    }
+    None
+}
+
+fn credential_query_mentions_target(query: Option<&str>) -> bool {
+    !credential_target_terms(query).is_empty()
+}
+
+fn credential_query_mentions_secret_intent(query: Option<&str>) -> bool {
+    let Some(query) = query.map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    [
+        "key",
+        "keys",
+        "secret",
+        "credential",
+        "credentials",
+        "token",
+        "access",
+    ]
+    .into_iter()
+    .any(|token| query.contains(token))
+}
+
+fn credential_target_terms(query: Option<&str>) -> Vec<&'static str> {
+    let Some(query) = query.map(str::to_ascii_lowercase) else {
+        return Vec::new();
+    };
+    [
+        "gcp",
+        "ecs",
+        "windows",
+        "privatecloud",
+        "hostvds",
+        "synology",
+        "bwg",
+        "cloudflare",
+        "dns",
+    ]
+    .into_iter()
+    .filter(|token| query.contains(token))
+    .collect()
+}
+
+fn evidence_query_tokens(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let lower = query.to_ascii_lowercase();
+    for compound in [
+        ("deploy agent", "deploy-agent"),
+        ("deploy-agent", "deploy-agent"),
+        ("deploy center", "deploy-center"),
+        ("deploy-center", "deploy-center"),
+    ] {
+        if lower.contains(compound.0) {
+            tokens.push(compound.1.to_string());
+        }
+    }
+    for raw in
+        query.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
+    {
+        let Some(token) = normalized_evidence_token(Some(raw)) else {
+            continue;
+        };
+        if is_generic_evidence_token(&token) {
+            continue;
+        }
+        if !tokens.iter().any(|existing| existing == &token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+fn normalized_evidence_token(value: Option<&str>) -> Option<String> {
+    let token = value?.trim().trim_matches(|ch: char| {
+        !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+    });
+    if token.is_empty() {
+        return None;
+    }
+    let token = token.to_ascii_lowercase();
+    if token.len() < 3 && !token.chars().any(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(token)
+}
+
+fn is_generic_evidence_token(token: &str) -> bool {
+    matches!(
+        token,
+        "deploy"
+            | "agent"
+            | "runtime"
+            | "service"
+            | "project"
+            | "status"
+            | "state"
+            | "success"
+            | "failure"
+            | "failed"
+            | "workflow"
+            | "github"
+            | "center"
+            | "production"
+            | "key"
+            | "keys"
+            | "secret"
+            | "secrets"
+            | "credential"
+            | "credentials"
+            | "diagnostic"
+            | "diagnostics"
+            | "canary"
+            | "access"
+    )
+}
+
+fn known_project_evidence_tokens() -> &'static [&'static str] {
+    &[
+        "asr",
+        "speechscribe",
+        "pcea",
+        "pcea-video-vault",
+        "tiermate",
+        "astrill",
+        "openclaw",
+        "aliyun",
+    ]
+}
+
+fn is_deploy_drift_anchor_token(token: &str) -> bool {
+    matches!(
+        token,
+        "compose" | "entrypoint" | "binary" | "marker" | "volume" | "volumes"
+    )
+}
+
+fn is_weak_target_evidence_token(token: &str) -> bool {
+    matches!(
+        token,
+        "gcp"
+            | "ecs"
+            | "bwg"
+            | "vps"
+            | "windows"
+            | "aliyun"
+            | "cloud"
+            | "image"
+            | "images"
+            | "compose"
+            | "docker"
+            | "build"
+            | "ci"
+            | "volume"
+            | "volumes"
+            | "deploy-center"
+    )
+}
+
 fn list_infra_servers(
     state: &AppState,
     role: Option<&str>,
@@ -1445,5 +1990,207 @@ fn maybe_push_skill_target(
         .any(|existing| infra_id_matches(existing, id))
     {
         servers.push(server);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        credential_refs_filtered, evidence_matches_scope, evidence_scope_score, InfraEvidenceFilter,
+    };
+
+    #[test]
+    fn evidence_scope_rejects_unrelated_project_skill_lines() {
+        let filter = InfraEvidenceFilter {
+            target_id: None,
+            skill: None,
+            query: Some("Payments service.manifest.toml missing manifest gate".to_string()),
+            project_id: Some("payments".to_string()),
+            limit: 10,
+        };
+
+        assert!(!evidence_matches_scope(
+            "tiermate",
+            "/Users/jinchen/.claude/skills/tiermate/SKILL.md",
+            "GCP deploy-agent endpoint and secret-store references",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "astrill-gateway",
+            "/Users/jinchen/.claude/skills/astrill-gateway/SKILL.md",
+            "Router/Gateway 192.168.80.254 ARP flux and gateway-iptables.sh diagnostics",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "openclaw",
+            "/Users/jinchen/.claude/skills/openclaw/SKILL.md",
+            "OpenAI-compatible API model routing backend notes",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "media type application/vnd.docker.distribution.manifest.v1+prettyjws is no longer supported",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "missiond",
+            "/Users/jinchen/.claude/skills/missiond/SKILL.md",
+            "Feature gate: embeddings feature, MUSL build disables ONNX Runtime",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "/opt/xiaojinpro/docker-compose.yml — monolith, router, payments, investor-panel",
+            &filter,
+        ));
+        assert!(evidence_matches_scope(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "Payments deploy-agent canary evidence and manifest gate notes",
+            &filter,
+        ));
+
+        let deploy_runtime_filter = InfraEvidenceFilter {
+            target_id: None,
+            skill: None,
+            query: Some(
+                "Payments CI image marker but Deploy Center canary old binary compose entrypoint volume override"
+                    .to_string(),
+            ),
+            project_id: Some("payments".to_string()),
+            limit: 10,
+        };
+        assert!(evidence_matches_scope(
+            "xjp-deploy-center",
+            "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
+            "compose volume override kept the old binary image running after canary",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "pcea",
+            "/Users/jinchen/.claude/skills/pcea/SKILL.md",
+            "Postgres volume: `pcea_postgres_data` (fixed compose project storage)",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xjp-deploy-center",
+            "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
+            "| 镜像传输 | OSS: `rickyjim/deploy-images/pcea-video-vault/pcea-{sha}.tar.gz` |",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xjp-deploy-center",
+            "/Users/jinchen/.claude/skills/xjp-deploy-center/SKILL.md",
+            "**OSS 中转策略**: GA CI 构建 docker image → docker save → Deploy Center 触发 → ECS Agent 下载。Build stage 必须 DISABLED。",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xjp-pg-prod",
+            "/Users/jinchen/.claude/skills/xjp-pg-prod/SKILL.md",
+            "| xjp-monolith-app | `postgres:<R>@10.146.0.4:6432/log_center`(+ router/timeline/payments/deploy_center/knowledge env 同) |",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "xiaojinpro-backend",
+            "/Users/jinchen/.claude/skills/xiaojinpro-backend/SKILL.md",
+            "Router → Payments: `POST /payments/internal/credits/spend`",
+            &deploy_runtime_filter,
+        ));
+        let volume_override_score = evidence_scope_score(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "| xjp-router docker-compose.yml `volumes: ./config:/app/config:ro` 挂载覆盖镜像内 config | push → CI 构建新镜像 → 部署 → 容器里还是旧 config（挂载优先级高于 image layer） |",
+            &deploy_runtime_filter,
+        );
+        let generic_payments_compose_score = evidence_scope_score(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "/opt/xiaojinpro/docker-compose.yml — monolith, router, payments, investor-panel 等",
+            &deploy_runtime_filter,
+        );
+        assert!(
+            volume_override_score > generic_payments_compose_score,
+            "volume override evidence should outrank generic payments compose inventory"
+        );
+        assert!(!evidence_matches_scope(
+            "tiermate",
+            "/Users/jinchen/.claude/skills/tiermate/SKILL.md",
+            "GCP deploy-agent endpoint and secret-store references",
+            &deploy_runtime_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "aliyun",
+            "/Users/jinchen/.claude/skills/aliyun/SKILL.md",
+            "| Secret Store CN | secret-store-cn-app | 8091 (127.0.0.1) | Docker Compose, OSS image transfer |",
+            &deploy_runtime_filter,
+        ));
+
+        let gcp_agent_filter = InfraEvidenceFilter {
+            target_id: None,
+            skill: None,
+            query: Some("GCP deploy agent key for payments canary diagnostics".to_string()),
+            project_id: Some("payments".to_string()),
+            limit: 10,
+        };
+        assert!(evidence_matches_scope(
+            "xjp-deploy-agent",
+            "/Users/jinchen/.claude/skills/xjp-deploy-agent/SKILL.md",
+            "GCP tunnel API and deploy-agent diagnostics",
+            &gcp_agent_filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "wepub",
+            "/Users/jinchen/.claude/skills/wepub/SKILL.md",
+            "Backend GCP /opt/wepub deployment notes",
+            &gcp_agent_filter,
+        ));
+    }
+
+    #[test]
+    fn credential_refs_require_explicit_target_or_query_relevance() {
+        assert!(!credential_refs_filtered(Some("gcp-runtime"), None, None).is_empty());
+        let gcp_refs = credential_refs_filtered(
+            None,
+            Some("GCP deploy agent key for payments canary diagnostics"),
+            Some("payments"),
+        );
+        assert!(!gcp_refs.is_empty());
+        assert!(gcp_refs.iter().all(|item| {
+            item.get("targetId").and_then(|value| value.as_str()) == Some("gcp-runtime")
+        }));
+        assert!(gcp_refs.iter().all(|item| {
+            item.get("requiredCapability")
+                .and_then(|value| value.as_str())
+                == Some("deploy-ops")
+        }));
+        assert!(gcp_refs.iter().all(|item| {
+            item.get("keyName")
+                .and_then(|value| value.as_str())
+                .is_none_or(|key| !key.contains("CLOUDFLARE_DNS_TOKEN"))
+        }));
+        let dns_refs =
+            credential_refs_filtered(None, Some("Cloudflare DNS token on GCP runtime"), None);
+        assert!(dns_refs.iter().any(|item| {
+            item.get("keyName").and_then(|value| value.as_str())
+                == Some("cloudflare/CLOUDFLARE_DNS_TOKEN")
+        }));
+        assert!(credential_refs_filtered(
+            None,
+            Some("Payments service.manifest.toml missing manifest gate"),
+            Some("payments"),
+        )
+        .is_empty());
+        assert!(
+            credential_refs_filtered(
+                None,
+                Some(
+                    "Payments CI image marker but Deploy Center canary old binary compose entrypoint volume override",
+                ),
+                Some("payments"),
+            )
+            .is_empty()
+        );
     }
 }

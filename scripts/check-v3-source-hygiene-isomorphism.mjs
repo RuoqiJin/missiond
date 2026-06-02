@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const usage = `Usage:
@@ -50,7 +51,7 @@ function main() {
   }
 
   const repoRoot = dryFixture ? buildFixture() : process.cwd();
-  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
+  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES, { runRepoSearchSmoke: !dryFixture });
   const result = {
     ok: diagnostics.length === 0,
     files: Object.keys(DEFAULT_FILES).length,
@@ -69,7 +70,7 @@ function main() {
   process.exit(result.ok ? 0 : 1);
 }
 
-function checkFiles(root, files) {
+function checkFiles(root, files, options = {}) {
   const diagnostics = [];
   const sources = {};
   for (const [key, rel] of Object.entries(files)) {
@@ -102,6 +103,7 @@ function checkFiles(root, files) {
     'git diff --cached --check',
     'task-scope guard',
     'Repo text search hygiene MUST project ssot-retrieval-scope into .ignore sidecars',
+    'Default repo rg MUST NOT surface .missiond/research/true-user-utterances-*.md',
     'node scripts/check-v3-source-hygiene-isomorphism.mjs',
   ]);
 
@@ -167,6 +169,12 @@ function checkFiles(root, files) {
     '.missiond/tasks/wave*/**',
     '.missiond/research/memory-review/**',
     '.missiond/research/board-cleanup/**',
+    '.missiond/research/true-user-utterances-*.md',
+    '.missiond/research/archived-session*/**',
+    '.missiond/research/archive*/**',
+    '.missiond/research/*transcript*.md',
+    '.missiond/research/*transcript*.jsonl',
+    '.missiond/research/*conversation*.jsonl',
   ]);
 
   requireAll(diagnostics, files.missiondIgnore, sources.missiondIgnore, [
@@ -175,6 +183,12 @@ function checkFiles(root, files) {
     'tasks/wave*/**',
     'research/memory-review/**',
     'research/board-cleanup/**',
+    'research/true-user-utterances-*.md',
+    'research/archived-session*/**',
+    'research/archive*/**',
+    'research/*transcript*.md',
+    'research/*transcript*.jsonl',
+    'research/*conversation*.jsonl',
   ]);
 
   requireAll(diagnostics, files.missiondV3Ignore, sources.missiondV3Ignore, [
@@ -187,6 +201,12 @@ function checkFiles(root, files) {
     'memory-review/**',
     'memory-review-v2/**',
     'board-cleanup/**',
+    'true-user-utterances-*.md',
+    'archived-session*/**',
+    'archive*/**',
+    '*transcript*.md',
+    '*transcript*.jsonl',
+    '*conversation*.jsonl',
   ]);
 
   requireAll(diagnostics, files.missiondTasksIgnore, sources.missiondTasksIgnore, [
@@ -200,7 +220,48 @@ function checkFiles(root, files) {
     "checkSuppliedFiles({ files: ['scripts/foo.mjs'], cwd: tmp })",
   ]);
 
+  if (options.runRepoSearchSmoke) {
+    checkDefaultRgBoundary(diagnostics, root);
+  }
+
   return diagnostics;
+}
+
+function checkDefaultRgBoundary(diagnostics, root) {
+  const rg = spawnSync('rg', ['--files', '.missiond'], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  if (rg.error) {
+    diagnostics.push({ file: 'rg --files .missiond', message: `cannot run ripgrep: ${rg.error.message}` });
+    return;
+  }
+  if (rg.status !== 0) {
+    diagnostics.push({
+      file: 'rg --files .missiond',
+      message: `ripgrep search-boundary smoke failed with status ${rg.status}: ${(rg.stderr || '').trim()}`,
+    });
+    return;
+  }
+  const leaked = rg.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) =>
+      line.includes('.missiond/v3/runtime/')
+        || line.includes('.missiond/research/true-user-utterances-')
+        || /(^|\/)\.missiond\/research\/archived-session/i.test(line)
+        || /(^|\/)\.missiond\/research\/archive/i.test(line)
+        || /(^|\/)\.missiond\/research\/.*transcript.*\.(md|jsonl)$/i.test(line)
+        || /(^|\/)\.missiond\/research\/.*conversation.*\.jsonl$/i.test(line),
+    );
+  if (leaked.length > 0) {
+    diagnostics.push({
+      file: 'rg --files .missiond',
+      message: `default rg leaked cold/noisy evidence paths: ${leaked.slice(0, 10).join(', ')}`,
+    });
+  }
 }
 
 function requireAll(diagnostics, file, source, needles) {
@@ -222,7 +283,8 @@ function buildFixture() {
        "raw NUL bytes in staged blobs are rejected."
        "git diff --cached --check runs before scoped commits."
        "task-scope guard rejects paths outside write-scope."
-       "Repo text search hygiene MUST project ssot-retrieval-scope into .ignore sidecars."])
+       "Repo text search hygiene MUST project ssot-retrieval-scope into .ignore sidecars."
+       "Default repo rg MUST NOT surface .missiond/research/true-user-utterances-*.md, archived session dumps, imported transcript exports, or .missiond/v3/runtime cold compiled projections."])
   (implementation-map
     (surface source-hygiene
       :status "code-aligned"
@@ -302,6 +364,12 @@ MissionD default search boundary
 .missiond/tasks/wave*/**
 .missiond/research/memory-review/**
 .missiond/research/board-cleanup/**
+.missiond/research/true-user-utterances-*.md
+.missiond/research/archived-session*/**
+.missiond/research/archive*/**
+.missiond/research/*transcript*.md
+.missiond/research/*transcript*.jsonl
+.missiond/research/*conversation*.jsonl
 `);
 
   writeFixture(root, DEFAULT_FILES.missiondIgnore, `
@@ -310,6 +378,12 @@ v3/runtime/**
 tasks/wave*/**
 research/memory-review/**
 research/board-cleanup/**
+research/true-user-utterances-*.md
+research/archived-session*/**
+research/archive*/**
+research/*transcript*.md
+research/*transcript*.jsonl
+research/*conversation*.jsonl
 `);
 
   writeFixture(root, DEFAULT_FILES.missiondV3Ignore, `
@@ -322,6 +396,12 @@ Historical memory/Board cleanup evidence
 memory-review/**
 memory-review-v2/**
 board-cleanup/**
+true-user-utterances-*.md
+archived-session*/**
+archive*/**
+*transcript*.md
+*transcript*.jsonl
+*conversation*.jsonl
 `);
 
   writeFixture(root, DEFAULT_FILES.missiondTasksIgnore, `

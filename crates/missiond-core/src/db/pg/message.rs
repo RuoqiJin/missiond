@@ -506,7 +506,10 @@ impl MessageStore for PgMissionStore {
         }
         if let Some(p) = project {
             param_idx += 1;
-            conditions.push(format!("c.project = ${}", param_idx));
+            conditions.push(format!(
+                "(c.project = ${0} OR c.project_id = ${0})",
+                param_idx
+            ));
             extra_vals.push(p.to_string());
         }
         // conversation_type: supports comma-separated for IN clause (e.g. "gemini_chat,router_chat")
@@ -581,7 +584,10 @@ impl MessageStore for PgMissionStore {
         }
         if let Some(p) = project {
             like_idx += 1;
-            like_conditions.push(format!("c.project = ${}", like_idx));
+            like_conditions.push(format!(
+                "(c.project = ${0} OR c.project_id = ${0})",
+                like_idx
+            ));
             like_vals.push(p.to_string());
         }
         if let Some(ct) = conversation_type {
@@ -929,6 +935,9 @@ impl MessageStore for PgMissionStore {
         &self,
         query_vec: &[f32],
         limit: i64,
+        time_after: Option<&str>,
+        project: Option<&str>,
+        conversation_type: Option<&str>,
         user_id: Option<&str>,
         tenant_id: Option<&str>,
         application_id: Option<&str>,
@@ -938,6 +947,40 @@ impl MessageStore for PgMissionStore {
         let mut conditions = vec!["tv.embedding_vec IS NOT NULL".to_string()];
         let mut param_idx = 1u32; // $1 = limit
         let mut scope_vals = Vec::new();
+        if let Some(ta) = time_after {
+            param_idx += 1;
+            conditions.push(format!("c.started_at >= ${}", param_idx));
+            scope_vals.push(ta.to_string());
+        }
+        if let Some(p) = project {
+            param_idx += 1;
+            conditions.push(format!(
+                "(c.project = ${0} OR c.project_id = ${0})",
+                param_idx
+            ));
+            scope_vals.push(p.to_string());
+        }
+        if let Some(ct) = conversation_type {
+            let types: Vec<&str> = ct.split(',').map(|s| s.trim()).collect();
+            if types.len() == 1 {
+                param_idx += 1;
+                conditions.push(format!("c.conversation_type = ${}", param_idx));
+                scope_vals.push(types[0].to_string());
+            } else {
+                let placeholders: Vec<String> = types
+                    .iter()
+                    .map(|t| {
+                        param_idx += 1;
+                        scope_vals.push(t.to_string());
+                        format!("${}", param_idx)
+                    })
+                    .collect();
+                conditions.push(format!(
+                    "c.conversation_type IN ({})",
+                    placeholders.join(",")
+                ));
+            }
+        }
         push_scope_conditions(
             &mut conditions,
             &mut param_idx,

@@ -30,6 +30,12 @@ pub(crate) fn generate_lisp_capsule(
     writeln!(buf, "    :channel \"{}\"", escape_lisp(isolation.channel)).ok();
     writeln!(buf, "  )").ok();
 
+    if let Some(lanes) = context_gather_payload.get("evidence_lanes") {
+        writeln!(buf, "  (L1-evidence-lanes").ok();
+        write_json_summary(&mut buf, "authority-lanes", lanes);
+        writeln!(buf, "  )").ok();
+    }
+
     if let Some(ssot) = context_gather_payload
         .get("sources")
         .and_then(|s| s.get("ssot"))
