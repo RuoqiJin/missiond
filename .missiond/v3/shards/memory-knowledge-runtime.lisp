@@ -92,7 +92,7 @@
          :entry [V3-compiled-runtime env-config mission_memory.provider_status]
          :core ((step s1 :logic "load provider declarations and active provider selection from MISSIOND_MEMORY_PROVIDER_URL / MISSIOND_MEMORY_PROVIDER_MODE")
                 (step s2 :logic "validate provider capabilities against requested operation")
-                (step s3 :logic "call /v1/memory/provider_status for xjp-memory providers, or return explicit null/local compatibility diagnostics"))
+                (step s3 :logic "return a configuration snapshot by default; call /v1/memory/provider_status for xjp-memory providers only when probe=true, or return explicit null/local compatibility diagnostics"))
          :egress [MemoryProviderConfig provider-status])
        (function memory-scope-resolution
          :entry [BoardTask project-registry user-request active-universe]
@@ -124,7 +124,8 @@
          :entry [mission_memory.evidence_search mission_context_gather]
          :core ((step s1 :logic "resolve scope and profile before retrieval")
                 (step s2 :logic "filter allowed evidence lanes before FTS/vector/rerank")
-                (step s3 :logic "return compact EvidenceItem projections with provenance and raw_policy"))
+                (step s3 :logic "return compact EvidenceItem projections with provenance and raw_policy")
+                (step s4 :logic "MissionD authority evidence lanes are served from local evidence_items even when xjp-memory is configured as the remote memory provider"))
          :egress [evidence_items])
        (function memory-evidence-promotion-contract
          :entry [mission_memory.evidence_promote memory-review-batch-runner]
@@ -136,7 +137,7 @@
        (function memory-evidence-backfill-contract
          :entry [mission_memory.evidence_backfill maintenance-worker]
          :core ((step s1 :logic "summarize raw conversations into conversation_episodes/conversation_fact_extracts without deleting conversation_messages")
-                (step s2 :logic "source=projects/support/all prewarms compact evidence_items from compiled_project_universe and compiled service support catalogs without raw conversation scans")
+                (step s2 :logic "source=projects/support/all prewarms local compact evidence_items from compiled_project_universe and compiled service support catalogs without raw conversation scans, even when xjp-memory is the configured remote provider")
                 (step s3 :logic "index skill/support evidence through compact evidence_items and skill_evidence_items projections")
                 (step s4 :logic "credential_refs are counted only unless include_credentials=true; secret values are never indexed")
                 (step s5 :logic "mark conversation/skill derived facts needs_review until explicit promotion"))
@@ -152,6 +153,7 @@
        "Every memory query/write MUST resolve tenant/universe/project/user scope before calling a provider."
        "mission_kb_query and mission_kb_remember are compatibility leaves; preferred agents use mission_memory query/remember/review/provider_status."
        "Provider implementations own FTS, embedding, rerank, conversation archive, skill evidence index, active memory, archive state, export, and purge."
+       "mission_memory.provider_status MUST NOT require remote HTTP by default; remote health probing is explicit with probe=true."
        "Default context-pack generation MUST NOT preload KB/history/provider logs; memory is opt-in by workflow and scope."]
     :checker "node scripts/check-v3-service-extraction-isomorphism.mjs")
 

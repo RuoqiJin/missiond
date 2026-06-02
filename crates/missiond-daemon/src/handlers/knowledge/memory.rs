@@ -10,6 +10,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use tracing::info;
 
@@ -1087,7 +1088,7 @@ fn provider_review_payload(args: &Value) -> Result<Value> {
 }
 
 async fn call_xjp_memory(
-    state: &AppState,
+    _state: &AppState,
     base_url: &str,
     token: Option<&str>,
     method: reqwest::Method,
@@ -1095,7 +1096,14 @@ async fn call_xjp_memory(
     payload: Option<Value>,
 ) -> Result<ToolResult> {
     let url = format!("{base_url}{path}");
-    let mut request = state.http_client.request(method, &url);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(0)
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| anyhow!("failed to build xjp-memory client: {e}"))?;
+    let mut request = client.request(method, &url);
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
@@ -1124,23 +1132,40 @@ async fn call_xjp_memory(
     })))
 }
 
-async fn handle_provider_status(state: &AppState) -> Result<ToolResult> {
+async fn handle_provider_status(state: &AppState, args: Value) -> Result<ToolResult> {
     let selection = MemoryProviderSelection::from_env();
-    match selection {
-        MemoryProviderSelection::XjpMemory { base_url, token } => {
-            let remote = call_xjp_memory(
+    let probe_remote = get_bool_any(&args, &["probe", "probeRemote", "include_remote_probe"])
+        .unwrap_or(false);
+    if probe_remote {
+        if let MemoryProviderSelection::XjpMemory { base_url, token } = &selection {
+            return call_xjp_memory(
                 state,
-                &base_url,
+                base_url,
                 token.as_deref(),
                 reqwest::Method::GET,
                 "/v1/memory/provider_status",
                 None,
             )
-            .await?;
-            Ok(remote)
+            .await;
         }
-        other => Ok(ToolResult::json_pretty(&other.status_payload())),
     }
+
+    let mut payload = selection.status_payload();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "schema".to_string(),
+            json!("missiond.memory-provider-status.v1"),
+        );
+        object.insert(
+            "remoteProbe".to_string(),
+            json!({
+                "enabled": probe_remote,
+                "default": "skipped",
+                "reason": "provider_status is a configuration snapshot by default; pass probe=true for remote health.",
+            }),
+        );
+    }
+    Ok(ToolResult::json_pretty(&payload))
 }
 
 async fn handle_provider_query(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -1259,6 +1284,7 @@ async fn handle_provider_review(state: &AppState, args: Value) -> Result<ToolRes
     }
 }
 
+#[cfg(test)]
 fn provider_evidence_search_payload(args: &Value) -> Value {
     json!({
         "scope": provider_scope_from_args(args),
@@ -1271,48 +1297,57 @@ fn provider_evidence_search_payload(args: &Value) -> Value {
     })
 }
 
+async fn local_evidence_search_response(state: &AppState, args: &Value) -> Result<Value> {
+    let input = EvidenceSearchInput {
+        query: get_string_any(args, &["query"]).unwrap_or_default().to_string(),
+        allowed_lanes: get_string_list_any(args, &["allowed_lanes", "allowedLanes", "lanes"]),
+        project_id: get_string_any(args, &["project", "projectId", "project_id"])
+            .map(ToOwned::to_owned),
+        task_id: get_string_any(args, &["taskId", "task_id"]).map(ToOwned::to_owned),
+        include_global: get_bool_any(args, &["include_global", "includeGlobal"]).unwrap_or(true),
+        limit: get_i64_any(args, &["limit"]).unwrap_or(20).clamp(1, 100),
+    };
+    let items = state
+        .store
+        .search_evidence_items(&input)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+    Ok(json!({
+        "ok": true,
+        "schema": "missiond.memory-evidence-search.v1",
+        "provider": "local-postgres-memory",
+        "authority": "missiond-local-evidence-lanes",
+        "filter_before_vector": true,
+        "query": input.query,
+        "allowed_lanes": input.allowed_lanes,
+        "project_id": input.project_id,
+        "task_id": input.task_id,
+        "include_global": input.include_global,
+        "count": items.len(),
+        "items": items,
+    }))
+}
+
 async fn handle_provider_evidence_search(state: &AppState, args: Value) -> Result<ToolResult> {
     match MemoryProviderSelection::from_env() {
-        MemoryProviderSelection::XjpMemory { base_url, token } => {
-            call_xjp_memory(
-                state,
-                &base_url,
-                token.as_deref(),
-                reqwest::Method::POST,
-                "/v1/memory/evidence/search",
-                Some(provider_evidence_search_payload(&args)),
-            )
-            .await
+        MemoryProviderSelection::XjpMemory { base_url, .. } => {
+            let mut payload = local_evidence_search_response(state, &args).await?;
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "provider_bridge".to_string(),
+                    json!({
+                        "configured_provider": "xjp-memory",
+                        "configured_base_url": base_url,
+                        "route": "local-authority-evidence-lanes",
+                        "reason": "evidence_search reads MissionD authority lanes populated by context_gather/backfill; remote memory remains the general query/remember provider.",
+                    }),
+                );
+            }
+            Ok(ToolResult::json_pretty(&payload))
         }
         MemoryProviderSelection::LocalPostgresCompatibility => {
-            let input = EvidenceSearchInput {
-                query: get_string_any(&args, &["query"]).unwrap_or_default().to_string(),
-                allowed_lanes: get_string_list_any(&args, &["allowed_lanes", "allowedLanes", "lanes"]),
-                project_id: get_string_any(&args, &["project", "projectId", "project_id"])
-                    .map(ToOwned::to_owned),
-                task_id: get_string_any(&args, &["taskId", "task_id"]).map(ToOwned::to_owned),
-                include_global: get_bool_any(&args, &["include_global", "includeGlobal"])
-                    .unwrap_or(true),
-                limit: get_i64_any(&args, &["limit"]).unwrap_or(20).clamp(1, 100),
-            };
-            let items = state
-                .store
-                .search_evidence_items(&input)
-                .await
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            Ok(ToolResult::json_pretty(&json!({
-                "ok": true,
-                "schema": "missiond.memory-evidence-search.v1",
-                "provider": "local-postgres-memory",
-                "filter_before_vector": true,
-                "query": input.query,
-                "allowed_lanes": input.allowed_lanes,
-                "project_id": input.project_id,
-                "task_id": input.task_id,
-                "include_global": input.include_global,
-                "count": items.len(),
-                "items": items,
-            })))
+            let payload = local_evidence_search_response(state, &args).await?;
+            Ok(ToolResult::json_pretty(&payload))
         }
         MemoryProviderSelection::NullMemory => Ok(ToolResult::structured_error(
             ToolError::new(
@@ -1524,9 +1559,159 @@ async fn handle_provider_evidence_promote(state: &AppState, args: Value) -> Resu
     }
 }
 
+fn source_requests_compiled_authority(source: &str) -> bool {
+    source_matches_any(
+        source,
+        &[
+            "project",
+            "projects",
+            "compiled_project_universe",
+            "support",
+            "supports",
+            "all",
+        ],
+    )
+}
+
+async fn local_evidence_backfill_response(state: &AppState, args: &Value) -> Result<Value> {
+    let source =
+        get_string_any(args, &["source", "sourceType", "source_type"]).unwrap_or("conversation");
+    let limit = get_i64_any(args, &["limit"]).unwrap_or(100).clamp(1, 500);
+    let mut results = serde_json::Map::new();
+    if source_requests_compiled_authority(source) {
+        let compiled = build_compiled_evidence_backfill(args, limit as usize);
+        if source_matches_any(
+            source,
+            &["project", "projects", "compiled_project_universe", "all"],
+        ) {
+            let written = state
+                .store
+                .upsert_evidence_items(&compiled.project_items)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            results.insert(
+                "projects".to_string(),
+                json!({
+                    "evidence_items_written": written,
+                    "evidence_items_built": compiled.project_items.len(),
+                    "lane": "project_ssot",
+                    "sources": ["compiled_project_universe", "compiled_service_runtime"],
+                    "raw_deleted": false,
+                    "raw_layer": "compiled project universe",
+                }),
+            );
+        }
+        if source_matches_any(source, &["support", "supports", "all"]) {
+            let written = state
+                .store
+                .upsert_evidence_items(&compiled.support_items)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            results.insert(
+                "support".to_string(),
+                json!({
+                    "evidence_items_written": written,
+                    "evidence_items_built": compiled.support_items.len(),
+                    "lanes": ["support_refs"],
+                    "sources": ["support_catalog", "deployment_closure_policy"],
+                    "credential_ref_count": compiled.credential_ref_count,
+                    "credential_refs_indexed": compiled.credential_refs_indexed,
+                    "raw_deleted": false,
+                    "raw_layer": "compiled project universe support catalog",
+                }),
+            );
+        }
+        results.insert(
+            "compiled_authority".to_string(),
+            json!({
+                "project_root": compiled.project_root,
+                "snapshot": compiled.snapshot,
+                "projects_seen": compiled.projects_seen,
+                "services_seen": compiled.services_seen,
+                "skipped_by_filter": compiled.skipped_by_filter,
+                "diagnostics": compiled.diagnostics,
+                "authority": "compiled-project-universe",
+                "raw_conversation_scanned": false,
+            }),
+        );
+    }
+    if matches!(source, "conversation" | "conversations" | "all") {
+        let count = state
+            .store
+            .backfill_conversation_evidence_items(limit)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+        results.insert(
+            "conversation".to_string(),
+            json!({
+                "evidence_items_written": count,
+                "raw_deleted": false,
+                "raw_layer": "conversation_messages",
+            }),
+        );
+    }
+    if matches!(source, "skill" | "skills" | "all") {
+        let query = get_string_any(args, &["query"])
+            .unwrap_or("deploy rollback migration smoke health credential database service");
+        let context_result = super::context_gather::handle(
+            state,
+            "mission_context_gather",
+            json!({
+                "query": query,
+                "project": get_string_any(args, &["project", "projectId", "project_id"]),
+                "source_profile": "deploy_ops",
+                "include_skill": true,
+                "include_infra": true,
+                "include_credentials": false,
+                "include_raw_sources": false,
+                "persist": true,
+                "limit": limit.min(25),
+            }),
+        )
+        .await?;
+        let context_payload = tool_result_to_value(&context_result);
+        results.insert(
+            "skill".to_string(),
+            json!({
+                "context_gather_persisted": true,
+                "evidence_lane_persistence": context_payload.get("evidence_lane_persistence").cloned().unwrap_or(Value::Null),
+                "raw_deleted": false,
+                "raw_layer": "skill files and infra support refs",
+            }),
+        );
+    }
+    Ok(json!({
+        "ok": true,
+        "schema": "missiond.memory-evidence-backfill.v1",
+        "provider": "local-postgres-memory",
+        "authority": "missiond-local-evidence-lanes",
+        "source": source,
+        "limit": limit,
+        "results": results,
+        "non_destructive": true,
+    }))
+}
+
 async fn handle_provider_evidence_backfill(state: &AppState, args: Value) -> Result<ToolResult> {
+    let source =
+        get_string_any(&args, &["source", "sourceType", "source_type"]).unwrap_or("conversation");
     match MemoryProviderSelection::from_env() {
         MemoryProviderSelection::XjpMemory { base_url, token } => {
+            if source_requests_compiled_authority(source) {
+                let mut payload = local_evidence_backfill_response(state, &args).await?;
+                if let Some(object) = payload.as_object_mut() {
+                    object.insert(
+                        "provider_bridge".to_string(),
+                        json!({
+                            "configured_provider": "xjp-memory",
+                            "configured_base_url": base_url,
+                            "route": "local-compiled-authority-backfill",
+                            "reason": "compiled project universe and support catalogs are MissionD SSOT authority lanes and must be prewarmed locally before remote memory provider ingestion.",
+                        }),
+                    );
+                }
+                return Ok(ToolResult::json_pretty(&payload));
+            }
             call_xjp_memory(
                 state,
                 &base_url,
@@ -1538,131 +1723,8 @@ async fn handle_provider_evidence_backfill(state: &AppState, args: Value) -> Res
             .await
         }
         MemoryProviderSelection::LocalPostgresCompatibility => {
-            let source = get_string_any(&args, &["source", "sourceType", "source_type"])
-                .unwrap_or("conversation");
-            let limit = get_i64_any(&args, &["limit"]).unwrap_or(100).clamp(1, 500);
-            let mut results = serde_json::Map::new();
-            if source_matches_any(
-                source,
-                &[
-                    "project",
-                    "projects",
-                    "compiled_project_universe",
-                    "support",
-                    "supports",
-                    "all",
-                ],
-            ) {
-                let compiled = build_compiled_evidence_backfill(&args, limit as usize);
-                if source_matches_any(
-                    source,
-                    &["project", "projects", "compiled_project_universe", "all"],
-                ) {
-                    let written = state
-                        .store
-                        .upsert_evidence_items(&compiled.project_items)
-                        .await
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    results.insert(
-                        "projects".to_string(),
-                        json!({
-                            "evidence_items_written": written,
-                            "evidence_items_built": compiled.project_items.len(),
-                            "lane": "project_ssot",
-                            "sources": ["compiled_project_universe", "compiled_service_runtime"],
-                            "raw_deleted": false,
-                            "raw_layer": "compiled project universe",
-                        }),
-                    );
-                }
-                if source_matches_any(source, &["support", "supports", "all"]) {
-                    let written = state
-                        .store
-                        .upsert_evidence_items(&compiled.support_items)
-                        .await
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    results.insert(
-                        "support".to_string(),
-                        json!({
-                            "evidence_items_written": written,
-                            "evidence_items_built": compiled.support_items.len(),
-                            "lanes": ["support_refs"],
-                            "sources": ["support_catalog", "deployment_closure_policy"],
-                            "credential_ref_count": compiled.credential_ref_count,
-                            "credential_refs_indexed": compiled.credential_refs_indexed,
-                            "raw_deleted": false,
-                            "raw_layer": "compiled project universe support catalog",
-                        }),
-                    );
-                }
-                results.insert(
-                    "compiled_authority".to_string(),
-                    json!({
-                        "project_root": compiled.project_root,
-                        "snapshot": compiled.snapshot,
-                        "projects_seen": compiled.projects_seen,
-                        "services_seen": compiled.services_seen,
-                        "skipped_by_filter": compiled.skipped_by_filter,
-                        "diagnostics": compiled.diagnostics,
-                        "authority": "compiled-project-universe",
-                        "raw_conversation_scanned": false,
-                    }),
-                );
-            }
-            if matches!(source, "conversation" | "conversations" | "all") {
-                let count = state
-                    .store
-                    .backfill_conversation_evidence_items(limit)
-                    .await
-                    .map_err(|e| anyhow!("DB error: {}", e))?;
-                results.insert(
-                    "conversation".to_string(),
-                    json!({
-                        "evidence_items_written": count,
-                        "raw_deleted": false,
-                        "raw_layer": "conversation_messages",
-                    }),
-                );
-            }
-            if matches!(source, "skill" | "skills" | "all") {
-                let query = get_string_any(&args, &["query"])
-                    .unwrap_or("deploy rollback migration smoke health credential database service");
-                let context_result = super::context_gather::handle(
-                    state,
-                    "mission_context_gather",
-                    json!({
-                        "query": query,
-                        "project": get_string_any(&args, &["project", "projectId", "project_id"]),
-                        "source_profile": "deploy_ops",
-                        "include_skill": true,
-                        "include_infra": true,
-                        "include_credentials": false,
-                        "include_raw_sources": false,
-                        "persist": true,
-                        "limit": limit.min(25),
-                    }),
-                )
-                .await?;
-                let context_payload = tool_result_to_value(&context_result);
-                results.insert(
-                    "skill".to_string(),
-                    json!({
-                        "context_gather_persisted": true,
-                        "evidence_lane_persistence": context_payload.get("evidence_lane_persistence").cloned().unwrap_or(Value::Null),
-                        "raw_deleted": false,
-                        "raw_layer": "skill files and infra support refs",
-                    }),
-                );
-            }
-            Ok(ToolResult::json_pretty(&json!({
-                "ok": true,
-                "schema": "missiond.memory-evidence-backfill.v1",
-                "provider": "local-postgres-memory",
-                "source": source,
-                "limit": limit,
-                "results": results,
-                "non_destructive": true,
-            })))
+            let payload = local_evidence_backfill_response(state, &args).await?;
+            Ok(ToolResult::json_pretty(&payload))
         }
         MemoryProviderSelection::NullMemory => Ok(ToolResult::structured_error(
             ToolError::new(
@@ -1684,7 +1746,7 @@ fn load_memory_kb_config() -> Result<MemoryKbRuntimeConfig> {
 async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Pluggable Memory Provider Facade =====
-        "mission_memory_provider_status" => handle_provider_status(state).await,
+        "mission_memory_provider_status" => handle_provider_status(state, args).await,
         "mission_memory_query" => handle_provider_query(state, args).await,
         "mission_memory_remember" => handle_provider_remember(state, args).await,
         "mission_memory_review" => handle_provider_review(state, args).await,
@@ -2067,7 +2129,8 @@ mod tests {
         compiled_support_catalog_evidence_item, evidence_promotion_requires_bound,
         get_string_list_any, promotion_bound_present, provider_evidence_search_payload,
         provider_query_payload, provider_remember_payload, source_matches_any,
-        CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog,
+        source_requests_compiled_authority, CompiledServiceRuntimeEntry,
+        CompiledServiceSupportCatalog, MemoryProviderSelection,
     };
     use serde_json::json;
     use std::path::Path;
@@ -2264,5 +2327,25 @@ mod tests {
         ));
         assert!(source_matches_any("support", &["support", "all"]));
         assert!(!source_matches_any("conversation", &["support", "all"]));
+    }
+
+    #[test]
+    fn evidence_backfill_routes_compiled_authority_sources_locally() {
+        assert!(source_requests_compiled_authority("projects"));
+        assert!(source_requests_compiled_authority("support"));
+        assert!(source_requests_compiled_authority("all"));
+        assert!(!source_requests_compiled_authority("conversation"));
+    }
+
+    #[test]
+    fn provider_status_payload_is_configuration_snapshot() {
+        let payload = MemoryProviderSelection::XjpMemory {
+            base_url: "http://127.0.0.1:8091".to_string(),
+            token: None,
+        }
+        .status_payload();
+        assert_eq!(payload["provider"], "xjp-memory");
+        assert_eq!(payload["configured"], true);
+        assert_eq!(payload["mode"], "remote-provider");
     }
 }
