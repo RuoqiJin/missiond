@@ -289,6 +289,55 @@ fn load_evidence_lane_policy() -> (EvidenceLaneRuntimeConfig, String, Option<Val
     }
 }
 
+fn deployment_closure_support_allowed(
+    profile: SourceProfile,
+    args: &ContextGatherArgs,
+    query: &str,
+) -> bool {
+    if matches!(profile, SourceProfile::DeployOps | SourceProfile::FullDebug) {
+        return true;
+    }
+    if normalized_scope_value(args.infra_target.as_deref()).is_some() {
+        return true;
+    }
+    deployment_closure_query_has_anchor(query)
+        || normalized_scope_value(args.skill.as_deref())
+            .is_some_and(|skill| deployment_closure_query_has_anchor(&skill))
+}
+
+fn deployment_closure_query_has_anchor(query: &str) -> bool {
+    let normalized = query.to_ascii_lowercase();
+    [
+        "deploy",
+        "deployment",
+        "deploy center",
+        "service.manifest.toml",
+        "manifest gate",
+        "canary",
+        "smoke",
+        "runtime digest",
+        "running image",
+        "binary marker",
+        "image marker",
+        "entrypoint",
+        "old binary",
+        "compose",
+        "volume override",
+        "_sqlx_migrations",
+        "db adoption",
+        "releaselease",
+        "release lease",
+        "runtimeobservation",
+        "runtime observation",
+        "releaseevidence",
+        "release evidence",
+        "closureverdict",
+        "closure verdict",
+    ]
+    .iter()
+    .any(|anchor| normalized.contains(anchor))
+}
+
 fn allowed_lanes_for_profile(
     policy: &EvidenceLaneRuntimeConfig,
     profile: SourceProfile,
@@ -349,6 +398,7 @@ async fn search_evidence_item_read_model(
     project_id: Option<&str>,
     task_id: Option<&str>,
     limit: usize,
+    include_deployment_closure_policy: bool,
 ) -> (Vec<EvidenceItemInput>, Value) {
     if !evidence_item_read_model_scope_allows_search(profile, project_id) {
         return (
@@ -372,6 +422,7 @@ async fn search_evidence_item_read_model(
                 "compiled_policy_filtered_count": 0,
                 "runtime_environment_filtered_count": 0,
                 "incomplete_filtered_count": 0,
+                "deployment_closure_profile_filtered_count": 0,
                 "deduplicated_count": 0,
                 "truncated_count": 0,
                 "hit_count": 0,
@@ -401,6 +452,11 @@ async fn search_evidence_item_read_model(
                 compiled_policy_filtered_count + runtime_environment_filtered_count;
             let (items, incomplete_filtered_count) =
                 filter_incomplete_deployment_closure_evidence_items(items);
+            let (items, deployment_closure_profile_filtered_count) =
+                filter_deployment_closure_policy_evidence_items(
+                    items,
+                    include_deployment_closure_policy,
+                );
             let (items, deduplicated_count, truncated_count) =
                 dedupe_evidence_search_items(items, limit);
             let lane_counts = lane_counts_for_evidence_items(&items);
@@ -424,6 +480,7 @@ async fn search_evidence_item_read_model(
                     "compiled_policy_filtered_count": compiled_policy_filtered_count,
                     "runtime_environment_filtered_count": runtime_environment_filtered_count,
                     "incomplete_filtered_count": incomplete_filtered_count,
+                    "deployment_closure_profile_filtered_count": deployment_closure_profile_filtered_count,
                     "deduplicated_count": deduplicated_count,
                     "truncated_count": truncated_count,
                     "hit_count": lane_counts.values().filter_map(Value::as_u64).sum::<u64>(),
@@ -451,6 +508,7 @@ async fn search_evidence_item_read_model(
                 "compiled_policy_filtered_count": 0,
                 "runtime_environment_filtered_count": 0,
                 "incomplete_filtered_count": 0,
+                "deployment_closure_profile_filtered_count": 0,
                 "deduplicated_count": 0,
                 "truncated_count": 0,
                 "hit_count": 0,
@@ -501,6 +559,28 @@ fn filter_incomplete_deployment_closure_evidence_items(
         .into_iter()
         .filter(|item| {
             if evidence_item_has_incomplete_deployment_closure_placeholder(item) {
+                filtered_count += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (filtered, filtered_count)
+}
+
+fn filter_deployment_closure_policy_evidence_items(
+    items: Vec<EvidenceItemInput>,
+    include_deployment_closure_policy: bool,
+) -> (Vec<EvidenceItemInput>, usize) {
+    if include_deployment_closure_policy {
+        return (items, 0);
+    }
+    let mut filtered_count = 0usize;
+    let filtered = items
+        .into_iter()
+        .filter(|item| {
+            if item.source_type == "deployment_closure_policy" {
                 filtered_count += 1;
                 false
             } else {
@@ -795,6 +875,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     let persist_artifact = context_gather_persist_artifact(&args);
     let persist_read_model = context_gather_persist_read_model(&args);
     let query = normalized_query(&args);
+    let include_deployment_closure_policy =
+        deployment_closure_support_allowed(profile, &args, &query);
     if query.is_empty()
         && args.project_id.is_none()
         && args.skill.is_none()
@@ -898,6 +980,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         effective_project_id.as_deref(),
         args.task_id.as_deref(),
         limit,
+        include_deployment_closure_policy,
     )
     .await;
 
@@ -1068,6 +1151,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         &sources,
         &evidence_lane_policy,
         &support_catalog,
+        include_deployment_closure_policy,
     );
     let authority_order = authority_order();
     let noise_diagnostics = noise_diagnostics(profile, selection, &sources);
@@ -1080,13 +1164,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         &evidence_item_search,
     );
     let source_summaries = build_source_summaries(&sources);
-    evidence_item_inputs.extend(build_evidence_items(
+    evidence_item_inputs.extend(build_evidence_items_with_options(
         &sources,
         &source_summaries,
         &support_catalog,
         profile,
         effective_project_id.as_deref(),
         args.task_id.as_deref(),
+        include_deployment_closure_policy,
     ));
     dedupe_evidence_items(&mut evidence_item_inputs);
     let evidence_items = serde_json::to_value(&evidence_item_inputs).unwrap_or_else(|_| json!([]));
@@ -1404,13 +1489,14 @@ fn build_evidence_lanes_from_policy(
     sources: &serde_json::Map<String, Value>,
     policy: &EvidenceLaneRuntimeConfig,
 ) -> Value {
-    build_evidence_lanes_from_policy_with_support_catalog(sources, policy, &Value::Null)
+    build_evidence_lanes_from_policy_with_support_catalog(sources, policy, &Value::Null, true)
 }
 
 fn build_evidence_lanes_from_policy_with_support_catalog(
     sources: &serde_json::Map<String, Value>,
     policy: &EvidenceLaneRuntimeConfig,
     support_catalog: &Value,
+    include_deployment_closure_policy: bool,
 ) -> Value {
     let lanes = policy
         .lanes
@@ -1418,7 +1504,12 @@ fn build_evidence_lanes_from_policy_with_support_catalog(
         .map(|lane| {
             (
                 lane.lane_id.clone(),
-                evidence_lane_from_policy(sources, lane, support_catalog),
+                evidence_lane_from_policy(
+                    sources,
+                    lane,
+                    support_catalog,
+                    include_deployment_closure_policy,
+                ),
             )
         })
         .collect::<serde_json::Map<_, _>>();
@@ -1432,6 +1523,7 @@ fn evidence_lane_from_policy(
     sources: &serde_json::Map<String, Value>,
     lane: &EvidenceLaneRuntimeEntry,
     support_catalog: &Value,
+    include_deployment_closure_policy: bool,
 ) -> Value {
     let keys = source_keys_for_lane(lane.lane_id.as_str());
     let role = lane.source_types.join(", ");
@@ -1450,7 +1542,7 @@ fn evidence_lane_from_policy(
         lane.injectable_by_default,
     );
     let support_ref_count = if lane.lane_id == "support_refs" {
-        support_refs_compact_item_count(support_catalog)
+        support_refs_compact_item_count(support_catalog, include_deployment_closure_policy)
     } else {
         0
     };
@@ -1481,14 +1573,18 @@ fn evidence_lane_from_policy(
     lane_value
 }
 
-fn support_refs_compact_item_count(support_catalog: &Value) -> usize {
+fn support_refs_compact_item_count(
+    support_catalog: &Value,
+    include_deployment_closure_policy: bool,
+) -> usize {
     if !support_catalog_has_content(support_catalog) {
         return 0;
     }
     let mut count = 1;
-    if support_catalog
-        .get("deployment_closure")
-        .is_some_and(deployment_closure_has_identity_content)
+    if include_deployment_closure_policy
+        && support_catalog
+            .get("deployment_closure")
+            .is_some_and(deployment_closure_has_identity_content)
     {
         count += 1;
     }
@@ -2165,6 +2261,26 @@ fn build_evidence_items(
     project_id: Option<&str>,
     task_id: Option<&str>,
 ) -> Vec<EvidenceItemInput> {
+    build_evidence_items_with_options(
+        sources,
+        source_summaries,
+        support_catalog,
+        profile,
+        project_id,
+        task_id,
+        true,
+    )
+}
+
+fn build_evidence_items_with_options(
+    sources: &serde_json::Map<String, Value>,
+    source_summaries: &Value,
+    support_catalog: &Value,
+    profile: SourceProfile,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    include_deployment_closure_policy: bool,
+) -> Vec<EvidenceItemInput> {
     let mut items = Vec::new();
 
     add_source_summary_item(
@@ -2295,9 +2411,10 @@ fn build_evidence_items(
             profile,
             None,
         );
-        if let Some(deployment_closure) = support_catalog
-            .get("deployment_closure")
-            .filter(|value| deployment_closure_has_identity_content(value))
+        if let Some(deployment_closure) =
+            support_catalog.get("deployment_closure").filter(|value| {
+                include_deployment_closure_policy && deployment_closure_has_identity_content(value)
+            })
         {
             push_evidence_item(
                 &mut items,
@@ -4539,7 +4656,8 @@ mod tests {
     use crate::context::v3_blueprint_runtime::EvidenceLaneRuntimeConfig;
 
     use super::{
-        attach_infra_os_disabled_support_fallback, build_evidence_items, build_evidence_lanes,
+        attach_infra_os_disabled_support_fallback, build_evidence_items,
+        build_evidence_items_with_options, build_evidence_lanes,
         build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
         build_support_catalog, collect_evidence_refs_from_value, context_gather_persist_artifact,
         context_gather_persist_read_model, context_gather_worker_visible_dir_for,
@@ -4547,6 +4665,7 @@ mod tests {
         dedupe_evidence_search_items, deployment_event_filter_timeline_row,
         deployment_event_item_from_timeline_row, diagnostics_have_hard_failures, evidence_item_id,
         evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
+        filter_deployment_closure_policy_evidence_items,
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
@@ -5093,6 +5212,42 @@ mod tests {
     }
 
     #[test]
+    fn evidence_search_filters_deployment_closure_policy_when_profile_gate_is_closed() {
+        let deployment_policy = missiond_core::types::EvidenceItemInput {
+            id: "evi-deploy-policy".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "deployment_closure_policy".to_string(),
+            source_id: Some("payments".to_string()),
+            source_ref: None,
+            project_id: Some("payments".to_string()),
+            task_id: None,
+            title: "Deployment closure policy".to_string(),
+            summary: "payments deployment closure support".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: Some(2.0),
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({}),
+        };
+        let mut support_catalog = deployment_policy.clone();
+        support_catalog.id = "evi-support-catalog".to_string();
+        support_catalog.source_type = "support_catalog".to_string();
+        support_catalog.title = "Support catalog".to_string();
+
+        let (items, filtered_count) = filter_deployment_closure_policy_evidence_items(
+            vec![deployment_policy, support_catalog],
+            false,
+        );
+
+        assert_eq!(filtered_count, 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source_type, "support_catalog");
+    }
+
+    #[test]
     fn deployment_event_filter_keeps_scoped_deploy_center_events() {
         let payload_json = json!({
             "_envelope": {
@@ -5472,6 +5627,7 @@ mod tests {
             &sources,
             &EvidenceLaneRuntimeConfig::default(),
             &empty_catalog,
+            true,
         );
         let support_refs = lanes
             .get("lanes")
@@ -5496,6 +5652,7 @@ mod tests {
             &sources,
             &EvidenceLaneRuntimeConfig::default(),
             &scoped_catalog,
+            true,
         );
         let support_refs = lanes
             .get("lanes")
@@ -5532,6 +5689,7 @@ mod tests {
             &sources,
             &EvidenceLaneRuntimeConfig::default(),
             &scoped_catalog_with_closure,
+            true,
         );
         let support_refs = lanes
             .get("lanes")
@@ -5544,6 +5702,25 @@ mod tests {
         assert_eq!(
             support_refs.get("item_count").and_then(Value::as_u64),
             Some(2)
+        );
+
+        let lanes = build_evidence_lanes_from_policy_with_support_catalog(
+            &sources,
+            &EvidenceLaneRuntimeConfig::default(),
+            &scoped_catalog_with_closure,
+            false,
+        );
+        let support_refs = lanes
+            .get("lanes")
+            .and_then(|value| value.get("support_refs"))
+            .expect("support refs lane");
+        assert_eq!(
+            support_refs.get("source_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            support_refs.get("item_count").and_then(Value::as_u64),
+            Some(1)
         );
     }
 
@@ -5755,6 +5932,39 @@ mod tests {
             SourceProfile::DeployOps,
             Some("payments"),
             None,
+        );
+        assert!(items
+            .iter()
+            .any(|item| item.source_type == "support_catalog"));
+        assert!(!items
+            .iter()
+            .any(|item| item.source_type == "deployment_closure_policy"));
+    }
+
+    #[test]
+    fn deployment_closure_policy_projection_respects_profile_gate() {
+        let sources = serde_json::Map::new();
+        let summaries = build_source_summaries(&sources);
+        let catalog = json!({
+            "schema": "missiond.support-catalog.v1",
+            "project_id": "payments",
+            "service_id": "payments",
+            "deployment_closure": {
+                "project_id": "payments",
+                "service_id": "payments",
+                "deploy_center_slug": "xjp-payments",
+                "runtime_target": "gcp-runtime"
+            }
+        });
+
+        let items = build_evidence_items_with_options(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::IntentDefault,
+            Some("payments"),
+            None,
+            false,
         );
         assert!(items
             .iter()
