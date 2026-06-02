@@ -361,6 +361,8 @@ async fn search_evidence_item_read_model(
     match state.store.search_evidence_items(&input).await {
         Ok(items) => {
             let raw_hit_count = items.len();
+            let (items, freshness_filtered_count) =
+                filter_stale_compiled_policy_evidence_items(items);
             let (items, deduplicated_count, truncated_count) =
                 dedupe_evidence_search_items(items, limit);
             let lane_counts = lane_counts_for_evidence_items(&items);
@@ -378,6 +380,7 @@ async fn search_evidence_item_read_model(
                     "limit": limit,
                     "read_limit": input.limit,
                     "raw_hit_count": raw_hit_count,
+                    "freshness_filtered_count": freshness_filtered_count,
                     "deduplicated_count": deduplicated_count,
                     "truncated_count": truncated_count,
                     "hit_count": lane_counts.values().filter_map(Value::as_u64).sum::<u64>(),
@@ -399,6 +402,7 @@ async fn search_evidence_item_read_model(
                 "include_global": true,
                 "limit": input.limit,
                 "raw_hit_count": 0,
+                "freshness_filtered_count": 0,
                 "deduplicated_count": 0,
                 "truncated_count": 0,
                 "hit_count": 0,
@@ -408,6 +412,114 @@ async fn search_evidence_item_read_model(
             }),
         ),
     }
+}
+
+#[derive(Debug, Clone)]
+struct CompiledDeploymentPolicyFingerprint {
+    compiled_runtime_dir: PathBuf,
+    source_hash: Option<String>,
+}
+
+fn filter_stale_compiled_policy_evidence_items(
+    items: Vec<EvidenceItemInput>,
+) -> (Vec<EvidenceItemInput>, usize) {
+    let Some(fingerprint) = active_compiled_deployment_policy_fingerprint() else {
+        return (items, 0);
+    };
+    filter_stale_compiled_policy_evidence_items_with_fingerprint(items, &fingerprint)
+}
+
+fn filter_stale_compiled_policy_evidence_items_with_fingerprint(
+    items: Vec<EvidenceItemInput>,
+    fingerprint: &CompiledDeploymentPolicyFingerprint,
+) -> (Vec<EvidenceItemInput>, usize) {
+    let mut filtered_count = 0usize;
+    let filtered = items
+        .into_iter()
+        .filter(|item| {
+            if evidence_item_has_stale_compiled_policy_ref(item, fingerprint) {
+                filtered_count += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (filtered, filtered_count)
+}
+
+fn active_compiled_deployment_policy_fingerprint() -> Option<CompiledDeploymentPolicyFingerprint> {
+    let dir = env::var("MISSIOND_COMPILED_RUNTIME_DIR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)?;
+    let path = dir.join("compiled-deployment-policy.json");
+    let source_hash = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("source_hash")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+    Some(CompiledDeploymentPolicyFingerprint {
+        compiled_runtime_dir: dir,
+        source_hash,
+    })
+}
+
+fn evidence_item_has_stale_compiled_policy_ref(
+    item: &EvidenceItemInput,
+    fingerprint: &CompiledDeploymentPolicyFingerprint,
+) -> bool {
+    if !evidence_item_references_compiled_policy(item) {
+        return false;
+    }
+    let policy_path = evidence_item_compiled_policy_path(item);
+    let policy_hash = evidence_item_compiled_policy_hash(item);
+    let stale_path = policy_path
+        .as_deref()
+        .map(|path| !Path::new(path).starts_with(&fingerprint.compiled_runtime_dir))
+        .unwrap_or(false);
+    let stale_hash = policy_hash
+        .as_deref()
+        .zip(fingerprint.source_hash.as_deref())
+        .map(|(item_hash, active_hash)| item_hash != active_hash)
+        .unwrap_or(false);
+    stale_path || stale_hash
+}
+
+fn evidence_item_references_compiled_policy(item: &EvidenceItemInput) -> bool {
+    item.source_type == "deployment_closure_policy"
+        || evidence_ref_text(&item.evidence_refs, &["source"]) == Some("compiled-deployment-policy")
+        || evidence_ref_text(&item.evidence_refs, &["policy", "source"])
+            == Some("compiled-deployment-policy")
+        || evidence_item_compiled_policy_path(item).is_some()
+        || evidence_item_compiled_policy_hash(item).is_some()
+}
+
+fn evidence_item_compiled_policy_path(item: &EvidenceItemInput) -> Option<String> {
+    evidence_ref_text(&item.evidence_refs, &["policy", "path"])
+        .or_else(|| evidence_ref_text(&item.evidence_refs, &["path"]))
+        .or_else(|| evidence_ref_text(&item.evidence_refs, &["policy_path"]))
+        .map(ToOwned::to_owned)
+}
+
+fn evidence_item_compiled_policy_hash(item: &EvidenceItemInput) -> Option<String> {
+    evidence_ref_text(&item.evidence_refs, &["policy", "source_hash"])
+        .or_else(|| evidence_ref_text(&item.evidence_refs, &["source_hash"]))
+        .or_else(|| evidence_ref_text(&item.evidence_refs, &["policy_hash"]))
+        .map(ToOwned::to_owned)
+}
+
+fn evidence_ref_text<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str()
 }
 
 fn dedupe_evidence_search_items(
@@ -2447,6 +2559,10 @@ fn context_noise_metrics(
                     .get("raw_hit_count")
                     .cloned()
                     .unwrap_or_else(|| json!(0)),
+                "freshness_filtered_count": evidence_item_search
+                    .get("freshness_filtered_count")
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
                 "deduplicated_count": evidence_item_search
                     .get("deduplicated_count")
                     .cloned()
@@ -3440,9 +3556,10 @@ mod tests {
         context_gather_persist_artifact, context_gather_persist_read_model,
         context_gather_worker_visible_dir_for, context_noise_metrics,
         context_pack_artifact_payload, dedupe_evidence_search_items,
-        diagnostics_have_hard_failures, optional_infra_os_disabled_diagnostic,
-        optional_infra_os_disabled_source, response_sources, source_selection, ContextGatherArgs,
-        SourceProfile,
+        diagnostics_have_hard_failures,
+        filter_stale_compiled_policy_evidence_items_with_fingerprint,
+        optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
+        source_selection, CompiledDeploymentPolicyFingerprint, ContextGatherArgs, SourceProfile,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -3699,6 +3816,60 @@ mod tests {
     }
 
     #[test]
+    fn evidence_search_filters_stale_compiled_policy_refs() {
+        let stale = missiond_core::types::EvidenceItemInput {
+            id: "evi-stale".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "deployment_closure_policy".to_string(),
+            source_id: Some("payments".to_string()),
+            source_ref: None,
+            project_id: Some("payments".to_string()),
+            task_id: None,
+            title: "Deployment closure policy".to_string(),
+            summary: "stale compiled policy projection".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: Some(1.0),
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!({
+                "source": "compiled-deployment-policy",
+                "policy": {
+                    "path": "/Users/jinchen/.missiond/runtime/missiond/compiled/compiled-deployment-policy.json",
+                    "source_hash": "old-hash"
+                }
+            }),
+            metadata: json!({}),
+        };
+        let mut current = stale.clone();
+        current.id = "evi-current".to_string();
+        current.evidence_refs = json!({
+            "source": "compiled-deployment-policy",
+            "policy": {
+                "path": "/Users/jinchen/.xjp-mission/releases/current/compiled-runtime/compiled-deployment-policy.json",
+                "source_hash": "current-hash"
+            }
+        });
+        let fingerprint = CompiledDeploymentPolicyFingerprint {
+            compiled_runtime_dir: Path::new(
+                "/Users/jinchen/.xjp-mission/releases/current/compiled-runtime",
+            )
+            .to_path_buf(),
+            source_hash: Some("current-hash".to_string()),
+        };
+
+        let (items, filtered_count) = filter_stale_compiled_policy_evidence_items_with_fingerprint(
+            vec![stale, current],
+            &fingerprint,
+        );
+
+        assert_eq!(filtered_count, 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "evi-current");
+    }
+
+    #[test]
     fn infra_os_disabled_diagnostics_are_not_hard_context_failures() {
         assert!(!diagnostics_have_hard_failures(&[
             optional_infra_os_disabled_diagnostic("infra"),
@@ -3840,13 +4011,28 @@ mod tests {
             &sources,
             &lanes,
             &allowed_lanes,
-            &json!({"ok": true, "hit_count": 0, "lane_counts": {}}),
+            &json!({
+                "ok": true,
+                "hit_count": 0,
+                "raw_hit_count": 2,
+                "freshness_filtered_count": 2,
+                "deduplicated_count": 0,
+                "truncated_count": 0,
+                "lane_counts": {}
+            }),
         );
         assert_eq!(
             metrics
                 .get("filtered_semantic_conversation_hits")
                 .and_then(|value| value.as_u64()),
             Some(4)
+        );
+        assert_eq!(
+            metrics
+                .get("evidence_item_read_model")
+                .and_then(|value| value.get("freshness_filtered_count"))
+                .and_then(Value::as_u64),
+            Some(2)
         );
     }
 

@@ -243,6 +243,8 @@ function checkFiles(root, files) {
     'optional feature_disabled diagnostics MUST NOT set the top-level ok=false by themselves',
     'mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence',
     'context_noise_metrics.evidence_item_read_model MUST expose hit_count, raw_hit_count, deduplicated_count, and truncated_count',
+    'mission_context_gather MUST filter persisted evidence_items that reference compiled-deployment-policy path/source_hash values not matching the active MISSIOND_COMPILED_RUNTIME_DIR',
+    'freshness_filtered_count',
     'return a configuration snapshot by default; use bounded direct HTTP loopback transport for xjp-memory provider calls and only probe /v1/memory/provider_status when probe=true',
     'MissionD authority evidence lanes are served from local evidence_items even when xjp-memory is configured as the remote memory provider',
     'dedupe repeated context_gather/backfill projections by lane/source/project before returning search results',
@@ -1047,6 +1049,8 @@ function buildFixture() {
 		                 "optional feature_disabled diagnostics MUST NOT set the top-level ok=false by themselves"
 				                 "mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence"
                          "context_noise_metrics.evidence_item_read_model MUST expose hit_count, raw_hit_count, deduplicated_count, and truncated_count"
+                         "mission_context_gather MUST filter persisted evidence_items that reference compiled-deployment-policy path/source_hash values not matching the active MISSIOND_COMPILED_RUNTIME_DIR"
+                         "freshness_filtered_count"
 			                 "return a configuration snapshot by default; use bounded direct HTTP loopback transport for xjp-memory provider calls and only probe /v1/memory/provider_status when probe=true"
 			                 "MissionD authority evidence lanes are served from local evidence_items even when xjp-memory is configured as the remote memory provider"
                          "dedupe repeated context_gather/backfill projections by lane/source/project before returning search results"
