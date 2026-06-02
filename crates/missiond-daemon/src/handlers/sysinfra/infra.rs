@@ -997,6 +997,9 @@ fn evidence_matches_scope(
     {
         return true;
     }
+    if query_has_specific_file_token_without_match(skill_name, skill_path, line, filter) {
+        return false;
+    }
     let score = evidence_scope_score(skill_name, skill_path, line, filter);
     if filter
         .query
@@ -1008,6 +1011,38 @@ fn evidence_matches_scope(
         return score > 0;
     }
     score >= 4
+}
+
+fn query_has_specific_file_token_without_match(
+    skill_name: &str,
+    skill_path: &str,
+    line: &str,
+    filter: &InfraEvidenceFilter,
+) -> bool {
+    let Some(query) = filter.query.as_deref() else {
+        return false;
+    };
+    let specific_tokens: Vec<String> = evidence_query_tokens(query)
+        .into_iter()
+        .filter(|token| token.contains('.') || token.contains('/'))
+        .collect();
+    if specific_tokens.is_empty() {
+        return false;
+    }
+
+    let haystack = format!("{skill_name}\n{skill_path}\n{line}").to_ascii_lowercase();
+    if specific_tokens
+        .iter()
+        .any(|token| contains_evidence_token(&haystack, token))
+    {
+        return false;
+    }
+
+    let line_haystack = line.to_ascii_lowercase();
+    let Some(project) = normalized_evidence_token(filter.project_id.as_deref()) else {
+        return true;
+    };
+    project != "missiond" && !contains_evidence_token(&line_haystack, &project)
 }
 
 fn evidence_scope_score(
@@ -1857,6 +1892,18 @@ mod tests {
             "openclaw",
             "/Users/jinchen/.claude/skills/openclaw/SKILL.md",
             "OpenAI-compatible API model routing backend notes",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "deploy-ops",
+            "/Users/jinchen/.claude/skills/deploy-ops/SKILL.md",
+            "media type application/vnd.docker.distribution.manifest.v1+prettyjws is no longer supported",
+            &filter,
+        ));
+        assert!(!evidence_matches_scope(
+            "missiond",
+            "/Users/jinchen/.claude/skills/missiond/SKILL.md",
+            "Feature gate: embeddings feature, MUSL build disables ONNX Runtime",
             &filter,
         ));
         assert!(evidence_matches_scope(
