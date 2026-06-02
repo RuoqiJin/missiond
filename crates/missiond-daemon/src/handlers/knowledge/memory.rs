@@ -1,14 +1,24 @@
 use anyhow::{anyhow, Result};
-use missiond_core::types::{EvidenceSearchInput, KBRememberInput, KnowledgeReviewInput};
+use missiond_core::types::{
+    EvidenceItemInput, EvidenceSearchInput, KBRememberInput, KnowledgeReviewInput,
+};
 use missiond_mcp::tools::{ToolContent, ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
+    path::{Path, PathBuf},
+};
 use tracing::info;
 
-use crate::context::v3_blueprint_runtime::MemoryKbRuntimeConfig;
+use crate::context::v3_blueprint_runtime::{
+    load_compiled_project_universe, CompiledProjectUniverseEntry, CompiledServiceRuntimeEntry,
+    CompiledServiceSupportCatalog, MemoryKbRuntimeConfig,
+};
 use crate::events_sync;
-use crate::helpers::default_mission_home;
+use crate::helpers::{default_mission_home, missiond_project_root};
 use crate::lenient;
 use crate::state::AppState;
 use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
@@ -250,6 +260,755 @@ fn tool_result_to_value(result: &ToolResult) -> Value {
             ToolContent::Text { text } => serde_json::from_str(text).ok(),
         })
         .unwrap_or_else(|| json!({"content": result.content}))
+}
+
+#[derive(Debug, Default)]
+struct CompiledEvidenceBackfill {
+    project_items: Vec<EvidenceItemInput>,
+    support_items: Vec<EvidenceItemInput>,
+    projects_seen: usize,
+    services_seen: usize,
+    skipped_by_filter: usize,
+    credential_ref_count: usize,
+    credential_refs_indexed: bool,
+    project_root: String,
+    snapshot: Value,
+    diagnostics: Vec<String>,
+}
+
+fn source_matches_any(source: &str, aliases: &[&str]) -> bool {
+    let normalized = source.trim().replace('-', "_").to_ascii_lowercase();
+    aliases.iter().any(|alias| normalized == *alias)
+}
+
+fn build_compiled_evidence_backfill(args: &Value, limit: usize) -> CompiledEvidenceBackfill {
+    let project_root = missiond_project_root();
+    let loaded = load_compiled_project_universe(&project_root, None);
+    let include_credentials =
+        get_bool_any(args, &["include_credentials", "includeCredentials"]).unwrap_or(false);
+    let project_filter = get_string_any(args, &["project", "projectId", "project_id"])
+        .and_then(|value| normalized_backfill_lookup(Some(value)));
+    let mut backfill = CompiledEvidenceBackfill {
+        credential_refs_indexed: include_credentials,
+        project_root: project_root.display().to_string(),
+        snapshot: loaded
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                json!({
+                    "kind": snapshot.kind,
+                    "path": snapshot.path.display().to_string(),
+                    "schema_version": snapshot.schema_version,
+                    "source_hash": snapshot.source_hash,
+                })
+            })
+            .unwrap_or(Value::Null),
+        diagnostics: loaded.diagnostics,
+        ..Default::default()
+    };
+
+    let Some(payload) = loaded.payload else {
+        return backfill;
+    };
+
+    let mut matched_project_keys = BTreeSet::new();
+    for project in &payload.projects {
+        if compiled_project_matches_backfill_filter(project, project_filter.as_deref()) {
+            collect_project_match_keys(project, &mut matched_project_keys);
+        }
+    }
+
+    let project_limit = limit.max(1);
+    for project in &payload.projects {
+        backfill.projects_seen += 1;
+        if !compiled_project_matches_backfill_filter(project, project_filter.as_deref()) {
+            backfill.skipped_by_filter += usize::from(project_filter.is_some());
+            continue;
+        }
+        if backfill.project_items.len() >= project_limit {
+            break;
+        }
+        if let Some(item) = compiled_project_evidence_item(project) {
+            backfill.project_items.push(item);
+        }
+    }
+
+    for service in &payload.services {
+        backfill.services_seen += 1;
+        if !compiled_service_matches_backfill_filter(
+            service,
+            project_filter.as_deref(),
+            &matched_project_keys,
+        ) {
+            backfill.skipped_by_filter += usize::from(project_filter.is_some());
+            continue;
+        }
+        if backfill.project_items.len() < project_limit {
+            if let Some(item) = compiled_service_runtime_evidence_item(service) {
+                backfill.project_items.push(item);
+            }
+        }
+        if backfill.support_items.len() < project_limit {
+            if let Some(item) = compiled_support_catalog_evidence_item(service, include_credentials)
+            {
+                backfill.credential_ref_count += service
+                    .support_catalog
+                    .as_ref()
+                    .map(|catalog| catalog.credential_refs.len())
+                    .unwrap_or(0);
+                backfill.support_items.push(item);
+            }
+        }
+        if backfill.support_items.len() < project_limit {
+            if let Some(item) = compiled_deployment_closure_evidence_item(&project_root, service) {
+                backfill.support_items.push(item);
+            }
+        }
+    }
+
+    backfill
+}
+
+fn collect_project_match_keys(project: &CompiledProjectUniverseEntry, keys: &mut BTreeSet<String>) {
+    for value in project
+        .id
+        .iter()
+        .chain(project.aliases.iter())
+        .chain(project.service_ids.iter())
+    {
+        if let Some(key) = normalized_backfill_lookup(Some(value)) {
+            keys.insert(key);
+        }
+    }
+}
+
+fn compiled_project_matches_backfill_filter(
+    project: &CompiledProjectUniverseEntry,
+    filter: Option<&str>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    project
+        .id
+        .iter()
+        .chain(project.aliases.iter())
+        .chain(project.service_ids.iter())
+        .chain(project.root.iter())
+        .chain(project.path.iter())
+        .any(|value| normalized_backfill_lookup(Some(value)).as_deref() == Some(filter))
+}
+
+fn compiled_service_matches_backfill_filter(
+    service: &CompiledServiceRuntimeEntry,
+    filter: Option<&str>,
+    matched_project_keys: &BTreeSet<String>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let direct_match = service
+        .id
+        .iter()
+        .chain(service.project.iter())
+        .chain(service.root.iter())
+        .chain(service.domains.iter())
+        .chain(service.public_base_url.iter())
+        .chain(service.frontend_url.iter())
+        .chain(service.api_base_url.iter())
+        .any(|value| normalized_backfill_lookup(Some(value)).as_deref() == Some(filter));
+    if direct_match {
+        return true;
+    }
+    service
+        .id
+        .iter()
+        .chain(service.project.iter())
+        .filter_map(|value| normalized_backfill_lookup(Some(value)))
+        .any(|value| matched_project_keys.contains(&value))
+}
+
+fn compiled_project_evidence_item(
+    project: &CompiledProjectUniverseEntry,
+) -> Option<EvidenceItemInput> {
+    let project_id = project.id.as_deref()?;
+    let source_ref = project.root.as_deref().or(project.path.as_deref());
+    let title = format!("Compiled project SSOT: {project_id}");
+    let service_ids = compact_list(&project.service_ids, 8);
+    let checks = compact_list(&project.checks, 6);
+    let summary = compact_text(
+        &format!(
+            "Compiled project universe registers {project_id}. Intent: {}. Root: {}. Services: {}. Status: {}. Runtime layer: {}. Checks: {}.",
+            project.intent.as_deref().unwrap_or("unspecified"),
+            project.root.as_deref().or(project.path.as_deref()).unwrap_or("unspecified"),
+            service_ids.unwrap_or_else(|| "none".to_string()),
+            project.status.as_deref().unwrap_or("unspecified"),
+            project.runtime_layer.as_deref().unwrap_or("unspecified"),
+            checks.unwrap_or_else(|| "none".to_string()),
+        ),
+        900,
+    );
+    Some(backfill_evidence_item(
+        "project_ssot",
+        "compiled_project_universe",
+        Some(project_id),
+        source_ref,
+        Some(project_id),
+        title,
+        summary,
+        json!({
+            "source": "compiled-project-universe",
+            "project": {
+                "id": project.id,
+                "aliases": project.aliases,
+                "service_ids": project.service_ids,
+                "kind": project.kind,
+                "management_domain": project.management_domain,
+                "runtime_layer": project.runtime_layer,
+                "root": project.root,
+                "path": project.path,
+                "intent": project.intent,
+                "backend": project.backend,
+                "frontend": project.frontend,
+                "operations": project.operations,
+                "status": project.status,
+                "surface": project.surface,
+                "missiond_role": project.missiond_role,
+                "checks": project.checks,
+            },
+            "authority": "file-first-lisp-and-compiled-project-universe",
+        }),
+    ))
+}
+
+fn compiled_service_runtime_evidence_item(
+    service: &CompiledServiceRuntimeEntry,
+) -> Option<EvidenceItemInput> {
+    let service_id = service.id.as_deref()?;
+    let project_id = service_project_id(service);
+    let title = format!("Compiled service runtime: {service_id}");
+    let summary = compact_text(
+        &format!(
+            "Compiled service runtime registers {service_id} for project {}. Domains: {}. Health: {}. Deploy slug: {}. Runtime target: {}. DB migration namespace: {}.",
+            project_id.unwrap_or("unspecified"),
+            compact_list(&service.domains, 8).unwrap_or_else(|| "none".to_string()),
+            compact_list(&service.health, 8).unwrap_or_else(|| "none".to_string()),
+            service
+                .support_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.deploy_center_slug.as_deref())
+                .unwrap_or("unspecified"),
+            service
+                .support_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.runtime_target.as_deref())
+                .or(service.surface.as_deref())
+                .unwrap_or("unspecified"),
+            service
+                .support_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.db_migration_namespace.as_deref())
+                .unwrap_or("unspecified"),
+        ),
+        900,
+    );
+    Some(backfill_evidence_item(
+        "project_ssot",
+        "compiled_service_runtime",
+        Some(service_id),
+        service.root.as_deref(),
+        project_id,
+        title,
+        summary,
+        json!({
+            "source": "compiled-project-universe",
+            "service_runtime": redacted_service_runtime_ref(service, false),
+            "authority": "compiled-project-service-runtime",
+        }),
+    ))
+}
+
+fn compiled_support_catalog_evidence_item(
+    service: &CompiledServiceRuntimeEntry,
+    include_credentials: bool,
+) -> Option<EvidenceItemInput> {
+    if !service_has_support_content(service) {
+        return None;
+    }
+    let service_id = service.id.as_deref()?;
+    let catalog = service.support_catalog.as_ref();
+    let project_id = service_project_id(service);
+    let credential_ref_count = catalog
+        .map(|catalog| catalog.credential_refs.len())
+        .unwrap_or(0);
+    let manifest_refs = catalog
+        .map(|catalog| compact_list(&catalog.service_manifest_refs, 8))
+        .unwrap_or(None)
+        .or_else(|| Some("none".to_string()));
+    let title = format!("Support catalog: {service_id}");
+    let summary = compact_text(
+        &format!(
+            "Support catalog for {service_id}: domains {}; Deploy Center slug {}; runtime target {}; container {}; manifest refs {}; health {}; database namespace {}; migration namespace {}; credential refs counted {}, indexed {}.",
+            compact_list(&service.domains, 8).unwrap_or_else(|| "none".to_string()),
+            catalog
+                .and_then(|catalog| catalog.deploy_center_slug.as_deref())
+                .unwrap_or("unspecified"),
+            catalog
+                .and_then(|catalog| catalog.runtime_target.as_deref())
+                .or(service.surface.as_deref())
+                .unwrap_or("unspecified"),
+            catalog
+                .and_then(|catalog| catalog.container.as_deref())
+                .unwrap_or("unspecified"),
+            manifest_refs.unwrap_or_else(|| "none".to_string()),
+            compact_list(&service.health, 8).unwrap_or_else(|| "none".to_string()),
+            catalog
+                .and_then(|catalog| catalog.database_namespace.as_deref())
+                .unwrap_or("unspecified"),
+            catalog
+                .and_then(|catalog| catalog.db_migration_namespace.as_deref())
+                .unwrap_or("unspecified"),
+            credential_ref_count,
+            include_credentials,
+        ),
+        1000,
+    );
+    Some(backfill_evidence_item(
+        "support_refs",
+        "support_catalog",
+        Some(service_id),
+        service.root.as_deref(),
+        project_id,
+        title,
+        summary,
+        json!({
+            "source": "compiled-project-universe.support_catalog",
+            "support_catalog": redacted_support_catalog_ref(catalog, include_credentials),
+            "service_runtime": redacted_service_runtime_ref(service, include_credentials),
+            "credential_ref_count": credential_ref_count,
+            "credential_refs_indexed": include_credentials,
+            "secret_policy": "Credential references are counted by default; redacted refs are included only with include_credentials=true.",
+        }),
+    ))
+}
+
+fn compiled_deployment_closure_evidence_item(
+    project_root: &Path,
+    service: &CompiledServiceRuntimeEntry,
+) -> Option<EvidenceItemInput> {
+    let service_id = service.id.as_deref()?;
+    let catalog = service.support_catalog.as_ref();
+    let project_id = service_project_id(service);
+    let policy =
+        compiled_deployment_policy_for_backfill(project_root, project_id, Some(service_id));
+    let has_closure_refs = policy.is_some()
+        || catalog
+            .map(|catalog| {
+                catalog.deploy_center_slug.is_some()
+                    || catalog.runtime_target.is_some()
+                    || !catalog.service_manifest_refs.is_empty()
+            })
+            .unwrap_or(false)
+        || !service.health.is_empty();
+    if !has_closure_refs {
+        return None;
+    }
+    let title = format!("Deployment closure policy: {service_id}");
+    let summary = compact_text(
+        &format!(
+            "Deployment closure evidence for {service_id}: Deploy Center ReleaseEvidence plus ClosureVerdict is authority. Check service.manifest.toml, manifest gate, canary smoke, runtime digest, binary marker, image marker, entrypoint, compose volume override, _sqlx_migrations, and db adoption before treating GitHub workflow success as complete. Deploy slug: {}; runtime target: {}; policy gates: {}.",
+            catalog
+                .and_then(|catalog| catalog.deploy_center_slug.as_deref())
+                .unwrap_or("unspecified"),
+            catalog
+                .and_then(|catalog| catalog.runtime_target.as_deref())
+                .or(service.surface.as_deref())
+                .unwrap_or("unspecified"),
+            policy
+                .as_ref()
+                .map(policy_gate_summary)
+                .unwrap_or_else(|| "compiled deployment policy unavailable".to_string()),
+        ),
+        1200,
+    );
+    Some(backfill_evidence_item(
+        "support_refs",
+        "deployment_closure_policy",
+        Some(service_id),
+        service.root.as_deref(),
+        project_id,
+        title,
+        summary,
+        json!({
+            "source": "compiled-deployment-policy",
+            "service_id": service_id,
+            "project_id": project_id,
+            "deploy_center_slug": catalog.and_then(|catalog| catalog.deploy_center_slug.as_deref()),
+            "runtime_target": catalog.and_then(|catalog| catalog.runtime_target.as_deref()).or(service.surface.as_deref()),
+            "manifest_refs": catalog.map(|catalog| catalog.service_manifest_refs.clone()).unwrap_or_default(),
+            "health_endpoints": service.health,
+            "policy": policy.unwrap_or(Value::Null),
+            "diagnostic_terms": [
+                "service.manifest.toml",
+                "manifest gate",
+                "Deploy Center canary",
+                "smoke",
+                "runtime digest",
+                "running image digest",
+                "binary marker",
+                "image marker",
+                "entrypoint",
+                "old binary",
+                "compose",
+                "volume override",
+                "_sqlx_migrations",
+                "db adoption",
+                "ReleaseEvidence",
+                "ClosureVerdict"
+            ],
+            "rule": "GitHub workflow success, curl probes, and local git state are diagnostic only; Deploy Center ReleaseEvidence plus ClosureVerdict is the closure authority."
+        }),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn backfill_evidence_item(
+    lane_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+    source_ref: Option<&str>,
+    project_id: Option<&str>,
+    title: String,
+    summary: String,
+    evidence_refs: Value,
+) -> EvidenceItemInput {
+    let (authority_class, validity, privacy_class, freshness, raw_policy) =
+        backfill_evidence_item_policy(lane_id);
+    EvidenceItemInput {
+        id: backfill_evidence_item_id(lane_id, source_type, source_id, source_ref),
+        lane_id: lane_id.to_string(),
+        source_type: source_type.to_string(),
+        source_id: source_id.map(ToOwned::to_owned),
+        source_ref: source_ref.map(ToOwned::to_owned),
+        project_id: project_id.map(ToOwned::to_owned),
+        task_id: None,
+        title,
+        summary,
+        authority_class: authority_class.to_string(),
+        validity: validity.to_string(),
+        privacy_class: privacy_class.to_string(),
+        freshness: freshness.to_string(),
+        score: Some(1.0),
+        raw_policy: raw_policy.to_string(),
+        evidence_refs,
+        metadata: json!({
+            "projection": "mission_memory.evidence_backfill.compiled_authority",
+            "maintenance_source": "compiled_project_universe",
+            "derived_from_raw_source": false,
+        }),
+    }
+}
+
+fn backfill_evidence_item_policy(
+    lane_id: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    match lane_id {
+        "project_ssot" => (
+            "file-first-lisp-and-compiled-project-universe",
+            "current_rule",
+            "internal",
+            "compiled_runtime_bound",
+            "compact_only",
+        ),
+        "support_refs" => (
+            "redacted-support-catalog",
+            "current_reference",
+            "reference",
+            "runtime_or_catalog_bound",
+            "secret_refs_only",
+        ),
+        _ => (
+            "evidence-only",
+            "evidence_only",
+            "internal",
+            "version_bound_or_historical",
+            "compact_only",
+        ),
+    }
+}
+
+fn backfill_evidence_item_id(
+    lane_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+    source_ref: Option<&str>,
+) -> String {
+    let input = format!(
+        "mission_memory.evidence_backfill|{lane_id}|{source_type}|{}|{}",
+        source_id.unwrap_or(""),
+        source_ref.unwrap_or("")
+    );
+    format!("evi-{}", short_sha256(&input, 16))
+}
+
+fn short_sha256(input: &str, hex_chars: usize) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .chars()
+        .take(hex_chars)
+        .collect()
+}
+
+fn service_project_id(service: &CompiledServiceRuntimeEntry) -> Option<&str> {
+    service
+        .project
+        .as_deref()
+        .or_else(|| {
+            service
+                .support_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.project_id.as_deref())
+        })
+        .or(service.id.as_deref())
+}
+
+fn service_has_support_content(service: &CompiledServiceRuntimeEntry) -> bool {
+    service.support_catalog.is_some()
+        || !service.domains.is_empty()
+        || !service.health.is_empty()
+        || !service.dependencies.is_empty()
+        || service.public_base_url.is_some()
+        || service.frontend_url.is_some()
+        || service.api_base_url.is_some()
+}
+
+fn redacted_service_runtime_ref(
+    service: &CompiledServiceRuntimeEntry,
+    include_credentials: bool,
+) -> Value {
+    json!({
+        "id": service.id,
+        "project": service.project,
+        "root": service.root,
+        "intent": service.intent,
+        "backend": service.backend,
+        "frontend": service.frontend,
+        "operations": service.operations,
+        "environment": service.environment,
+        "public_base_url": service.public_base_url,
+        "frontend_url": service.frontend_url,
+        "api_base_url": service.api_base_url,
+        "domains": service.domains,
+        "health": service.health,
+        "dependencies": service.dependencies,
+        "ops_capability": service.ops_capability,
+        "surface": service.surface,
+        "support_catalog": redacted_support_catalog_ref(
+            service.support_catalog.as_ref(),
+            include_credentials,
+        ),
+    })
+}
+
+fn redacted_support_catalog_ref(
+    catalog: Option<&CompiledServiceSupportCatalog>,
+    include_credentials: bool,
+) -> Value {
+    let Some(catalog) = catalog else {
+        return Value::Null;
+    };
+    let credential_refs = if include_credentials {
+        Value::Array(
+            catalog
+                .credential_refs
+                .iter()
+                .map(|value| json!({"ref": value, "redacted": true}))
+                .collect(),
+        )
+    } else {
+        Value::Null
+    };
+    json!({
+        "service_id": catalog.service_id,
+        "project_id": catalog.project_id,
+        "domains": catalog.domains,
+        "public_base_url": catalog.public_base_url,
+        "frontend_url": catalog.frontend_url,
+        "api_base_url": catalog.api_base_url,
+        "health": catalog.health,
+        "dependencies": catalog.dependencies,
+        "deploy_center_slug": catalog.deploy_center_slug,
+        "runtime_target": catalog.runtime_target,
+        "executor": catalog.executor,
+        "container": catalog.container,
+        "service_manifest_refs": catalog.service_manifest_refs,
+        "source_evidence": catalog.source_evidence,
+        "db_migration_namespace": catalog.db_migration_namespace,
+        "database_namespace": catalog.database_namespace,
+        "credential_ref_count": catalog.credential_refs.len(),
+        "credential_refs": credential_refs,
+    })
+}
+
+fn compiled_deployment_policy_for_backfill(
+    project_root: &Path,
+    project_id: Option<&str>,
+    service_id: Option<&str>,
+) -> Option<Value> {
+    let project_key = normalized_backfill_lookup(project_id);
+    let service_key = normalized_backfill_lookup(service_id);
+    for path in compiled_deployment_policy_candidates(project_root) {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let payload = value.get("payload").unwrap_or(&value);
+        let Some(policy) = payload
+            .get("policies")
+            .and_then(Value::as_array)
+            .and_then(|policies| {
+                policies.iter().find(|policy| {
+                    policy_matches_backfill_lookup(policy, "project_id", project_key.as_deref())
+                        || policy_matches_backfill_lookup(
+                            policy,
+                            "projectId",
+                            project_key.as_deref(),
+                        )
+                        || policy_matches_backfill_lookup(
+                            policy,
+                            "service_id",
+                            service_key.as_deref(),
+                        )
+                        || policy_matches_backfill_lookup(
+                            policy,
+                            "serviceId",
+                            service_key.as_deref(),
+                        )
+                })
+            })
+        else {
+            continue;
+        };
+        return Some(json!({
+            "source": "compiled-deployment-policy",
+            "path": path.display().to_string(),
+            "source_hash": value.get("source_hash").cloned().unwrap_or(Value::Null),
+            "policy": policy,
+            "closure_state_machine": payload.get("closure_state_machine").cloned().unwrap_or(Value::Null),
+            "closure_verdicts": payload.get("closure_verdicts").cloned().unwrap_or(Value::Null),
+            "typed_diagnostics": payload.get("typed_diagnostics").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    None
+}
+
+fn compiled_deployment_policy_candidates(project_root: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(dir) = env::var("MISSIOND_COMPILED_RUNTIME_DIR") {
+        candidates.push(PathBuf::from(dir).join("compiled-deployment-policy.json"));
+    }
+    if let Ok(dir) = env::var("MISSIOND_RUNTIME_DIR") {
+        candidates.push(PathBuf::from(dir).join("compiled/compiled-deployment-policy.json"));
+    }
+    if let Ok(root) = env::var("MISSIOND_PROJECT_ROOT") {
+        candidates.push(
+            PathBuf::from(root)
+                .join(".missiond/v3/runtime/compiled/compiled-deployment-policy.json"),
+        );
+    }
+    candidates
+        .push(project_root.join(".missiond/v3/runtime/compiled/compiled-deployment-policy.json"));
+    candidates
+}
+
+fn policy_matches_backfill_lookup(policy: &Value, key: &str, lookup: Option<&str>) -> bool {
+    let Some(lookup) = lookup else {
+        return false;
+    };
+    policy
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|value| normalized_backfill_lookup(Some(value)))
+        .as_deref()
+        == Some(lookup)
+}
+
+fn policy_gate_summary(policy: &Value) -> String {
+    let Some(policy) = policy.get("policy") else {
+        return "no gate details".to_string();
+    };
+    let mut gates = Vec::new();
+    for key in [
+        "manifest_required",
+        "immutable_image_required",
+        "runtime_digest_required",
+        "smoke_required",
+        "db_adoption_required",
+        "release_lease_required",
+    ] {
+        if policy.get(key).and_then(Value::as_bool) == Some(true) {
+            gates.push(key.replace("_required", ""));
+        }
+    }
+    if gates.is_empty() {
+        "none marked required".to_string()
+    } else {
+        gates.join(", ")
+    }
+}
+
+fn normalized_backfill_lookup(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_end_matches('/')
+                .replace('_', "-")
+                .to_ascii_lowercase()
+        })
+}
+
+fn compact_list(values: &[String], max_items: usize) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut out = values
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .take(max_items)
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+    if values.len() > max_items {
+        out.push(format!("+{} more", values.len() - max_items));
+    }
+    Some(out.join(", "))
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut out = trimmed
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    out.push_str("...");
+    out
 }
 
 fn provider_scope_from_args(args: &Value) -> Value {
@@ -783,6 +1542,73 @@ async fn handle_provider_evidence_backfill(state: &AppState, args: Value) -> Res
                 .unwrap_or("conversation");
             let limit = get_i64_any(&args, &["limit"]).unwrap_or(100).clamp(1, 500);
             let mut results = serde_json::Map::new();
+            if source_matches_any(
+                source,
+                &[
+                    "project",
+                    "projects",
+                    "compiled_project_universe",
+                    "support",
+                    "supports",
+                    "all",
+                ],
+            ) {
+                let compiled = build_compiled_evidence_backfill(&args, limit as usize);
+                if source_matches_any(
+                    source,
+                    &["project", "projects", "compiled_project_universe", "all"],
+                ) {
+                    let written = state
+                        .store
+                        .upsert_evidence_items(&compiled.project_items)
+                        .await
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    results.insert(
+                        "projects".to_string(),
+                        json!({
+                            "evidence_items_written": written,
+                            "evidence_items_built": compiled.project_items.len(),
+                            "lane": "project_ssot",
+                            "sources": ["compiled_project_universe", "compiled_service_runtime"],
+                            "raw_deleted": false,
+                            "raw_layer": "compiled project universe",
+                        }),
+                    );
+                }
+                if source_matches_any(source, &["support", "supports", "all"]) {
+                    let written = state
+                        .store
+                        .upsert_evidence_items(&compiled.support_items)
+                        .await
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    results.insert(
+                        "support".to_string(),
+                        json!({
+                            "evidence_items_written": written,
+                            "evidence_items_built": compiled.support_items.len(),
+                            "lanes": ["support_refs"],
+                            "sources": ["support_catalog", "deployment_closure_policy"],
+                            "credential_ref_count": compiled.credential_ref_count,
+                            "credential_refs_indexed": compiled.credential_refs_indexed,
+                            "raw_deleted": false,
+                            "raw_layer": "compiled project universe support catalog",
+                        }),
+                    );
+                }
+                results.insert(
+                    "compiled_authority".to_string(),
+                    json!({
+                        "project_root": compiled.project_root,
+                        "snapshot": compiled.snapshot,
+                        "projects_seen": compiled.projects_seen,
+                        "services_seen": compiled.services_seen,
+                        "skipped_by_filter": compiled.skipped_by_filter,
+                        "diagnostics": compiled.diagnostics,
+                        "authority": "compiled-project-universe",
+                        "raw_conversation_scanned": false,
+                    }),
+                );
+            }
             if matches!(source, "conversation" | "conversations" | "all") {
                 let count = state
                     .store
@@ -1237,11 +2063,54 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_memory_input_noise, evidence_promotion_requires_bound, get_string_list_any,
-        promotion_bound_present, provider_evidence_search_payload, provider_query_payload,
-        provider_remember_payload,
+        classify_memory_input_noise, compiled_deployment_closure_evidence_item,
+        compiled_support_catalog_evidence_item, evidence_promotion_requires_bound,
+        get_string_list_any, promotion_bound_present, provider_evidence_search_payload,
+        provider_query_payload, provider_remember_payload, source_matches_any,
+        CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog,
     };
     use serde_json::json;
+    use std::path::Path;
+
+    fn payments_service_fixture() -> CompiledServiceRuntimeEntry {
+        CompiledServiceRuntimeEntry {
+            id: Some("payments".to_string()),
+            project: Some("payments".to_string()),
+            root: Some("/srv/xjp/payments".to_string()),
+            intent: Some("XJP payments backend".to_string()),
+            backend: Some("services/payments".to_string()),
+            frontend: None,
+            operations: Some("Deploy Center canary".to_string()),
+            environment: Some("production".to_string()),
+            public_base_url: Some("https://payments.example.test".to_string()),
+            frontend_url: None,
+            api_base_url: Some("https://payments.example.test/api".to_string()),
+            domains: vec!["payments.example.test".to_string()],
+            health: vec!["/payments/health/ready".to_string()],
+            dependencies: vec!["postgres".to_string()],
+            ops_capability: Some("deploy-center".to_string()),
+            surface: Some("vm-compose".to_string()),
+            support_catalog: Some(CompiledServiceSupportCatalog {
+                service_id: Some("payments".to_string()),
+                project_id: Some("payments".to_string()),
+                domains: vec!["payments.example.test".to_string()],
+                public_base_url: Some("https://payments.example.test".to_string()),
+                frontend_url: None,
+                api_base_url: Some("https://payments.example.test/api".to_string()),
+                health: vec!["/payments/health/ready".to_string()],
+                dependencies: vec!["postgres".to_string()],
+                deploy_center_slug: Some("xjp-payments".to_string()),
+                runtime_target: Some("xjp-prod-vm".to_string()),
+                executor: Some("gcp-agent".to_string()),
+                container: Some("xjp-payments".to_string()),
+                service_manifest_refs: vec!["services/payments/service.manifest.toml".to_string()],
+                credential_refs: vec!["secret://prod/payments/database-url".to_string()],
+                source_evidence: vec!["compiled-project-universe".to_string()],
+                db_migration_namespace: Some("payments".to_string()),
+                database_namespace: Some("payments".to_string()),
+            }),
+        }
+    }
 
     #[test]
     fn memory_input_filter_preserves_user_utterances() {
@@ -1357,5 +2226,43 @@ mod tests {
             &json!({"versionBound": "release-2026-06-02"})
         ));
         assert!(promotion_bound_present(&json!({"ttl_days": 14})));
+    }
+
+    #[test]
+    fn compiled_support_backfill_counts_credentials_without_indexing_by_default() {
+        let item = compiled_support_catalog_evidence_item(&payments_service_fixture(), false)
+            .expect("support catalog evidence");
+        assert_eq!(item.lane_id, "support_refs");
+        assert_eq!(item.source_type, "support_catalog");
+        assert_eq!(item.raw_policy, "secret_refs_only");
+        assert_eq!(item.evidence_refs["credential_ref_count"], 1);
+        assert_eq!(item.evidence_refs["credential_refs_indexed"], false);
+        assert!(item.summary.contains("service.manifest.toml"));
+        assert!(!item.evidence_refs.to_string().contains("secret://prod"));
+    }
+
+    #[test]
+    fn deployment_closure_backfill_carries_manifest_canary_old_binary_terms() {
+        let item = compiled_deployment_closure_evidence_item(
+            Path::new("/missing-root"),
+            &payments_service_fixture(),
+        )
+        .expect("deployment closure evidence");
+        assert_eq!(item.lane_id, "support_refs");
+        assert_eq!(item.source_type, "deployment_closure_policy");
+        assert!(item.summary.contains("service.manifest.toml"));
+        assert!(item.summary.contains("canary smoke"));
+        assert!(item.summary.contains("binary marker"));
+        assert!(item.evidence_refs.to_string().contains("old binary"));
+    }
+
+    #[test]
+    fn evidence_backfill_source_aliases_accept_hyphenated_compiled_universe() {
+        assert!(source_matches_any(
+            "compiled-project-universe",
+            &["compiled_project_universe"]
+        ));
+        assert!(source_matches_any("support", &["support", "all"]));
+        assert!(!source_matches_any("conversation", &["support", "all"]));
     }
 }

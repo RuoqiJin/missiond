@@ -34,6 +34,7 @@ const DEFAULT_FILES = {
   kbReview: 'crates/missiond-daemon/src/handlers/knowledge/kb/review.rs',
   contextGather: 'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
   mcpContextGather: 'crates/missiond-mcp/src/tools/knowledge/context_gather.rs',
+  mcpMemory: 'crates/missiond-mcp/src/tools/knowledge/memory.rs',
   evidenceMigration: 'crates/missiond-core/migrations/20260602000000_evidence_lane_read_models.sql',
   runtimeDomains: 'scripts/lib/v3_runtime_domains.mjs',
   runtimeConfigPayload: 'crates/missiond-daemon/src/context/v3_blueprint_runtime/runtime_config_payload.rs',
@@ -149,6 +150,7 @@ function checkFiles(root, files) {
 	    'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
 	    'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
 	    'crates/missiond-mcp/src/tools/knowledge/context_gather.rs',
+	    'crates/missiond-mcp/src/tools/knowledge/memory.rs',
 	    'crates/missiond-daemon/src/handlers/comm/tool_directory.rs',
 	    'crates/missiond-daemon/src/engine/learning_engine/mod.rs',
 	    'crates/missiond-daemon/src/engine/learning_engine/extraction.rs',
@@ -238,6 +240,8 @@ function checkFiles(root, files) {
     'source_summaries.infra.status=feature_disabled',
     'optional feature_disabled diagnostics MUST NOT set the top-level ok=false by themselves',
     'mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence',
+    'source=projects/support/all prewarms compact evidence_items from compiled_project_universe and compiled service support catalogs without raw conversation scans',
+    'credential_refs are counted only unless include_credentials=true; secret values are never indexed',
     'deployment_closure_policy',
     'ReleaseLease',
     'RuntimeObservation',
@@ -338,6 +342,14 @@ function checkFiles(root, files) {
     'include_board',
     'include_conversations',
     'conversation_time_range',
+  ]);
+
+  requireAll(diagnostics, files.mcpMemory, sources.mcpMemory, [
+    'mission_memory',
+    'evidence_backfill',
+    'conversation/skills/projects/support/all',
+    'includeCredentials',
+    'default only counts refs',
   ]);
 
   requireAll(diagnostics, files.toolDirectory, sources.toolDirectory, [
@@ -490,6 +502,16 @@ function checkFiles(root, files) {
     'pending_payload',
     'MEMORY_PENDING_ALREADY_SERVED',
     'ToolResult::structured_error',
+    'load_compiled_project_universe',
+    'CompiledEvidenceBackfill',
+    'compiled_project_universe',
+    'compiled_service_runtime',
+    'source_matches_any',
+    'support_catalog',
+    'deployment_closure_policy',
+    'credential_refs_indexed',
+    'include_credentials',
+    'raw_conversation_scanned',
   ]);
 
   requireAll(diagnostics, files.learningMod, sources.learningMod, [
@@ -990,6 +1012,8 @@ function buildFixture() {
 		                 "source_summaries.infra.status=feature_disabled"
 		                 "optional feature_disabled diagnostics MUST NOT set the top-level ok=false by themselves"
 		                 "mission_context_gather support_catalog MUST project compiled service runtime plus compiled-deployment-policy into deployment_closure evidence"
+		                 "source=projects/support/all prewarms compact evidence_items from compiled_project_universe and compiled service support catalogs without raw conversation scans"
+		                 "credential_refs are counted only unless include_credentials=true; secret values are never indexed"
 		                 "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes"
 	                 "Board/task/workflow records are searchable retrieval evidence"
 	                 "Mutating skill files under ~/.claude/skills, ~/.codex/skills, or project skill directories MUST be represented as a BoardTask/work-order and delegated to a ClaudeCode skill-maintainer or deploy-ops lane."])
@@ -1056,6 +1080,7 @@ function buildFixture() {
 	             "crates/missiond-core/src/db/pg/conversation.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/context_gather.rs"
+	             "crates/missiond-mcp/src/tools/knowledge/memory.rs"
 	             "crates/missiond-daemon/src/handlers/comm/tool_directory.rs"
 	             "scripts/check-v3-memory-kb-isomorphism.mjs"]
 	      :note "memory-kb-policy realtime extraction batch size and preview truncation budgets; knowledge_review_state overlay; projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy; Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans; kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress; kb/review.rs owns non-destructive knowledge_review_state overlay."))
@@ -1128,6 +1153,9 @@ runtime_truth; project_ssot; reviewed_kb; active_board; support_refs; skill_evid
 include_credentials; includeCredentials; include_raw_sources; includeRawSources;
 persist; persist_read_model; persistReadModel;
 include_board; include_conversations; conversation_time_range;
+`);
+  writeFixture(root, DEFAULT_FILES.mcpMemory, `
+mission_memory; evidence_backfill; conversation/skills/projects/support/all; includeCredentials; default only counts refs;
 `);
   writeFixture(root, DEFAULT_FILES.toolDirectory, `
 mission_context_gather + mission_conversation_* + mission_timeline + mission_audit;
@@ -1307,6 +1335,7 @@ _dedupe_merge_events;
 `);
 	  writeFixture(root, DEFAULT_FILES.memory, `
 	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit); MAX_PENDING_BATCH_REPLAYS; classify_memory_input_noise; deployment-monitor; deployment-event-response; xjp_build_wait; xjp_deploy_watch; build_started; agent_update_failed; reported_digest_missing; runtime-report; worker-instruction; provider-preamble; inputSkipDiagnostics; inputFilter; mark_pending_batch_served; pending_payload; MEMORY_PENDING_ALREADY_SERVED; ToolResult::structured_error;
+	load_compiled_project_universe; CompiledEvidenceBackfill; compiled_project_universe; compiled_service_runtime; source_matches_any; support_catalog; deployment_closure_policy; credential_refs_indexed; include_credentials; raw_conversation_scanned;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningMod, `
 	LearningEngineRuntimeConfig; decision_harvest_interval_secs; cooccurrence_refresh_interval_secs; V3 learning-engine-policy unavailable;
