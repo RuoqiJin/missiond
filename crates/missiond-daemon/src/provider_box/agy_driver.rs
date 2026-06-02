@@ -2487,7 +2487,10 @@ impl ProviderDriver for AgyProviderDriver {
         }
 
         let policy = request.timeout_cancel_policy.clone().unwrap_or_default();
-        let prompt = request.prompt.clone().unwrap_or_default();
+        let prompt = prompt_with_correlation_marker(
+            request.prompt.as_deref().unwrap_or_default(),
+            &request.correlation_id,
+        );
         let max_attempts = policy.max_retries.saturating_add(1).max(1);
         for attempt in 0..max_attempts {
             if !self
@@ -2643,6 +2646,18 @@ impl ProviderDriver for AgyProviderDriver {
         }
         result
     }
+}
+
+fn prompt_with_correlation_marker(prompt: &str, correlation_id: &str) -> String {
+    if correlation_id.trim().is_empty() || prompt.contains(correlation_id) {
+        return prompt.to_string();
+    }
+    format!(
+        "<MISSIOND_PROVIDER_BOX_CORRELATION_ID>{}</MISSIOND_PROVIDER_BOX_CORRELATION_ID>\n\
+This marker is only for MissionD durable transcript correlation. Do not include it in the final answer.\n\n{}",
+        correlation_id.trim(),
+        prompt
+    )
 }
 
 fn is_model_picker(observation: &AgyObservation) -> bool {
@@ -3299,9 +3314,20 @@ fn extract_correlated_turn(
         AgyTranscriptOutcome::Completed(AgyTurnFinal {
             session_id: session.session_id.clone(),
             transcript_path: String::new(),
-            final_text: text,
+            final_text: strip_correlation_marker(&text, correlation_id),
         })
     })
+}
+
+fn strip_correlation_marker(text: &str, correlation_id: &str) -> String {
+    if correlation_id.trim().is_empty() {
+        return text.trim().to_string();
+    }
+    let exact = format!(
+        "<MISSIOND_PROVIDER_BOX_CORRELATION_ID>{}</MISSIOND_PROVIDER_BOX_CORRELATION_ID>",
+        correlation_id.trim()
+    );
+    text.replace(&exact, "").trim().to_string()
 }
 
 fn pure_text_violation(step: &AgyStep) -> Option<AgyTranscriptOutcome> {

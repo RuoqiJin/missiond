@@ -41,6 +41,7 @@
 #   MISSIOND_PROVIDER_BOX_PROXY_BASE_URL optional public base URL for the
 #                               managed provider-box proxy, e.g.
 #                               https://auth.xiaojinpro.com/tunnel/proxy/rickyhqmac-mini/missiond.
+#                               or https://jarvis.xiaojinpro.top/missiond.
 #   MISSIOND_AGY_PROVIDER_BOX_BASE_URL optional AGY-specific alias for the
 #                               managed provider-box proxy base URL.
 #   MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER optional provider-box provider id.
@@ -147,6 +148,27 @@ augment_managed_node_path() {
   export PATH
 }
 
+augment_managed_node_path
+
+ensure_codex_app_cli_on_path() {
+  if command -v codex >/dev/null 2>&1; then
+    return 0
+  fi
+  local app_cli="/Applications/Codex.app/Contents/Resources/codex"
+  local local_bin="${HOME}/.local/bin"
+  if [ -x "$app_cli" ]; then
+    mkdir -p "$local_bin"
+    ln -sfn "$app_cli" "${local_bin}/codex"
+    case ":$PATH:" in
+      *":$local_bin:"*) ;;
+      *) PATH="$local_bin:$PATH" ;;
+    esac
+    export PATH
+    log "bootstrap: linked Codex.app CLI into ${local_bin}/codex"
+  fi
+}
+
+ensure_codex_app_cli_on_path
 augment_managed_node_path
 
 case "$PROFILE" in
@@ -462,14 +484,15 @@ ensure_launchd_runtime_root() {
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_AGY_INTERNAL_TOKEN"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PROVIDER_BOX_PROXY_BASE_URL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_AGY_PROVIDER_BOX_BASE_URL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_SLOT_ID"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_DIRECT_ANSWER_MODEL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS"
   plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_TEXT_ONLY_URL"
   plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_TEXT_ONLY_ENDPOINT"
   plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_XJPCODE_BASE_URL"
-  plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER"
-  plist_delete_env_if_present "$LAUNCHD_PLIST" "MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_MODEL"
   plutil -lint "$LAUNCHD_PLIST" >/dev/null
   log "launchd: runtime root $LAUNCHD_PROJECT_ROOT written to $LAUNCHD_PLIST"
   log "launchd: artifact runtime dir $RUNTIME_DIR written to $LAUNCHD_PLIST"

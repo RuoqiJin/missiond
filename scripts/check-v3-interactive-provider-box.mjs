@@ -52,6 +52,34 @@ const INVENTORIED_LEGACY = [
     needles: ['--print', 'claude --print --output-format stream-json'],
   },
   {
+    id: 'jarvis-author-text-provider-env',
+    files: [FILES.jarvisServer],
+    needles: [
+      'jarvis_author_text_provider',
+      'MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER',
+      'semantic-authoring',
+      'pure-text-single-turn',
+    ],
+  },
+  {
+    id: 'provider-box-codex-exec-text-only',
+    files: [FILES.providerBoxDriver.replace('driver.rs', 'codex_driver.rs')],
+    needles: [
+      'codex exec --json --output-last-message',
+      'no_tools/no_mcp/no_shell/no_file_access',
+      'DIAG_PROVIDER_TEXT_ONLY_VIOLATION',
+    ],
+  },
+  {
+    id: 'jarvis-grounded-direct-answer-text-only',
+    files: [FILES.jarvisServer, FILES.deployDaemon],
+    needles: [
+      'MISSIOND_XJPCODE_TEXT_ONLY_URL',
+      'MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER',
+      '/provider/v1/text-only/completions',
+    ],
+  },
+  {
     id: 'codex-vision-exec',
     files: [FILES.codexCli, FILES.codexVision],
     needles: [
