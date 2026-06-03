@@ -17,8 +17,7 @@ use uuid::Uuid;
 
 use crate::bus::BusServices;
 
-pub const REVIEW_PROMPT: &str =
-    "看一下 missonD 的 SSOT lisp,如果让你对这个程序 在架构层面进行优化、改进，你会选择改进哪里？为什么？";
+pub const REVIEW_PROMPT: &str = "看一下 missonD 的 SSOT lisp,如果让你对这个程序 在架构层面进行优化、改进，你会选择改进哪里？为什么？";
 pub const PLAN_PROMPT: &str = "调查并设计执行方案。目标是这些问题全部解决";
 pub const IMPLEMENT_PREFIX: &str = "PLEASE IMPLEMENT THIS PLAN:\n";
 

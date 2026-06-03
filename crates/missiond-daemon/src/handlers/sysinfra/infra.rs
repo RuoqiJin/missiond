@@ -2307,8 +2307,7 @@ mod tests {
             limit: 10,
         };
         let manifest_line = "Payments service.manifest.toml Manifest Gate canary smoke provenance";
-        let compose_line =
-            "Payments compose volume override kept the old binary image marker running after canary";
+        let compose_line = "Payments compose volume override kept the old binary image marker running after canary";
         let migration_line = "sqlx migrate relation payments already exists during canary";
         assert!(is_infra_evidence_line(manifest_line));
         assert!(is_infra_evidence_line(compose_line));

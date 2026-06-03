@@ -1315,10 +1315,11 @@ fn assistant_candidates_after_claim(
 }
 
 fn task_requires_structured_output_contract(runtime_contract: &str) -> bool {
-    extract_runtime_contract_field(runtime_contract, "output_contract")
+    let output_contract = extract_runtime_contract_field(runtime_contract, "output_contract")
         .unwrap_or_else(|| runtime_contract.to_string())
-        .to_ascii_lowercase()
-        .contains("findings / evidence / recommendations / verification")
+        .to_ascii_lowercase();
+    output_contract.contains("findings / evidence / recommendations / verification")
+        || output_contract_requires_deploy_ops_artifact(&output_contract)
 }
 
 fn provider_summary_satisfies_task_contract(runtime_contract: &str, summary: &str) -> bool {
@@ -1355,12 +1356,13 @@ fn task_contract_runtime_envelope(contract: &TaskRuntimeContract) -> String {
 }
 
 fn task_contract_requires_structured_output_contract(contract: &TaskRuntimeContract) -> bool {
-    contract
+    let output_contract = contract
         .output_contract
         .as_deref()
         .unwrap_or_default()
-        .to_ascii_lowercase()
-        .contains("findings / evidence / recommendations / verification")
+        .to_ascii_lowercase();
+    output_contract.contains("findings / evidence / recommendations / verification")
+        || output_contract_requires_deploy_ops_artifact(&output_contract)
 }
 
 fn provider_summary_satisfies_runtime_contract(
@@ -3051,23 +3053,32 @@ fn output_contract_close_blocker(runtime_contract: &str, summary: &str) -> Optio
     }
     let output_contract = extract_runtime_contract_field(runtime_contract, "output_contract")
         .unwrap_or_else(|| runtime_contract.to_string());
-    if !output_contract
-        .to_ascii_lowercase()
-        .contains("findings / evidence / recommendations / verification")
-    {
+    let output_contract = output_contract.to_ascii_lowercase();
+    let requires_standard_report =
+        output_contract.contains("findings / evidence / recommendations / verification");
+    let requires_deploy_ops_artifact =
+        output_contract_requires_deploy_ops_artifact(&output_contract);
+    if !requires_standard_report && !requires_deploy_ops_artifact {
         if contains_worker_prompt_contract_echo(summary) {
             return Some("echoed-worker-prompt-contract");
         }
         return None;
     }
-    if summary_satisfies_declared_output_contract(summary) {
+
+    if requires_deploy_ops_artifact && deploy_ops_summary_satisfies_output_contract(summary) {
         return None;
     }
-    if memory_review_summary_satisfies_output_contract(summary) {
+    if requires_standard_report && summary_satisfies_declared_output_contract(summary) {
+        return None;
+    }
+    if requires_standard_report && memory_review_summary_satisfies_output_contract(summary) {
         return None;
     }
     if contains_worker_prompt_contract_echo(summary) {
         return Some("echoed-worker-prompt-contract");
+    }
+    if requires_deploy_ops_artifact {
+        return Some("missing-deploy-ops-output-artifact");
     }
     Some("missing-output-contract-sections")
 }
@@ -3122,7 +3133,7 @@ fn summary_line_matches_report_heading(line: &str, expected: &str) -> bool {
 }
 
 fn summary_line_is_any_report_heading(line: &str) -> bool {
-    const HEADINGS: [&str; 10] = [
+    const HEADINGS: &[&str] = &[
         "findings",
         "evidence",
         "recommendations",
@@ -3133,10 +3144,36 @@ fn summary_line_is_any_report_heading(line: &str) -> bool {
         "needs human",
         "discard rationale",
         "next shards",
+        "preflight-report",
+        "release-evidence-review",
+        "closure-verdict-review",
+        "rollback-plan",
+        "postmortem",
     ];
     HEADINGS
         .iter()
         .any(|heading| summary_line_matches_report_heading(line, heading))
+}
+
+const DEPLOY_OPS_OUTPUT_ARTIFACTS: [&str; 5] = [
+    "preflight-report",
+    "release-evidence-review",
+    "closure-verdict-review",
+    "rollback-plan",
+    "postmortem",
+];
+
+fn output_contract_requires_deploy_ops_artifact(output_contract: &str) -> bool {
+    output_contract.contains("deploy-ops artifact")
+        || DEPLOY_OPS_OUTPUT_ARTIFACTS
+            .iter()
+            .all(|artifact| output_contract.contains(artifact))
+}
+
+fn deploy_ops_summary_satisfies_output_contract(summary: &str) -> bool {
+    DEPLOY_OPS_OUTPUT_ARTIFACTS
+        .iter()
+        .any(|artifact| summary_has_nonempty_report_section(summary, artifact))
 }
 
 fn normalized_report_heading(line: &str) -> String {
@@ -3211,6 +3248,7 @@ fn is_runtime_worker_contract(runtime_contract: &str) -> bool {
 fn pty_summary_has_structured_artifact(summary: &str) -> bool {
     if summary_satisfies_declared_output_contract(summary)
         || memory_review_summary_satisfies_output_contract(summary)
+        || deploy_ops_summary_satisfies_output_contract(summary)
     {
         return true;
     }
@@ -3234,6 +3272,11 @@ fn pty_summary_has_structured_artifact(summary: &str) -> bool {
         "evaluation report",
         "final report",
         "next shards",
+        "preflight-report",
+        "release-evidence-review",
+        "closure-verdict-review",
+        "rollback-plan",
+        "postmortem",
     ];
     STRUCTURAL_MARKERS
         .iter()
@@ -3872,10 +3915,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                             }
                             let diagnostic_summary = format!(
                                 "Diagnostic: BoardTask `{}` is still running, but worker slot `{}` is {:?} and MissionD could not find a canonical task_result_artifact after {}s. Autopilot recorded an observation only; terminal status still requires typed settle.",
-                                rt.id,
-                                slot_id,
-                                info.state,
-                                claimed_age
+                                rt.id, slot_id, info.state, claimed_age
                             );
                             let _ = observe_autopilot_task_result_candidate(
                                 state,
@@ -7312,7 +7352,9 @@ mod tests {
                 Some("task-codex-1"),
             )
             .as_deref(),
-            Some("## Findings\nCodex can operate as a read-only review lane.\n\n## Evidence\nThe PTY and rollout JSONL both contain the task id.\n\n## Recommendations\nKeep resident master separate from codex-review-worker.\n\n## Verification\nNo files were modified.")
+            Some(
+                "## Findings\nCodex can operate as a read-only review lane.\n\n## Evidence\nThe PTY and rollout JSONL both contain the task id.\n\n## Recommendations\nKeep resident master separate from codex-review-worker.\n\n## Verification\nNo files were modified."
+            )
         );
     }
 
@@ -7358,7 +7400,9 @@ mod tests {
                 None,
             )
             .as_deref(),
-            Some("## Findings\n- PASS: Codex CLI 可作为本次 MissionD 普通只读审查工位执行。\n\n## Evidence\n- rollout JSONL task_complete.last_agent_message carried this final report.\n\n## Recommendations\n- Keep codex-master-control separate from codex-review-worker.\n\n## Verification\n- No files were modified.")
+            Some(
+                "## Findings\n- PASS: Codex CLI 可作为本次 MissionD 普通只读审查工位执行。\n\n## Evidence\n- rollout JSONL task_complete.last_agent_message carried this final report.\n\n## Recommendations\n- Keep codex-master-control separate from codex-review-worker.\n\n## Verification\n- No files were modified."
+            )
         );
     }
 
@@ -9600,7 +9644,9 @@ Review only.
         task.auto_execute = true;
         assert_eq!(
             autopilot_grounding_gate_reason(&task).as_deref(),
-            Some("Autopilot refused broad dispatch without grounding_context_id. Run mission_context_gather(persist=true) or create an exact shard with context_pack_path, accepted_shard_id, and write_scope.")
+            Some(
+                "Autopilot refused broad dispatch without grounding_context_id. Run mission_context_gather(persist=true) or create an exact shard with context_pack_path, accepted_shard_id, and write_scope."
+            )
         );
     }
 
@@ -9611,7 +9657,9 @@ Review only.
         let missing = TaskRuntimeContract::default();
         assert_eq!(
             autopilot_grounding_gate_reason_from_contract(&task, &missing).as_deref(),
-            Some("Autopilot refused broad dispatch without grounding_context_id in canonical task_contracts. Run mission_context_gather(persist=true) or create an exact shard with context_pack_path, accepted_shard_id, and write_scope.")
+            Some(
+                "Autopilot refused broad dispatch without grounding_context_id in canonical task_contracts. Run mission_context_gather(persist=true) or create an exact shard with context_pack_path, accepted_shard_id, and write_scope."
+            )
         );
         let grounded = TaskRuntimeContract {
             grounding_context_id: Some("ctx-123".to_string()),
@@ -9640,7 +9688,9 @@ Review only.
         task.auto_execute = true;
         assert_eq!(
             autopilot_grounding_gate_reason(&task).as_deref(),
-            Some("RUNTIME_METADATA_REQUIRED: Autopilot refused dispatch because BoardTask.runtime_metadata is missing; run the backfill tool or recreate the task through mission_task_delegate/mission_board_create.")
+            Some(
+                "RUNTIME_METADATA_REQUIRED: Autopilot refused dispatch because BoardTask.runtime_metadata is missing; run the backfill tool or recreate the task through mission_task_delegate/mission_board_create."
+            )
         );
     }
 
@@ -9966,6 +10016,10 @@ Review only.
         r#"{"source":"missiond-test","dispatch_metadata":{"task_class":"context-pack","write_policy":"read-only","write_scope":[],"output_contract":"return a structured artifact with Findings / Evidence / Recommendations / Verification"}}"#
     }
 
+    fn delegated_deploy_ops_with_output_contract() -> &'static str {
+        r#"{"source":"missiond-test","dispatch_metadata":{"task_class":"deploy-ops","write_policy":"read-only","write_scope":[],"output_contract":"return exactly one deploy-ops artifact type: preflight-report | release-evidence-review | closure-verdict-review | rollback-plan | postmortem"}}"#
+    }
+
     /// Durable provider final available → never block, regardless of summary.
     #[test]
     fn pty_only_close_blocker_passes_when_durable_final_present() {
@@ -10146,6 +10200,34 @@ Verification
         let report = "## Findings\n- Count reviewed: 7\n- Count selected for active memory: 0\n\nActive Memory Candidates\nNone\n\nSSOT-Workflow Backfill Candidates\nNone\n\nNeeds Human\nNone\n\nDiscard Rationale\nThe batch is procedural noise.\n\nVerification\nI only read the assigned batch files.";
         assert_eq!(
             output_contract_close_blocker(delegated_context_pack_with_output_contract(), report),
+            None
+        );
+    }
+
+    #[test]
+    fn deploy_ops_output_contract_rejects_generic_summary() {
+        assert_eq!(
+            output_contract_close_blocker(
+                delegated_deploy_ops_with_output_contract(),
+                "Investigated deploy center and recommended a rollback."
+            ),
+            Some("missing-deploy-ops-output-artifact")
+        );
+    }
+
+    #[test]
+    fn deploy_ops_output_contract_accepts_fixed_artifact_type() {
+        let report = "## closure-verdict-review\n- Verdict failed because runtime_digest_mismatch is present.\n\n## Evidence\n- deploy-center release evidence inspected.";
+        assert_eq!(
+            output_contract_close_blocker(delegated_deploy_ops_with_output_contract(), report),
+            None
+        );
+        assert_eq!(
+            pty_only_close_blocker(
+                delegated_deploy_ops_with_output_contract(),
+                /* has_durable_provider_final */ false,
+                report,
+            ),
             None
         );
     }
@@ -10586,7 +10668,12 @@ Verification
         ]).to_string();
 
         let messages = vec![
-            make_msg("worker_user", "task-xyz: review the code", None, "2026-01-01T00:00:00Z"),
+            make_msg(
+                "worker_user",
+                "task-xyz: review the code",
+                None,
+                "2026-01-01T00:00:00Z",
+            ),
             make_msg_with_metadata(
                 "assistant",
                 "All 4 tests pass. Let me also verify the V3 contract checks are clean.",
@@ -10638,7 +10725,12 @@ Verification
         ])
         .to_string();
         let messages = vec![
-            make_msg("worker_user", "task-xyz: review the code", None, "2026-01-01T00:00:00Z"),
+            make_msg(
+                "worker_user",
+                "task-xyz: review the code",
+                None,
+                "2026-01-01T00:00:00Z",
+            ),
             make_msg_with_metadata(
                 "assistant",
                 "## Findings\nLooks good.\n## Evidence\nFour tests pass.\n## Recommendations\nNow I will run one more check.\n## Verification\nPending.",

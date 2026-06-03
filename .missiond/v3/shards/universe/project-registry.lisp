@@ -558,5 +558,5 @@
       :operations ".missiond/operations/good-things-daily-operations-blueprint.lisp"
       :status incubating-project
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered independent app; 开门见喜 public evidence-backed good news feed with RSS/GDELT ingest, xjp-router claude-opus-4-6 generated titles and presentation copy, anonymous feedback, Vercel frontend at goodnews.xiaojinpro.top, and GCP VM Rust API/Postgres at goodnews-api.xiaojinpro.top"
+      :missiond-role "registered independent app; 开门见喜 public evidence-backed good news content feed with RSS/GDELT ingest, xjp-router claude-opus-4-6 generated titles and presentation cards, anonymous feedback, Vercel frontend at goodnews.xiaojinpro.top, privatecloud-built Rust API image deployed to GCP VM at goodnews-api.xiaojinpro.top, and xjp-pg-prod Postgres"
       :surface project-registry))

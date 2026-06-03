@@ -1434,7 +1434,9 @@ impl SharedMemoryService {
         let Some(row) = row else {
             return Err(control_error_details(
                 TASK_CONTRACT_REQUIRED_CODE,
-                format!("task {task_id} has no canonical task_contracts row; legacy BoardTask.description/runtime_metadata fallback is disabled"),
+                format!(
+                    "task {task_id} has no canonical task_contracts row; legacy BoardTask.description/runtime_metadata fallback is disabled"
+                ),
                 json!({
                     "task_id": task_id,
                     "required": "task_contracts",
@@ -1637,7 +1639,9 @@ impl SharedMemoryService {
         else {
             return Err(control_error_details(
                 COMPLETION_ARTIFACT_INVALID_CODE,
-                format!("task {task_id} completed write-scoped work without a pre worktree manifest for attempt {attempt_id}"),
+                format!(
+                    "task {task_id} completed write-scoped work without a pre worktree manifest for attempt {attempt_id}"
+                ),
                 json!({
                     "task_id": task_id,
                     "attempt_id": attempt_id,
@@ -1708,7 +1712,9 @@ impl SharedMemoryService {
         if actual_changed_paths.is_empty() {
             return Err(control_error_details(
                 COMPLETION_ARTIFACT_INVALID_CODE,
-                format!("task {task_id} reported changed paths but attempt diff found no actual post-run change"),
+                format!(
+                    "task {task_id} reported changed paths but attempt diff found no actual post-run change"
+                ),
                 json!({
                     "task_id": task_id,
                     "project_root": project_root,
@@ -2683,7 +2689,9 @@ impl SharedMemoryService {
             let Some(attempt_id) = attempt_id.as_deref() else {
                 return Err(control_error_details(
                     CAPABILITY_DENIED_CODE,
-                    format!("task_result_put for write-scoped task {task_id} requires current attempt_id"),
+                    format!(
+                        "task_result_put for write-scoped task {task_id} requires current attempt_id"
+                    ),
                     json!({
                         "task_id": task_id,
                         "required": "attempt_id",
@@ -3601,7 +3609,9 @@ impl SharedMemoryService {
             let artifact_hash = artifact_hash_owned.as_deref().ok_or_else(|| {
                 control_error_details(
                     EVIDENCE_REQUIRED_CODE,
-                    format!("worker_settle(done) for write-scoped task {task_id} requires artifact_hash"),
+                    format!(
+                        "worker_settle(done) for write-scoped task {task_id} requires artifact_hash"
+                    ),
                     json!({"task_id": task_id, "required": "artifact_hash"}),
                 )
             })?;
@@ -4255,7 +4265,9 @@ impl SharedMemoryService {
             if !artifact_matches {
                 return Err(control_error_details(
                     EVIDENCE_REQUIRED_CODE,
-                    format!("artifact_hash {artifact_hash} is not a completed task-result-artifact for task {task_id}"),
+                    format!(
+                        "artifact_hash {artifact_hash} is not a completed task-result-artifact for task {task_id}"
+                    ),
                     json!({
                         "task_id": task_id,
                         "artifact_hash": artifact_hash

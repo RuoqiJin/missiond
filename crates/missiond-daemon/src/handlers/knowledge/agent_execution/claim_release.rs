@@ -80,7 +80,7 @@ pub(super) async fn action_release(state: &AppState, args: &Value) -> Result<Too
                 .with_suggestion(
                     "reclaim the scope so MissionD can create a work_leases-backed claim",
                 ),
-            ))
+            ));
         }
     };
 
@@ -113,7 +113,7 @@ pub(super) async fn action_release(state: &AppState, args: &Value) -> Result<Too
             return Ok(control_error_tool_result(
                 err,
                 "provide a subject-bound claim grant or explicit system/operator bypass before releasing execution scope",
-            ))
+            ));
         }
     };
     if lease_release.get("ok").and_then(Value::as_bool) != Some(true) {

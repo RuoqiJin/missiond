@@ -19,14 +19,14 @@
      (step s3 :name attach-authority
        :logic "Attach deploy-center provenance URL, deploy_event_id, session_id, project_id, correlation_id, and service_id to the context pack.")
      (step s4 :name create-deploy-ops-task
-       :logic "For actionable events create a visible deploy-ops BoardTask with Dispatch metadata task_class=deploy-ops, pool_hint=claude-code-deploy-ops, engine_hint=claude-code, evidence refs, structured smoke/diagnostic checks, and suggested next checks; do not auto deploy, rollback, mutate DNS, or change secrets. If CI/build waiting is needed, require xjp_build_wait/xjp_deploy_watch or deploy-center event waits; raw gh api polling loops are forbidden.")
+       :logic "For actionable events create a visible deploy-ops BoardTask with Dispatch metadata task_class=deploy-ops, pool_hint=claude-code-deploy-ops, engine_hint=claude-code, evidence refs, fixed output artifacts [preflight-report release-evidence-review closure-verdict-review rollback-plan postmortem], structured smoke/diagnostic checks, and suggested next checks; do not auto deploy, rollback, mutate DNS, SSH, break-glass, or change secrets. If CI/build waiting is needed, require xjp_build_wait/xjp_deploy_watch or deploy-center event waits; raw gh api polling loops are forbidden.")
      (step s4b :name attach-break-glass-runbook
        :logic "If the event is agent_offline or repeated agent_update_failed, query mission_infra_query(action=skill_evidence|credential_refs) for the target_id/service_id, attach break-glass runbook refs such as PCEA ECS jump-host/OSS/deploy.sh evidence, redact credential-like values, and require explicit approval before any manual SSH/ECS/deploy action.")
      (step s5 :name wait-or-close
        :logic "If the event completes a waiting deploy task, close only after durable event evidence, deploy-center provenance, and smoke evidence agree; otherwise leave a diagnostic note. Deploy-center notify HTTP 200 and GitHub Actions success are progress evidence, not closure evidence."))
   :risk-gates
     ((gate g1 :id no-auto-rollback :rule "MissionD must not auto rollback, auto deploy, mutate DNS, or mutate secrets from an external deployment event.")
-     (gate g2 :rule "Mutating deployment actions require deploy-center policy or explicit Board/user approval.")
+     (gate g2 :rule "Mutating deployment actions require deploy-center policy or explicit Board/user approval and a persisted approval ref before any deploy-ops write_scope or production mutation is delegated.")
      (gate g3 :rule "deploy-center provenance remains the release authority; MissionD event logs are cache, visibility, and workflow triggers.")
      (gate g4 :rule "Secrets, Cloudflare credentials, and deploy tokens stay outside Lisp and are never inferred from event payloads.")
      (gate g5 :rule "Partial provenance is surfaced as follow-up work, not silently upgraded to full release confidence.")

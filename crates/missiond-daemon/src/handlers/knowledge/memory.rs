@@ -442,7 +442,11 @@ fn compiled_project_evidence_item(
         &format!(
             "Compiled project universe registers {project_id}. Intent: {}. Root: {}. Services: {}. Status: {}. Runtime layer: {}. Checks: {}.",
             project.intent.as_deref().unwrap_or("unspecified"),
-            project.root.as_deref().or(project.path.as_deref()).unwrap_or("unspecified"),
+            project
+                .root
+                .as_deref()
+                .or(project.path.as_deref())
+                .unwrap_or("unspecified"),
             service_ids.unwrap_or_else(|| "none".to_string()),
             project.status.as_deref().unwrap_or("unspecified"),
             project.runtime_layer.as_deref().unwrap_or("unspecified"),

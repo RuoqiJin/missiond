@@ -83,6 +83,28 @@ use crate::handlers::knowledge::workflow::{
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, schedule_memory_tasks};
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 
+const DEPLOY_OPS_OUTPUT_CONTRACT: &str = "return exactly one deploy-ops artifact type: preflight-report | release-evidence-review | closure-verdict-review | rollback-plan | postmortem";
+const DEPLOY_OPS_ALLOWED_OUTPUTS: &[&str] = &[
+    "preflight-report",
+    "release-evidence-review",
+    "closure-verdict-review",
+    "rollback-plan",
+    "postmortem",
+];
+const DEPLOY_OPS_MUTATIONS_REQUIRING_APPROVAL: &[&str] = &[
+    "production_deploy",
+    "rollback",
+    "dns_mutation",
+    "secret_mutation",
+    "ssh",
+    "break_glass",
+];
+const DEPLOY_OPS_APPROVAL_SOURCES: &[&str] = &[
+    "deploy-center-policy",
+    "explicit-board-approval",
+    "explicit-user-approval",
+];
+
 /// Start every Phase 7 v2 subscriber. Intended to be called once from
 /// `main.rs` after `BusServices::start`.
 pub(crate) fn start_v2_subscribers(
@@ -454,10 +476,13 @@ fn deployment_event_board_task_input(
     trace_id: Option<&str>,
     payload_json: &str,
 ) -> Option<CreateBoardTaskInput> {
-    if service_id != "deploy-center" || !deployment_event_is_actionable(event_kind) {
+    if service_id != "deploy-center" {
         return None;
     }
     let payload: Value = serde_json::from_str(payload_json).unwrap_or(Value::Null);
+    if !deployment_event_is_actionable(event_kind, &payload) {
+        return None;
+    }
     let project_id = external_event_field(&payload, "project_id")
         .or_else(|| external_event_field(&payload, "projectId"))
         .unwrap_or_else(|| "deploy-center".to_string());
@@ -471,9 +496,11 @@ fn deployment_event_board_task_input(
         .map(|id| id.to_string())
         .unwrap_or_else(|| event_id.to_string());
     let description = format!(
-        "Deployment EventBridge created this task from a durable deploy-center event.\n\nService: {service_id}\nEvent: {event_kind}\nEvent ID: {event_id}\nDeploy event row: {deploy_event_id}\nProject: {project_id}\nSubject: {subject}\nCorrelation: {}\nTrace: {}\n\nSummary:\n{summary}\n\n## Dispatch metadata\n- task_class: deploy-ops\n- pool_hint: claude-code-deploy-ops\n- engine_hint: claude-code\n- read_scope: deploy-center provenance, deploy_events, deploy_logs, MissionD EventBridge envelope, mission_infra_query skill_evidence, project deployment SSOT/workflow evidence\n- write_scope: \n- must_not_touch: production DNS, Cloudflare, secrets, direct production mutation\n- acceptance: deploy-center provenance queried | deploy event row inspected | project deployment facts and skill evidence checked before action | xjp_build_wait/xjp_deploy_watch or deploy-center event wait used for CI/build waiting | rollback/redeploy proposal uses deploy-center policy or explicit Board approval\n- output_contract: return Findings / Evidence / Recommendations / Verification with structured smoke/provenance evidence\n\nNext checks:\n1. Query MissionD project deployment facts and mission_infra_query(action=skill_evidence|reconcile) for the project before choosing scripts, hosts, agents, or login paths.\n2. Query deploy-center provenance for the project/service before using curl/git as fallback.\n3. Inspect deploy_events/deploy_logs around the event id and correlation id.\n4. If CI/build waiting is needed, use xjp_build_wait/xjp_deploy_watch or deploy-center event waits; do not run repeated gh api Actions polling loops.\n5. Propose rollback or redeploy only through deploy-center policy or explicit Board approval.\n6. Do not mutate DNS, Cloudflare, secrets, or production state from this task without approval.",
+        "Deployment EventBridge created this task from a durable deploy-center event.\n\nService: {service_id}\nEvent: {event_kind}\nEvent ID: {event_id}\nDeploy event row: {deploy_event_id}\nProject: {project_id}\nSubject: {subject}\nCorrelation: {}\nTrace: {}\n\nSummary:\n{summary}\n\n## Dispatch metadata\n- task_class: deploy-ops\n- pool_hint: claude-code-deploy-ops\n- engine_hint: claude-code\n- read_scope: deploy-center provenance, deploy_events, deploy_logs, MissionD EventBridge envelope, mission_infra_query skill_evidence, project deployment SSOT/workflow evidence\n- write_scope: \n- write_policy: read-only\n- must_not_touch: production DNS, Cloudflare, secrets, direct production mutation, SSH, break-glass\n- acceptance: deploy-center provenance queried | deploy event row inspected | project deployment facts and skill evidence checked before action | xjp_build_wait/xjp_deploy_watch or deploy-center event wait used for CI/build waiting | rollback/redeploy proposal uses deploy-center policy or explicit Board approval\n- output_contract: {DEPLOY_OPS_OUTPUT_CONTRACT}\n- allowed_output_artifacts: {}\n- mutation_requires_approval: {}\n\nNext checks:\n1. Query MissionD project deployment facts and mission_infra_query(action=skill_evidence|reconcile) for the project before choosing scripts, hosts, agents, or login paths.\n2. Query deploy-center provenance for the project/service before using curl/git as fallback.\n3. Inspect deploy_events/deploy_logs around the event id and correlation id.\n4. If CI/build waiting is needed, use xjp_build_wait/xjp_deploy_watch or deploy-center event waits; do not run repeated gh api Actions polling loops.\n5. Return exactly one deploy-ops artifact type: preflight-report, release-evidence-review, closure-verdict-review, rollback-plan, or postmortem.\n6. Propose rollback or redeploy only through deploy-center policy or explicit Board approval.\n7. Do not mutate DNS, Cloudflare, secrets, SSH, break-glass, or production state from this task without approval.",
         correlation_id.as_deref().unwrap_or(""),
         trace_id.unwrap_or(""),
+        DEPLOY_OPS_ALLOWED_OUTPUTS.join(", "),
+        DEPLOY_OPS_MUTATIONS_REQUIRING_APPROVAL.join(", "),
     );
     let runtime_metadata = serde_json::json!({
         "schema": "missiond.board-task-runtime-metadata.v1",
@@ -491,7 +518,17 @@ fn deployment_event_board_task_input(
             "subject": subject,
             "correlation_id": correlation_id,
             "trace_id": trace_id,
-            "output_contract": "return Findings / Evidence / Recommendations / Verification with structured smoke/provenance evidence",
+            "write_policy": "read-only",
+            "output_contract": DEPLOY_OPS_OUTPUT_CONTRACT,
+            "allowed_output_artifacts": DEPLOY_OPS_ALLOWED_OUTPUTS,
+            "mutation_requires_approval": DEPLOY_OPS_MUTATIONS_REQUIRING_APPROVAL,
+            "approval_sources": DEPLOY_OPS_APPROVAL_SOURCES,
+            "diagnostic_profiles": [
+                "deploy_provenance_snapshot",
+                "container_inventory",
+                "dependency_manifest_scan",
+                "supply_chain_ioc_scan"
+            ],
             "acceptance": "deploy-center provenance queried | deploy event row inspected | project deployment facts and skill evidence checked before action | xjp_build_wait/xjp_deploy_watch or deploy-center event wait used for CI/build waiting | rollback/redeploy proposal uses deploy-center policy or explicit Board approval"
         },
         "read_scope": [
@@ -507,7 +544,9 @@ fn deployment_event_board_task_input(
             "production DNS",
             "Cloudflare",
             "secrets",
-            "direct production mutation"
+            "direct production mutation",
+            "SSH",
+            "break-glass"
         ],
         "capability_grant_ids": [],
         "sandbox_profile": "read-only",
@@ -528,7 +567,10 @@ fn deployment_event_board_task_input(
     })
 }
 
-fn deployment_event_is_actionable(event_kind: &str) -> bool {
+fn deployment_event_is_actionable(event_kind: &str, payload: &Value) -> bool {
+    if event_kind == "closure_verdict" {
+        return closure_verdict_value(payload).is_some_and(|verdict| verdict != "success");
+    }
     matches!(
         event_kind,
         "build_failed"
@@ -537,6 +579,29 @@ fn deployment_event_is_actionable(event_kind: &str) -> bool {
             | "rollback_failed"
             | "agent_update_failed"
     )
+}
+
+fn closure_verdict_value(payload: &Value) -> Option<&str> {
+    payload
+        .get("closure_verdict")
+        .or_else(|| payload.get("verdict"))
+        .and_then(verdict_string)
+        .or_else(|| {
+            payload
+                .get("event_data")
+                .and_then(|event_data| {
+                    event_data
+                        .get("closure_verdict")
+                        .or_else(|| event_data.get("verdict"))
+                })
+                .and_then(verdict_string)
+        })
+}
+
+fn verdict_string(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("verdict").and_then(Value::as_str))
 }
 
 fn router_event_board_task_input(
@@ -1378,6 +1443,8 @@ mod tests {
             "- pool_hint: claude-code-deploy-ops",
             "- engine_hint: claude-code",
             "deploy-center provenance queried",
+            "allowed_output_artifacts: preflight-report, release-evidence-review, closure-verdict-review, rollback-plan, postmortem",
+            "mutation_requires_approval: production_deploy, rollback, dns_mutation, secret_mutation, ssh, break_glass",
         ] {
             assert!(
                 description.contains(expected),
@@ -1407,6 +1474,29 @@ mod tests {
         );
         assert_eq!(
             runtime_metadata
+                .get("dispatch_metadata")
+                .and_then(|v| v.get("write_policy"))
+                .and_then(Value::as_str),
+            Some("read-only")
+        );
+        assert!(
+            runtime_metadata
+                .get("dispatch_metadata")
+                .and_then(|v| v.get("allowed_output_artifacts"))
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.len() == 5),
+            "deploy-ops contract must carry fixed output artifacts"
+        );
+        assert!(
+            runtime_metadata
+                .get("dispatch_metadata")
+                .and_then(|v| v.get("mutation_requires_approval"))
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| item == "rollback")),
+            "deploy-ops contract must pin production mutations behind approval"
+        );
+        assert_eq!(
+            runtime_metadata
                 .get("sandbox_profile")
                 .and_then(Value::as_str),
             Some("read-only")
@@ -1417,6 +1507,97 @@ mod tests {
                 .and_then(Value::as_array)
                 .is_some_and(|items| !items.is_empty()),
             "EventBridge task contracts must carry typed read_scope"
+        );
+    }
+
+    #[test]
+    fn closure_verdict_success_does_not_create_deploy_ops_task() {
+        let payload = serde_json::json!({
+            "project_id": "payments",
+            "event_data": {
+                "verdict": {
+                    "verdict": "success",
+                    "blockers": [],
+                    "confidence": "high"
+                }
+            }
+        })
+        .to_string();
+        assert!(deployment_event_board_task_input(
+            "deploy-center",
+            "evt-closure-success",
+            "closure_verdict",
+            "deploy-center closure_verdict for payments",
+            Some("trace-1"),
+            &payload,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn ci_green_and_deploy_success_do_not_create_closure_task() {
+        let payload = serde_json::json!({
+            "project_id": "payments",
+            "subject": "github-actions",
+            "workflow_run": {
+                "conclusion": "success",
+                "head_sha": "abcdef123456"
+            }
+        })
+        .to_string();
+        for event_kind in [
+            "workflow_job_succeeded",
+            "workflow_run_succeeded",
+            "deploy_succeeded",
+        ] {
+            assert!(
+                deployment_event_board_task_input(
+                    "deploy-center",
+                    "evt-ci-green",
+                    event_kind,
+                    "CI/deploy runner reported success",
+                    Some("trace-1"),
+                    &payload,
+                )
+                .is_none(),
+                "{event_kind} must remain evidence-only; ClosureVerdict is the closure authority"
+            );
+        }
+    }
+
+    #[test]
+    fn closure_verdict_failure_creates_deploy_ops_task() {
+        let payload = serde_json::json!({
+            "project_id": "payments",
+            "subject": "release-123",
+            "event_data": {
+                "verdict": {
+                    "verdict": "failed",
+                    "blockers": ["runtime_digest_mismatch"],
+                    "confidence": "partial"
+                }
+            }
+        })
+        .to_string();
+        let input = deployment_event_board_task_input(
+            "deploy-center",
+            "evt-closure-failed",
+            "closure_verdict",
+            "deploy-center closure_verdict for payments",
+            Some("trace-1"),
+            &payload,
+        )
+        .expect("failed closure verdict should create deploy-ops task");
+        assert_eq!(input.context_intent.as_deref(), Some("deploy-ops"));
+        assert_eq!(input.project.as_deref(), Some("payments"));
+        assert_eq!(
+            input
+                .runtime_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("dispatch_metadata"))
+                .and_then(|metadata| metadata.get("event_kind"))
+                .and_then(Value::as_str),
+            Some("closure_verdict")
         );
     }
 

@@ -12,7 +12,7 @@
        (example :project long-image-service :aliases ["长图"] :shape product-fullstack)
        (example :project chat-translator :aliases ["chat翻译"] :shape product-fullstack)
        (example :project cuthub :aliases [CutHub] :shape product-frontend))
-    :rule "A new user-facing product or service-layer project MUST start from this template before code generation, deploy setup, or MissionD registration. The template standardizes repo placement, stack selection, auth, payment, database, secret-store, Vercel, login protection, local SSOT, and project-universe registration."
+    :rule "A new user-facing product or service-layer project MUST start from this template before code generation, deploy setup, or MissionD registration. The template standardizes repo placement, stack selection, auth, payment, database, secret-store, privatecloud Rust build lane, Vercel frontend deployment, login protection, local SSOT, and project-universe registration."
     :agent-triggers
       ["用户说要新起一个服务、产品、工具、站点、AI app、编辑器、导出器、聚合工具、ASR/长图/chat翻译类服务时"
        "project management taxonomy chooses management-domain=product-service-layer"
@@ -65,21 +65,32 @@
            (option xjp-postgres
              :use-when "Monorepo services deployed through deploy-center consume existing XJP runtime PostgreSQL.")
            (option no-db
-             :use-when "Frontend-only or stateless proxy service."))))
+             :use-when "Frontend-only or stateless proxy service.")))
+      (decision :id rust-build-lane
+        :default privatecloud-rust-build
+        :options
+          ((option privatecloud-rust-build
+             :builder privatecloud-10900kf
+             :authority deploy-center
+             :use-when "Default for every Rust product-service backend build, including services that run later on GCP VM, ECS, or another container host.")
+           (option nextjs-route-handler-no-rust-build
+             :use-when "Thin Next.js BFF with no Rust backend.")
+           (option explicit-vercel-rust-exception
+             :use-when "Only with written MissionD/deploy-center exception evidence; not the scaffold default."))))
 
     (repo-layout
       :schema "missiond.service-layer-repo-layout.v1"
       :independent
         ((path "frontend/" :owns [nextjs-app-router ui api-client auth-client proxy])
          (path "backend/" :owns [rust-axum-domain api auth db migrations jobs])
-         (path "backend/api/axum.rs" :owns [vercel-rust-function-entry])
+         (path "backend/api/axum.rs" :owns [explicit-exception-vercel-rust-function-entry] :optional true)
          (path "backend/src/lib.rs" :owns [build_app connect_db app_state])
          (path "backend/src/main.rs" :owns [local-dev-server])
          (path "backend/src/auth.rs" :owns [jwks-verification service-token-guard])
          (path "backend/src/db.rs" :owns [sqlx-pool queries])
          (path "backend/migrations/" :owns [idempotent-sql])
          (path ".missiond/" :owns [intent backend-blueprint frontend-blueprint operations-blueprint final-report checker behavior-universe])
-         (path "vercel.json" :owns [frontend-backend-route-map]))
+         (path "vercel.json" :owns [frontend-route-map frontend-env domain-aliases]))
       :monorepo-service
         ((path "services/<service-id>/" :owns [rust-service domain api migrations checkers])
          (path "apps/<service-id>-web/" :owns [nextjs-frontend] :optional true)
@@ -175,6 +186,24 @@
          :statement-cache-capacity 0)
       :env [DATABASE_URL])
 
+    (rust-build-lane-standard
+      :schema "missiond.service-layer-rust-build-lane.v1"
+      :default privatecloud-rust-build
+      :builder privatecloud-10900kf
+      :authority deploy-center
+      :rule "Rust product-service backend builds MUST run through deploy-center approved privatecloud/codebase build lane. Vercel and production runtime targets such as gcp-runtime/GCP VM are deploy targets, not Rust builders."
+      :pipeline
+        ((step s1 :id source-sync :logic "Sync the release commit through deploy-center/codebase source synchronization; GitHub Actions may be a control-plane trigger only.")
+         (step s2 :id privatecloud-build :logic "Run cargo build/docker build on the deploy-center approved privatecloud/codebase builder with cache, registry login, and secret refs supplied by the build lane.")
+         (step s3 :id publish-artifact :logic "Publish image or binary artifact with source commit, builder id, image digest/artifact sha256, and rollback reference.")
+         (step s4 :id runtime-deploy :logic "Runtime targets such as GCP VM pull/recreate from the built artifact and run health smoke; they must not compile or build images in production.")
+         (step s5 :id provenance :logic "Close deploy-center release provenance before MissionD maturity/deploy checks accept the rollout."))
+      :forbidden
+        ["Do not run cargo build, docker build, or docker compose up --build on a production GCP VM/runtime target for a product-service Rust backend."
+         "Do not use Vercel Rust Function as the default product-service Rust backend deployment lane."
+         "Do not use an operator laptop build as release evidence except audited break-glass bootstrap with follow-up lane repair."]
+      :evidence [source_commit builder_id workflow_run_id artifact_digest runtime_target smoke_result deploy_center_provenance])
+
     (secret-store-standard
       :schema "missiond.service-layer-secret-standard.v1"
       :authority secret-store
@@ -190,20 +219,21 @@
 
     (vercel-standard
       :schema "missiond.service-layer-vercel-standard.v1"
-      :default-target vercel-services
+      :default-target vercel-frontend
       :frontend-route "/"
       :backend-route-prefix "/api"
       :root-vercel-json
-        (:pattern "experimentalServices"
+        (:pattern "frontend-only default; experimentalServices is legacy or explicit exception only"
          :frontend-entrypoint "frontend"
          :frontend-framework nextjs
          :backend-entrypoint "backend/api/axum.rs"
          :backend-framework rust-axum
-         :rule "Vercel does not strip routePrefix; axum routes must include /api when routePrefix is /api.")
+         :rule "Vercel deploys the frontend by default. Rust backend deployment uses rust-build-lane-standard; backend/api/axum.rs and experimentalServices require explicit MissionD/deploy-center exception evidence. If an exception uses routePrefix /api, axum routes must include /api because Vercel does not strip routePrefix.")
       :deployment-rules
         ["Frontend production domains are declared in service-runtime-universe."
          "Vercel project, env vars, and domains must be recorded as deployment facts or risks."
          "Use deploy-center provenance when backend runs outside Vercel."
+         "GCP VM backend deploy stages pull already-built privatecloud artifacts; they do not run docker compose up --build or cargo build."
          "Run browser auth smoke for login-protected services before promoting maturity."]
       :env [NEXT_PUBLIC_APP_URL NEXT_PUBLIC_API_BASE_URL VERCEL_PROJECT_ID VERCEL_ORG_ID])
 
@@ -220,8 +250,34 @@
       :intent-must-declare [purpose aliases owner management-domain runtime-layer data-classes auth db deployment domains risks]
       :backend-blueprint-must-declare [domain-model api-routes auth-extractor db-boundary payment-boundary event-log worker-jobs runtime-projection]
       :frontend-blueprint-must-declare [routes public-routes protected-routes auth-callback api-client error-states loading-states regression-smokes]
-      :operations-blueprint-must-declare [vercel deploy-center secret-store supabase migrations oauth-redirect-allowlist auth-smoke health-smoke rollback-risks]
+      :operations-blueprint-must-declare [vercel deploy-center privatecloud-rust-build-lane secret-store supabase migrations oauth-redirect-allowlist auth-smoke health-smoke rollback-risks]
       :checker-must-run [package-manager-check backend-build frontend-build behavior-closure ssot-shape secret-value-redaction])
+
+    (deployment-closure-bundle-standard
+      :schema "missiond.service-layer-deployment-closure-bundle.v1"
+      :generator "node scripts/scaffold-product-deployment-closure.mjs --project-id <project-id> --name <name> --domain <frontend-domain> --api-domain <api-domain>"
+      :required-files
+        ["service.manifest.toml"
+         "deploy/deploy-center/project.json"
+         "deploy/deployment-closure/preflight.json"
+         "deploy/deployment-closure/runtime-target.json"
+         "deploy/deployment-closure/db-adoption-plan.json"
+         "deploy/deployment-closure/domain-plan.json"
+         "deploy/deployment-closure/rollback-plan.json"
+         "deploy/vercel/project.json"
+         "deploy/gcp-vm/compose.yaml"
+         "deploy/gcp-vm/.env.example"
+         "vercel.json"
+         ".missiond/operations/<project-id>-operations-blueprint.lisp"
+         ".missiond/check.sh"]
+      :manifest-must-declare [deploy_project healthcheck.deep env.required smoke deps]
+      :deploy-center-project-must-declare [manifest_required immutable_image_required runtime_digest_required smoke_required db_adoption_required release_lease_required artifact_lane target_side_build_allowed_false diagnostic_profiles]
+      :runtime-target-must-declare [runtime_target compose_files image_env required_running_digest target_side_build_allowed_false]
+      :preflight-must-declare [DeploymentIntent ReleaseCandidate ReleaseLease RuntimeObservation ReleaseEvidence ClosureVerdict fail_closed_if]
+      :db-adoption-must-declare [migration_directory production_migrations_not_startup state_required_for_closure]
+      :domain-plan-must-declare [xjp-domain-service authority no-direct-cloudflare frontend-domain api-domain support-mailbox]
+      :rollback-plan-must-declare [previous_image_digest compose_files approval_required post_rollback_evidence]
+      :rule "New product-service deploy scaffolds MUST materialize a deployment closure bundle before production deploy. Missing service.manifest.toml, deploy-center project slug, runtime target, Secret Store refs, DB adoption plan, domain plan, or rollback artifact is a fail-closed blocker. The generated compose runtime must consume an immutable image digest and must not contain a build section.")
 
     (missiond-registration-scaffold
       :schema "missiond.service-layer-registration-scaffold.v1"
@@ -250,10 +306,10 @@
          (step s6 :id configure-auth :logic "Create XJP Auth client via Admin API/MCP, set redirect URIs, implement frontend callback/proxy and backend JWKS verification.")
          (step s7 :id configure-support-mail :logic "Plan support mailbox through xjp-mail-service, route DNS requirements through xjp-domain-service, and record readiness checks in operations SSOT.")
          (step s8 :id configure-data-payment-secrets :logic "Provision DB/migrations, payment product/entitlements when needed, and secret-store refs/env names without writing secret values.")
-         (step s9 :id configure-deploy :logic "Configure Vercel/deploy-center, domains, health checks, and release provenance; production migrations remain explicit operations.")
+         (step s9 :id configure-deploy :logic "Generate the deployment-closure bundle with scripts/scaffold-product-deployment-closure.mjs, then configure Vercel frontend deployment plus deploy-center/privatecloud Rust build lane, runtime target deploy, domains, health checks, release lease, runtime evidence, rollback artifact, and ClosureVerdict; production migrations remain explicit operations.")
          (step s10 :id register-missiond-universe :logic "Add central project-registry, maturity, service-runtime, and checker entries with management-domain=product-service-layer.")
          (step s11 :id verify :logic "Run project checker, behavior closure, MissionD project universe, runtime compile, contract generation, auth redirect smoke, domain readiness, support mailbox readiness, and maturity gate. Report remaining gaps instead of promoting maturity silently."))
-      :egress [repo-scaffold project-local-ssot missiond-registration auth-client db-migrations secret-refs vercel-config verification-report])
+      :egress [repo-scaffold project-local-ssot missiond-registration auth-client db-migrations secret-refs vercel-config privatecloud-build-lane deployment-closure-bundle verification-report])
 
     :forbidden-shortcuts
       ["Do not classify product services as xiaojinpro-core-backend just because they call auth/router/payments."
@@ -263,5 +319,6 @@
        "Do not make payment UI before product_code, entitlement, and webhook verification are declared."
        "Do not create support mailboxes by directly mutating Google Admin or Cloudflare outside xjp-mail-service and xjp-domain-service, except through an audited break-glass path."
        "Do not run production migrations automatically during cold start."
+       "Do not build Rust product-service backends on production GCP VM/runtime targets; use deploy-center privatecloud/codebase build lane and deploy only built artifacts."
        "Do not mark a new service M5/M6 without local SSOT, behavior closure, deployment provenance, and regression evidence."]
     :checker "node scripts/check-project-ssot-universe.mjs --engine=ocaml")

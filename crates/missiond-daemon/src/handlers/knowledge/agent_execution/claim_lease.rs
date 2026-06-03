@@ -144,7 +144,7 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
             return Ok(control_error_tool_result(
                 err,
                 "provide a subject-bound claim grant or explicit system/operator bypass before claiming execution scope",
-            ))
+            ));
         }
     };
     if db_claim.get("ok").and_then(Value::as_bool) == Some(false) {
@@ -171,7 +171,7 @@ pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolR
                 )
                 .with_details(db_claim)
                 .with_suggestion("retry the claim through ControlPlaneKernel"),
-            ))
+            ));
         }
     };
 
