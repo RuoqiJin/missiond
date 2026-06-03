@@ -3982,13 +3982,22 @@ fn evidence_item_should_replace_duplicate(
     candidate: &EvidenceItemInput,
     existing: &EvidenceItemInput,
 ) -> bool {
-    evidence_item_is_current_context_projection(candidate)
-        && !evidence_item_is_current_context_projection(existing)
+    if !evidence_item_is_current_context_projection(candidate) {
+        return false;
+    }
+    if !evidence_item_is_current_context_projection(existing) {
+        return true;
+    }
+    evidence_item_source_profile(candidate) != evidence_item_source_profile(existing)
 }
 
 fn evidence_item_is_current_context_projection(item: &EvidenceItemInput) -> bool {
     item.metadata.get("projection").and_then(Value::as_str)
         == Some("mission_context_gather.compact_evidence")
+}
+
+fn evidence_item_source_profile(item: &EvidenceItemInput) -> Option<&str> {
+    item.metadata.get("source_profile").and_then(Value::as_str)
 }
 
 fn short_sha256(input: &str, hex_chars: usize) -> String {
@@ -6000,6 +6009,53 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "evi-current");
         assert_eq!(items[0].summary, "current context projection");
+    }
+
+    #[test]
+    fn evidence_items_dedupe_prefers_current_profile_projection() {
+        let stale_profile = missiond_core::types::EvidenceItemInput {
+            id: "evi-intent-default".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "deployment_closure_policy".to_string(),
+            source_id: Some("asr".to_string()),
+            source_ref: None,
+            project_id: Some("asr".to_string()),
+            task_id: None,
+            title: "Deployment closure policy".to_string(),
+            summary: "intent_default projection from read model".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: Some(2.0),
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({
+                "projection": "mission_context_gather.compact_evidence",
+                "source_profile": "intent_default"
+            }),
+        };
+        let mut deploy_ops = stale_profile.clone();
+        deploy_ops.id = "evi-deploy-ops".to_string();
+        deploy_ops.summary = "deploy_ops projection from current context gather".to_string();
+        deploy_ops.score = None;
+        deploy_ops.metadata = json!({
+            "projection": "mission_context_gather.compact_evidence",
+            "source_profile": "deploy_ops"
+        });
+
+        let mut items = vec![stale_profile, deploy_ops];
+        dedupe_evidence_items(&mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "evi-deploy-ops");
+        assert_eq!(
+            items[0]
+                .metadata
+                .get("source_profile")
+                .and_then(Value::as_str),
+            Some("deploy_ops")
+        );
     }
 
     #[test]
