@@ -71,8 +71,9 @@
         :options
           ((option privatecloud-rust-build
              :builder privatecloud-10900kf
+             :runner_agent_id privatecloud
              :authority deploy-center
-             :use-when "Default for every Rust product-service backend build, including services that run later on GCP VM, ECS, or another container host.")
+             :use-when "Default for every Rust product-service backend build, including services that run later on GCP VM, ECS, or another container host. deploy-center native_workflow must carry runner_agent_id=privatecloud when multiple runner instances share privatecloud-agent.")
            (option nextjs-route-handler-no-rust-build
              :use-when "Thin Next.js BFF with no Rust backend.")
            (option explicit-vercel-rust-exception
@@ -190,14 +191,17 @@
       :schema "missiond.service-layer-rust-build-lane.v1"
       :default privatecloud-rust-build
       :builder privatecloud-10900kf
+      :runner_agent_id privatecloud
       :authority deploy-center
-      :rule "Rust product-service backend builds MUST run through deploy-center approved privatecloud/codebase build lane. Vercel and production runtime targets such as gcp-runtime/GCP VM are deploy targets, not Rust builders."
+      :deployment-channel-summary [build-lane runtime-target frontend-hosting deployment-channel-plane]
+      :rule "Rust product-service backend builds MUST run through deploy-center approved privatecloud/codebase build lane with deploy_project_stage_configs.build.config.deploy_type=native_workflow and explicit native_workflow.runner_agent_id when an executor label has multiple live runner instances. Vercel and production runtime targets such as gcp-runtime/GCP VM are deploy targets, not Rust builders; docker_build plus source_strategy=xjp_native_codebase_runner is migration compatibility only."
       :pipeline
         ((step s1 :id source-sync :logic "Sync the release commit through deploy-center/codebase source synchronization; GitHub Actions may be a control-plane trigger only.")
-         (step s2 :id privatecloud-build :logic "Run cargo build/docker build on the deploy-center approved privatecloud/codebase builder with cache, registry login, and secret refs supplied by the build lane.")
-         (step s3 :id publish-artifact :logic "Publish image or binary artifact with source commit, builder id, image digest/artifact sha256, and rollback reference.")
-         (step s4 :id runtime-deploy :logic "Runtime targets such as GCP VM pull/recreate from the built artifact and run health smoke; they must not compile or build images in production.")
-         (step s5 :id provenance :logic "Close deploy-center release provenance before MissionD maturity/deploy checks accept the rollout."))
+         (step s2 :id native-stage-dispatch :logic "Normal deploy-center trigger dispatch creates xjp_workflow_runs/xjp_workflow_jobs for the build stage when deploy_type=native_workflow.")
+         (step s3 :id privatecloud-build :logic "Run cargo build/docker build on the deploy-center approved privatecloud/codebase builder with cache, registry login, and secret refs supplied by the build lane.")
+         (step s4 :id publish-artifact :logic "Publish image or binary artifact with source commit, builder id, image digest/artifact sha256, and rollback reference.")
+         (step s5 :id runtime-deploy :logic "Runtime targets such as GCP VM pull/recreate from the built artifact and run health smoke; they must not compile or build images in production.")
+         (step s6 :id provenance :logic "Close deploy-center release provenance before MissionD maturity/deploy checks accept the rollout."))
       :forbidden
         ["Do not run cargo build, docker build, or docker compose up --build on a production GCP VM/runtime target for a product-service Rust backend."
          "Do not use Vercel Rust Function as the default product-service Rust backend deployment lane."
@@ -232,6 +236,7 @@
       :deployment-rules
         ["Frontend production domains are declared in service-runtime-universe."
          "Vercel project, env vars, and domains must be recorded as deployment facts or risks."
+         "Project management must be able to show the frontend hosting channel next to the Rust build lane and runtime target channel."
          "Use deploy-center provenance when backend runs outside Vercel."
          "GCP VM backend deploy stages pull already-built privatecloud artifacts; they do not run docker compose up --build or cargo build."
          "Run browser auth smoke for login-protected services before promoting maturity."]
@@ -251,6 +256,8 @@
       :backend-blueprint-must-declare [domain-model api-routes auth-extractor db-boundary payment-boundary event-log worker-jobs runtime-projection]
       :frontend-blueprint-must-declare [routes public-routes protected-routes auth-callback api-client error-states loading-states regression-smokes]
       :operations-blueprint-must-declare [vercel deploy-center privatecloud-rust-build-lane secret-store supabase migrations oauth-redirect-allowlist auth-smoke health-smoke rollback-risks]
+      :service-runtime-must-project [buildLane deployment frontendDeployment deploymentChannels]
+      :deployment-channel-plane-must-declare [build native_workflow privatecloud-builder runtime-target frontend-hosting drift-status-source]
       :checker-must-run [package-manager-check backend-build frontend-build behavior-closure ssot-shape secret-value-redaction])
 
     (deployment-closure-bundle-standard
@@ -271,13 +278,13 @@
          ".missiond/operations/<project-id>-operations-blueprint.lisp"
          ".missiond/check.sh"]
       :manifest-must-declare [deploy_project healthcheck.deep env.required smoke deps]
-      :deploy-center-project-must-declare [manifest_required immutable_image_required runtime_digest_required smoke_required db_adoption_required release_lease_required artifact_lane target_side_build_allowed_false diagnostic_profiles]
+      :deploy-center-project-must-declare [manifest_required immutable_image_required runtime_digest_required smoke_required db_adoption_required release_lease_required artifact_lane target_side_build_allowed_false diagnostic_profiles build_stage_native_workflow]
       :runtime-target-must-declare [runtime_target compose_files image_env required_running_digest target_side_build_allowed_false]
       :preflight-must-declare [DeploymentIntent ReleaseCandidate ReleaseLease RuntimeObservation ReleaseEvidence ClosureVerdict fail_closed_if]
       :db-adoption-must-declare [migration_directory production_migrations_not_startup state_required_for_closure]
       :domain-plan-must-declare [xjp-domain-service authority no-direct-cloudflare frontend-domain api-domain support-mailbox]
       :rollback-plan-must-declare [previous_image_digest compose_files approval_required post_rollback_evidence]
-      :rule "New product-service deploy scaffolds MUST materialize a deployment closure bundle before production deploy. Missing service.manifest.toml, deploy-center project slug, runtime target, Secret Store refs, DB adoption plan, domain plan, or rollback artifact is a fail-closed blocker. The generated compose runtime must consume an immutable image digest and must not contain a build section.")
+      :rule "New product-service deploy scaffolds MUST materialize a deployment closure bundle before production deploy. Missing service.manifest.toml, deploy-center project slug, native_workflow build stage, runtime target, Secret Store refs, DB adoption plan, domain plan, or rollback artifact is a fail-closed blocker. The generated compose runtime must consume an immutable image digest and must not contain a build section.")
 
     (missiond-registration-scaffold
       :schema "missiond.service-layer-registration-scaffold.v1"

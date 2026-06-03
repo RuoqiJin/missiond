@@ -97,12 +97,22 @@ function checkFiles(root, files) {
     '(project-discovery-contract',
     ':entrypoint mission_project.resolve',
     ':resolver-statuses [resolved ambiguous unregistered_candidate not_found stale_runtime]',
-    ':compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url]',
+    ':compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url domain_management]',
+    '(domain-control-plane',
+    ':schema "missiond.domain-control-plane.v1"',
+    ':authority xjp-domain-service',
+    'files.xiaojins.com',
+    'compiled domain_management and xjp-domain-service',
+    'deployment-channels',
+    'deployment-channel-drift',
+    '(deployment-channel-plane',
     'mission_project get MUST accept id/project/project_id/projectId',
     'db_status',
     'compiled_status',
     'support_catalog',
     'deploy_center_slug',
+    'MissionD project management MUST show per-project deployment-channels',
+    'runtime deploy-center lane is never mistaken for a deploy-center build lane',
     'service_manifest_refs',
     'mission_context_gather MUST call mission_project resolve',
     ':intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]',
@@ -113,6 +123,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/project.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/registry.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/context.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/project/deployment_channels.rs',
     'crates/missiond-daemon/src/handlers/knowledge/context_gather.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/survey.rs',
@@ -461,6 +472,8 @@ function buildFixture() {
 	    :compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url]
 	    :rule "mission_project get MUST accept id/project/project_id/projectId and expose db_status plus compiled_status"
 	    :rule "compiled support_catalog MUST carry deploy_center_slug and service_manifest_refs"
+	    :rule "MissionD project management MUST show per-project deployment-channels"
+	    :rule "runtime deploy-center lane is never mistaken for a deploy-center build lane"
 	    :rule "mission_context_gather MUST call mission_project resolve")
 	  (registry-authority-map :authorities ((missiond) (deploy-center) (forge)))
 	  (project-blueprint-registry
@@ -477,6 +490,7 @@ function buildFixture() {
     (service-runtime-universe
       :schema "missiond.service-runtime-universe.v1"
       :rule "mission_project(action=universe)"
+      (deployment-channel-plane :schema "missiond.deployment-channel-plane.v1")
       (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center") :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN))
       (service :id deploy-center :deployment (:substrate deploy-center :dc_slug "xjp-deploy-center") :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent) :deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json") :source-evidence [services/deploy-center/service.manifest.toml])
       ;; mission_project(action=universe)
@@ -504,6 +518,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/project.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project/deployment_channels.rs"
              "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/universe.rs"
@@ -524,10 +539,12 @@ ProjectRegistryRuntimeConfig DEFAULT_PROJECT_UNIVERSE_MANIFEST DEFAULT_PROJECT_I
 parse_project_registry_policy project-registry-policy intent-path-candidates default-universe-manifest
 env_or_default_universe_manifest nearest_missiond_root UNIVERSE_MANIFEST
 CompiledServiceSupportCatalog support_catalog
+deployment_channels deployment_channel_diagnostics deployment_channel_summary frontend_deployment build_lane
 `);
 
   writeFixture(root, DEFAULT_FILES.facade, `
 mod context;
+mod deployment_channels;
 mod reconcile;
 mod registry;
 mod survey;
@@ -542,6 +559,8 @@ mod vault;
 "context" => context::handle_context(state, args).await
 "memories" => context::handle_memories(state, args).await
 "universe" => universe::handle_universe(args).await
+"deployment_channels" => deployment_channels::handle_deployment_channels(args).await
+"reconcile_deployment_channels" => deployment_channels::handle_reconcile_deployment_channels(args).await
 "reconcile" => reconcile::handle_reconcile(state, args).await
 "survey" => survey::handle_survey(state, args).await
 "vault_sync" => vault::handle_vault_sync(state, args).await
@@ -554,7 +573,7 @@ handle_list handle_get handle_set_active handle_sync handle_init handle_import_u
 project_id_arg enrich_project_get_value_with_compiled_identity enrich_project_get_value_with_compiled_identity_from_universe
 db_status compiled_status compiledProject serviceRuntime
 handle_resolve missiond.project-resolution.v1 unregistered_candidate compiled_service_runtime registration_proposal project_resolution_next_actions
-load_compiled_project_universe CompiledServiceRuntimeEntry supportCatalog compiled_project_to_config
+load_compiled_project_universe CompiledServiceRuntimeEntry supportCatalog deployment_channels deployment_channel_diagnostics deployment_channel_summary frontend_deployment build_lane compiled_project_to_config
 "source": "compiled-project-universe"
 "schema": "missiond.project-import.compiled-universe.v1"
 "manifestFallback": false

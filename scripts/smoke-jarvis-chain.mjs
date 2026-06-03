@@ -61,11 +61,23 @@ async function main() {
   }
 
   if (monitor) {
-    if (monitor.schema !== 'missiond.jarvis-chain-monitor.v1') {
+    const acceptedSchemas = new Set([
+      'missiond.jarvis-chain-monitor.v1',
+      'missiond.jarvis-chain-monitor.v2',
+    ]);
+    if (!acceptedSchemas.has(monitor.schema)) {
       diagnostics.push({
         code: 'JARVIS_MONITOR_SCHEMA_DRIFT',
         message: `Unexpected monitor schema: ${monitor.schema || '<missing>'}`,
       });
+    }
+    if (monitor.schema === 'missiond.jarvis-chain-monitor.v2') {
+      if (!monitor.route_graph || !monitor.runtime_topology) {
+        diagnostics.push({
+          code: 'JARVIS_MONITOR_TOPOLOGY_MISSING',
+          message: 'Jarvis monitor v2 must include route_graph and runtime_topology.',
+        });
+      }
     }
     const overall = String(monitor.overall || 'unknown');
     if (!['ready', 'busy'].includes(overall) || (overall === 'busy' && !allowBusy)) {
@@ -113,7 +125,16 @@ async function main() {
           url: monitorUrl,
           http_status: monitorRaw.status,
           schema: monitor.schema,
+          legacy_schema: monitor.legacy_schema,
           overall: monitor.overall,
+          route_graph: monitor.route_graph
+            ? {
+                edge_node: monitor.route_graph.edge_node,
+                origin_node: monitor.route_graph.origin_node,
+                tunnel_client_id: monitor.route_graph.tunnel_client_id,
+                route_generation: monitor.route_graph.route_generation,
+              }
+            : null,
           checks: (monitor.checks || []).map((check) => ({
             id: check.id,
             ok: check.ok,

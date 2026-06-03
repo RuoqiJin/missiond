@@ -57,9 +57,9 @@ use missiond_core::{
     GeminiCliWatcherOptions,
 };
 use missiond_core::{
-    InfraConfig, JarvisIntentAuthorConfig, JarvisPlanAuthorConfig, LearnedPermissions,
-    MissionControl, MissionControlOptions, PTYManager, PTYWebSocketServer, PermissionPolicy,
-    SkillIndex, WSServerOptions,
+    InfraConfig, JarvisIntentAuthorConfig, JarvisKeyJudgmentAuthorConfig, JarvisPlanAuthorConfig,
+    LearnedPermissions, MissionControl, MissionControlOptions, PTYManager, PTYWebSocketServer,
+    PermissionPolicy, SkillIndex, WSServerOptions,
 };
 use missiond_mcp::tools::{all_tools, ToolContent, ToolResult};
 use serde_json::Value;
@@ -229,9 +229,11 @@ fn build_jarvis_grounding_worker_prompt(
 执行要求：\n\
 1. 优先通过已挂载的 MissionD MCP / XJP MCP 查询，不要靠记忆猜测。\n\
 2. 如果 context_pack_file 可读，先读取它作为机器生成 seed；如不足，再用 MCP 补齐项目、Board、会话、时间线、共享 artifact、SSOT/运行时证据等上下游信息。\n\
-3. 只写 Markdown 报告到 target_report_file，不要创建 BoardTask，不要执行实现，不要修改源码。\n\
-4. Markdown 报告必须包含：摘要、已确认意图、相关项目/模块/文件/服务、上游输入、下游影响、相关 Board/会话/artifact、权限边界、证据来源、未知项、给 plan.lisp 作者的建议。\n\
-5. 完成后最终回复只写：GROUNDING_REPORT_WRITTEN {file}\n\n\
+    3. 一旦证据足以回答用户问题，不要继续泛化查询；立即写 target_report_file。\n\
+    4. 必须创建并写入 target_report_file；不能只在对话里总结，不能写到其他文件。\n\
+    5. 只写 Markdown 报告到 target_report_file，不要创建 BoardTask，不要执行实现，不要修改源码。\n\
+    6. Markdown 报告必须包含：摘要、已确认意图、相关项目/模块/文件/服务、上游输入、下游影响、相关 Board/会话/artifact、权限边界、证据来源、未知项、给 plan.lisp 作者的建议。\n\
+    7. 完成后最终回复只写：GROUNDING_REPORT_WRITTEN {file}\n\n\
 输入 JSON：\n{payload}\n",
         file = target_report_file.display(),
         payload = serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string())
@@ -376,6 +378,44 @@ fn jarvis_plan_author_config(
     Ok(projected)
 }
 
+fn jarvis_key_judgment_author_config(
+    config: &context::v3_blueprint_runtime::WorkstationRuntimeConfig,
+) -> Result<JarvisKeyJudgmentAuthorConfig> {
+    let mut projected = JarvisKeyJudgmentAuthorConfig::default();
+    if let Some(worker) = config
+        .workstation_pool()
+        .iter()
+        .find(|worker| worker.id == "codex-key-judgment-author")
+    {
+        projected.slot_id = worker.slot_id.clone();
+        projected.model = workstation_pool_model(worker, config)?.unwrap_or(projected.model);
+        projected.reasoning_effort = worker
+            .reasoning_effort
+            .clone()
+            .unwrap_or(projected.reasoning_effort);
+        projected.search_enabled = worker.search_enabled;
+        projected.sandbox = worker.sandbox.clone().unwrap_or(projected.sandbox);
+        projected.approval_policy = worker
+            .approval_policy
+            .clone()
+            .unwrap_or(projected.approval_policy);
+        projected.timeout_secs = worker.timeout_secs;
+    }
+    if let Ok(slot_id) = std::env::var("MISSIOND_JARVIS_KEY_JUDGMENT_AUTHOR_SLOT_ID") {
+        let slot_id = slot_id.trim();
+        if !slot_id.is_empty() {
+            projected.slot_id = slot_id.to_string();
+        }
+    }
+    if let Ok(model) = std::env::var("MISSIOND_JARVIS_KEY_JUDGMENT_AUTHOR_MODEL") {
+        let model = model.trim();
+        if !model.is_empty() {
+            projected.model = model.to_string();
+        }
+    }
+    Ok(projected)
+}
+
 fn should_register_workstation_pool_task(
     worker: &context::v3_blueprint_runtime::WorkstationPoolRuntimeConfig,
     engine: missiond_core::types::CliEngine,
@@ -454,6 +494,7 @@ fn workstation_pool_slot_config(
     project_root: &Path,
 ) -> Result<missiond_core::types::SlotConfig> {
     let engine = parse_startup_slot_engine(&worker.engine)?;
+    let is_claude_code = matches!(engine, missiond_core::types::CliEngine::ClaudeCode);
     let mcp_config = if matches!(engine, missiond_core::types::CliEngine::ClaudeCode) {
         config
             .slot_template("coder")
@@ -467,6 +508,7 @@ fn workstation_pool_slot_config(
         vec![]
     };
     let root = project_root.to_string_lossy().to_string();
+    let (skip_permissions, env) = workstation_pool_provider_launch_policy(worker, is_claude_code);
     Ok(missiond_core::types::SlotConfig {
         id: worker.slot_id.clone(),
         role: worker.role.clone(),
@@ -481,7 +523,7 @@ fn workstation_pool_slot_config(
         mcp_config,
         lifecycle: Some(missiond_core::types::Lifecycle::Persistent),
         auto_start: None,
-        dangerously_skip_permissions: Some(false),
+        dangerously_skip_permissions: Some(skip_permissions),
         model: workstation_pool_model(worker, config)?,
         model_profile: worker.model_profile.clone(),
         reasoning_effort: worker.reasoning_effort.clone(),
@@ -491,9 +533,30 @@ fn workstation_pool_slot_config(
         tool_policy_path: worker.tool_policy_path.clone(),
         traits,
         category: Some("worker".to_string()),
-        env: None,
+        env: if env.is_empty() { None } else { Some(env) },
         initial_prompt: None,
     })
+}
+
+fn workstation_pool_provider_launch_policy(
+    worker: &context::v3_blueprint_runtime::WorkstationPoolRuntimeConfig,
+    is_claude_code: bool,
+) -> (bool, HashMap<String, String>) {
+    let skip_permissions = is_claude_code && worker.skip_permissions;
+    let mut env = HashMap::new();
+    if skip_permissions {
+        env.insert(
+            "MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS".to_string(),
+            "true".to_string(),
+        );
+    }
+    if is_claude_code && !worker.provider_authorization_allowlist.is_empty() {
+        env.insert(
+            "MISSIOND_PROVIDER_BOX_CLAUDE_CODE_MCP_AUTH_ALLOWLIST".to_string(),
+            worker.provider_authorization_allowlist.join(","),
+        );
+    }
+    (skip_permissions, env)
 }
 
 async fn register_and_init_runtime_slot(
@@ -865,6 +928,7 @@ async fn main() -> Result<()> {
                 .to_string()
         });
     let jarvis_intent_author = jarvis_intent_author_config(&workstation_config_for_ws)?;
+    let jarvis_key_judgment_author = jarvis_key_judgment_author_config(&workstation_config_for_ws)?;
     let jarvis_plan_author = jarvis_plan_author_config(&workstation_config_for_ws)?;
     let mut ws_server = PTYWebSocketServer::new(WSServerOptions {
         port: ws_port,
@@ -882,6 +946,7 @@ async fn main() -> Result<()> {
         tool_count: all_tools().len(),
         default_chat_slot,
         jarvis_intent_author,
+        jarvis_key_judgment_author,
         jarvis_plan_author,
     });
     if let Err(e) = ws_server.start().await {
@@ -1612,6 +1677,7 @@ async fn main() -> Result<()> {
                     tool_policy_path: None,
                     timeout: std::time::Duration::from_secs(startup_slot.timeout_secs),
                     cwd: missiond_project_root.clone(),
+                    env: HashMap::new(),
                     skip_permissions: startup_slot.skip_permissions,
                 })
                 .await?;
@@ -1625,6 +1691,9 @@ async fn main() -> Result<()> {
             let engine = parse_startup_slot_engine(&worker.engine)
                 .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
             let model = workstation_pool_model(worker, &workstation_config)?;
+            let is_claude_code = matches!(engine, missiond_core::types::CliEngine::ClaudeCode);
+            let (skip_permissions, env) =
+                workstation_pool_provider_launch_policy(worker, is_claude_code);
             if should_register_workstation_pool_task(worker, engine) {
                 state
                     .slot_manager
@@ -1642,7 +1711,8 @@ async fn main() -> Result<()> {
                         tool_policy_path: worker.tool_policy_path.clone().map(Into::into),
                         timeout: std::time::Duration::from_secs(worker.timeout_secs),
                         cwd: missiond_project_root.clone(),
-                        skip_permissions: false,
+                        env,
+                        skip_permissions,
                     })
                     .await?;
             }

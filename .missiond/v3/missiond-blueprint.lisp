@@ -171,7 +171,8 @@
                  ".missiond/v3/runtime/self-evolution/*.proposal.lisp"
                  ".missiond/v3/runtime/master-control/context-packs/*.lisp"
                  ".missiond/v3/runtime/compiled/*.json"
-                 "$MISSIOND_RUNTIME_DIR/compiled/*.json"]
+                 "$MISSIOND_RUNTIME_DIR/compiled/*.json"
+                 "$MISSIOND_RUNTIME_DIR/projects/<project-id>/compiled/*.json"]
       :rule "Cold runtime artifacts are diagnostic/query targets, not authoring SSOT, and are indexed in Postgres runtime_artifacts. Production deploy writes generated projections under MISSIOND_RUNTIME_DIR, defaulting to $HOME/.missiond/runtime/<repo-id>; repo .missiond/v3/runtime/** is dev compatibility only.")
     :invariants
       ["Tools that answer 'what does the SSOT say?' MUST search active-authoring first and exclude cold-runtime by default."
@@ -193,6 +194,7 @@
                    "compiled-semantic-ir.json"
                    "compiled-agent-slices.json"
                    "compiled-project-agent-navigation.json"
+                   "compiled-behavior-navigation.json"
                    "compiled-contract-abi.json"
                    "compiled-project-universe.json"
                    "compiled-workflows.json"
@@ -206,12 +208,14 @@
     :contract-commands [emit-contract-abi emit-plan-contract check-plan-contract]
     :envelope-fields [:schema_version :source_hash :generated_at :diagnostics :payload]
     :payload-fields [:source_units :source_domains :surfaces :functions :artifact_contracts :runtime_policies :checker_registry :plan_contract
+                     :behavior_navigation
                      :production_consumer_boundaries :request_state_projections :scanner_policies :semantic_gates]
 
     :authority-boundary
       ["missiond-lispc is the only production component allowed to assign Lisp semantics."
        "Generated V3 contract ABI source is tracked in Rust and JS/TS; ignored compiled JSON remains a runtime projection."
        "Rust runtime hot paths consume compiled JSON/runtime config; raw Lisp source fallback is forbidden for production consumers."
+       "Behavior navigation is a compiled runtime projection; external project artifacts live under $MISSIOND_RUNTIME_DIR/projects/<project-id>/compiled and are never the authoring SSOT."
        "Plan execution hints and DAG nodes are read from missiond-lispc emit-plan-contract missiond.plan-contract.v2 projection, not ad-hoc Rust keyword scanners."
        "compile/materialization persist plan.contract_json using missiond.plan-contract.v2 shape"
        "plan_dag/parser/validation.rs owns typed plan-contract validation/topological ordering"
@@ -452,6 +456,8 @@
       :command "bash" :argv ["scripts/rustfmt-missiond.sh" "--check"] :timeout-ms 120000)
     (live-check project-ssot-universe
       :argv ["scripts/check-project-ssot-universe.mjs" "--json"] :json true :timeout-ms 60000)
+    (live-check deployment-channel-coverage
+      :argv ["scripts/check-deployment-channel-coverage.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check v3-behavior-closure
       :argv ["scripts/check-v3-behavior-closure.mjs" "--json"] :json true :timeout-ms 60000)
     (live-check infrastructure-universe
@@ -546,7 +552,7 @@
                 "coverageState"])
     (runtime-file behavior-navigation-artifact
       :file ".missiond/v3/runtime/compiled/compiled-behavior-navigation.json"
-      :needles ["missiond.compiled-behavior-navigation.v1" "anchors"])
+      :needles ["missiond.compiled-behavior-navigation.v2" "semantic_id" "source_units" "anchors"])
     (runtime-file artifact-commit-outbox-helper
       :file "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/commit.rs"
       :needles ["ArtifactCommitEnvelope" "operation_key" "artifact_commit_outbox_mark_complete"
@@ -606,6 +612,9 @@
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-memory-kb-isomorphism.mjs"
              "node scripts/check-v3-project-registry-isomorphism.mjs"
+             "node scripts/check-deployment-channel-coverage.mjs"
+             "node scripts/check-jarvis-runtime-topology.mjs"
+             "node scripts/check-runtime-evidence-redaction.mjs"
              "node scripts/check-v3-skill-runtime-isomorphism.mjs"
              "node scripts/check-v3-cascade-governance-isomorphism.mjs"
              "node scripts/check-v3-incident-governance-isomorphism.mjs"

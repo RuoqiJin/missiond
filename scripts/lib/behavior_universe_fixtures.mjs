@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { validateBehaviorClosure } from './behavior_universe.mjs';
+import { generateBehaviorNavigation } from '../propose-behavior-navigation.mjs';
 
 export function runBehaviorUniverseFixtures() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-behavior-universe-'));
@@ -19,6 +20,11 @@ export function runBehaviorUniverseFixtures() {
     cases.push(caseRepoLocalDbWriteBroadClaimPasses(root));
     cases.push(caseAnchorFileMissing(root));
     cases.push(caseAnchorSymbolMismatch(root));
+    cases.push(caseGeneratedNavigationDedupesSymbolRisk(root));
+    cases.push(caseSemanticNavigationSurvivesLineDrift(root));
+    cases.push(caseCompiledNavigationSatisfiesWildcardAnchor(root));
+    cases.push(caseMissingCompiledNavigationIsProjectionDiagnostic(root));
+    cases.push(caseScannerProfileDoesNotInventCoverage(root));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -130,13 +136,14 @@ fn main() {
 `);
   const result = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
   return assertCase({
-    name: 'broad wildcard external claim without anchor fails',
+    name: 'broad wildcard external claim without anchor is projection diagnostic',
     file: dir,
-    ok: !result.ok
-      && hasCode(result, 'NAVIGATION_CRITICAL_WILDCARD_ONLY')
-      && hasCode(result, 'NAVIGATION_ANCHOR_MISSING')
-      && hasCode(result, 'NAVIGATION_EFFECT_CONTRACT_MISSING'),
-    diagnostics: result.diagnostics,
+    ok: result.ok
+      && !result.projection_ok
+      && hasProjectionCode(result, 'NAVIGATION_CRITICAL_WILDCARD_ONLY')
+      && hasProjectionCode(result, 'NAVIGATION_ANCHOR_MISSING')
+      && hasProjectionCode(result, 'NAVIGATION_EFFECT_CONTRACT_MISSING'),
+    diagnostics: result.projectionDiagnostics,
   });
 }
 
@@ -217,12 +224,13 @@ function caseRouteWildcardWithoutAnchorFails(root) {
   write(dir, 'app/api/ping/route.ts', 'export function GET() { return Response.json({ ok: true }); }\n');
   const result = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
   return assertCase({
-    name: 'route wildcard without navigation anchor fails',
+    name: 'route wildcard without navigation anchor is projection diagnostic',
     file: dir,
-    ok: !result.ok
-      && hasCode(result, 'NAVIGATION_CRITICAL_WILDCARD_ONLY')
-      && hasCode(result, 'NAVIGATION_ANCHOR_MISSING'),
-    diagnostics: result.diagnostics,
+    ok: result.ok
+      && !result.projection_ok
+      && hasProjectionCode(result, 'NAVIGATION_CRITICAL_WILDCARD_ONLY')
+      && hasProjectionCode(result, 'NAVIGATION_ANCHOR_MISSING'),
+    diagnostics: result.projectionDiagnostics,
   });
 }
 
@@ -260,10 +268,10 @@ function caseAnchorFileMissing(root) {
   write(dir, 'app/api/ping/route.ts', 'export function GET() { return Response.json({ ok: true }); }\n');
   const result = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
   return assertCase({
-    name: 'anchor file missing fails',
+    name: 'anchor file missing is projection diagnostic',
     file: dir,
-    ok: !result.ok && hasCode(result, 'NAVIGATION_ANCHOR_FILE_MISSING'),
-    diagnostics: result.diagnostics,
+    ok: result.ok && !result.projection_ok && hasProjectionCode(result, 'NAVIGATION_ANCHOR_FILE_MISSING'),
+    diagnostics: result.projectionDiagnostics,
   });
 }
 
@@ -284,12 +292,115 @@ function caseAnchorSymbolMismatch(root) {
   write(dir, 'app/api/ping/route.ts', 'export function GET() { return Response.json({ ok: true }); }\n');
   const result = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
   return assertCase({
-    name: 'anchor symbol mismatch fails',
+    name: 'anchor symbol mismatch is projection diagnostic',
     file: dir,
-    ok: !result.ok
-      && hasCode(result, 'NAVIGATION_ANCHOR_STALE')
-      && hasCode(result, 'NAVIGATION_ANCHOR_MISSING'),
-    diagnostics: result.diagnostics,
+    ok: result.ok
+      && !result.projection_ok
+      && hasProjectionCode(result, 'NAVIGATION_ANCHOR_STALE')
+      && hasProjectionCode(result, 'NAVIGATION_ANCHOR_MISSING'),
+    diagnostics: result.projectionDiagnostics,
+  });
+}
+
+function caseGeneratedNavigationDedupesSymbolRisk(root) {
+  const dir = makeCase(root, 'generated-navigation-dedupe');
+  write(dir, 'tools/run.mjs', `function run() {
+  spawnSync('echo', ['one']);
+  spawnSync('echo', ['two']);
+}
+`);
+  const result = generateBehaviorNavigation({
+    project: 'fixture',
+    root: dir,
+    repo: dir,
+    target: path.join(dir, '.missiond/runtime/compiled/compiled-behavior-navigation.json'),
+  });
+  return assertCase({
+    name: 'generated navigation dedupes repeated symbol risk',
+    file: dir,
+    ok: result.risk_count === 2
+      && result.anchor_count === 1
+      && result.artifact.schema_version === 'missiond.compiled-behavior-navigation.v2'
+      && result.artifact.anchors[0]?.semantic_id === 'subprocess:tools/run.mjs#run:subprocess',
+    diagnostics: result.artifact.diagnostics,
+  });
+}
+
+function caseSemanticNavigationSurvivesLineDrift(root) {
+  const dir = makeCase(root, 'semantic-line-drift');
+  writeRouteUniverse(dir);
+  write(dir, 'app/api/ping/route.ts', 'export function GET() { return Response.json({ ok: true }); }\n');
+  writeCompiledNavigation(dir);
+  const before = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
+  write(dir, 'app/api/ping/route.ts', '// inserted line\nexport function GET() { return Response.json({ ok: true }); }\n');
+  const after = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
+  return assertCase({
+    name: 'semantic navigation survives route line drift',
+    file: dir,
+    ok: before.ok
+      && before.projection_ok
+      && after.ok
+      && after.projection_ok,
+    diagnostics: [...before.projectionDiagnostics, ...after.projectionDiagnostics],
+  });
+}
+
+function caseCompiledNavigationSatisfiesWildcardAnchor(root) {
+  const dir = makeCase(root, 'compiled-navigation-satisfies-wildcard');
+  writeRouteUniverse(dir);
+  write(dir, 'app/api/ping/route.ts', 'export function GET() { return Response.json({ ok: true }); }\n');
+  const missing = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
+  writeCompiledNavigation(dir);
+  const compiled = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
+  return assertCase({
+    name: 'compiled navigation satisfies wildcard route anchor requirement',
+    file: dir,
+    ok: missing.ok
+      && !missing.projection_ok
+      && hasProjectionCode(missing, 'BEHAVIOR_NAVIGATION_ARTIFACT_MISSING')
+      && compiled.ok
+      && compiled.projection_ok,
+    diagnostics: [...missing.projectionDiagnostics, ...compiled.projectionDiagnostics],
+  });
+}
+
+function caseMissingCompiledNavigationIsProjectionDiagnostic(root) {
+  const dir = makeCase(root, 'missing-compiled-navigation');
+  writeRouteUniverse(dir);
+  write(dir, 'app/api/ping/route.ts', 'export function GET() { return Response.json({ ok: true }); }\n');
+  const result = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
+  return assertCase({
+    name: 'missing compiled navigation is projection diagnostic',
+    file: dir,
+    ok: result.ok
+      && !result.projection_ok
+      && hasProjectionCode(result, 'BEHAVIOR_NAVIGATION_ARTIFACT_MISSING'),
+    diagnostics: result.projectionDiagnostics,
+  });
+}
+
+function caseScannerProfileDoesNotInventCoverage(root) {
+  const dir = makeCase(root, 'scanner-profile-no-fake-coverage');
+  write(dir, '.missiond/behavior-universe.lisp', `(behavior-universe fixture
+  :schema "missiond.behavior-universe.v1"
+  :project fixture
+  (scanner-profile
+    :id fixture-go
+    :language go
+    :mode manual-contract
+    :coverage ["route"]
+    :manual-contracts ["go routes must be declared manually"]
+    :rule "Scanner profile records coverage policy but does not synthesize observed behavior."))
+`);
+  write(dir, 'cmd/server/main.go', 'package main\nfunc main() {}\n');
+  const result = validateBehaviorClosure(dir, { projectId: 'fixture', navigationLevel: 'risk' });
+  return assertCase({
+    name: 'scanner-profile does not invent observed coverage',
+    file: dir,
+    ok: result.ok
+      && result.observed.length === 0
+      && result.declared.scannerProfiles.length === 1,
+    diagnostics: [...result.diagnostics, ...result.projectionDiagnostics],
   });
 }
 
@@ -323,6 +434,26 @@ function writeDeclaredExternalUniverse(root) {
 `);
 }
 
+function writeRouteUniverse(root) {
+  write(root, '.missiond/behavior-universe.lisp', `(behavior-universe fixture
+  :schema "missiond.behavior-universe.v1"
+  :project fixture
+  (behavior :id fixture-routes :kind route :owner test :observed ["route:*"] :code ["app/api/**"] :effects []))
+`);
+}
+
+function writeCompiledNavigation(root) {
+  const target = path.join(root, '.missiond/runtime/compiled/compiled-behavior-navigation.json');
+  const result = generateBehaviorNavigation({
+    project: 'fixture',
+    root,
+    repo: root,
+    target,
+  });
+  write(root, '.missiond/runtime/compiled/compiled-behavior-navigation.json', `${JSON.stringify(result.artifact, null, 2)}\n`);
+  return result;
+}
+
 function makeCase(root, name) {
   const dir = path.join(root, name);
   fs.mkdirSync(dir, { recursive: true });
@@ -337,6 +468,10 @@ function write(root, rel, content) {
 
 function hasCode(result, code) {
   return result.diagnostics.some((d) => d.code === code);
+}
+
+function hasProjectionCode(result, code) {
+  return result.projectionDiagnostics.some((d) => d.code === code);
 }
 
 function assertCase({ name, file, ok, diagnostics }) {

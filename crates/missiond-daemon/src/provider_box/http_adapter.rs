@@ -2363,6 +2363,11 @@ fn provider_slot_capabilities_value(
             "usage_refresh": driver.usage_probe,
             "mcp_status": driver.mcp_status,
             "mcp_reconnect": driver.mcp_reconnect,
+            "prompt_authorization": {
+                "supported": driver.prompt_authorization,
+                "policy": "allowlist",
+                "verification": "observe-act-observe selected option before Enter"
+            },
             "dangerously_skip_permissions": {
                 "supported": true,
                 "launch_command": "claude --dangerously-skip-permissions",
@@ -5050,6 +5055,7 @@ mod tests {
                 status: true,
                 mcp_status: true,
                 mcp_reconnect: true,
+                prompt_authorization: true,
             },
         );
 
@@ -5066,6 +5072,10 @@ mod tests {
         assert_eq!(caps["slot_controls"]["status"], true);
         assert_eq!(caps["slot_controls"]["mcp_status"], true);
         assert_eq!(caps["slot_controls"]["mcp_reconnect"], true);
+        assert_eq!(
+            caps["slot_controls"]["prompt_authorization"]["supported"],
+            true
+        );
         assert_eq!(caps["slot_controls"]["input"], false);
         assert!(caps["slot_controls"].get("logout").is_none());
         assert_eq!(caps["slot_controls"]["permissions"]["supported"], true);
@@ -5096,6 +5106,7 @@ mod tests {
                 status: true,
                 mcp_status: true,
                 mcp_reconnect: false,
+                prompt_authorization: false,
             },
         );
 

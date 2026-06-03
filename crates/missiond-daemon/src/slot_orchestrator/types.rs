@@ -1,5 +1,6 @@
 //! Core types for the SlotManager orchestration layer.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -33,6 +34,8 @@ pub struct SlotTaskConfig {
     pub timeout: Duration,
     /// Working directory for the slot.
     pub cwd: PathBuf,
+    /// Provider-specific environment projected from V3 worker policy.
+    pub env: HashMap<String, String>,
     /// Skip permission confirmations (for unattended slots).
     pub skip_permissions: bool,
 }
@@ -52,6 +55,7 @@ pub struct SlotTaskRequest {
     pub tool_policy_path: Option<PathBuf>,
     pub lifecycle: Lifecycle,
     pub cwd: PathBuf,
+    pub env: HashMap<String, String>,
     pub skip_permissions: bool,
 }
 
@@ -70,6 +74,7 @@ impl SlotTaskRequest {
             tool_policy_path: config.tool_policy_path.clone(),
             lifecycle: config.lifecycle,
             cwd: config.cwd.clone(),
+            env: config.env.clone(),
             skip_permissions: config.skip_permissions,
         }
     }

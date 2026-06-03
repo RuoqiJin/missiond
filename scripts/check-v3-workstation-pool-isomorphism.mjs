@@ -33,6 +33,9 @@ const FILES = {
   runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   main: 'crates/missiond-daemon/src/main.rs',
   genericCli: 'crates/missiond-daemon/src/slot_orchestrator/generic_cli.rs',
+  ccController: 'crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs',
+  spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
+  slotOrchestratorTypes: 'crates/missiond-daemon/src/slot_orchestrator/types.rs',
   controlTree: 'crates/missiond-daemon/src/control_tree.rs',
   ptySession: 'crates/missiond-pty/src/session.rs',
   ptyRecognition: 'crates/missiond-pty/src/pty_recognition.rs',
@@ -44,6 +47,7 @@ const FILES = {
   missionControl: 'crates/missiond-core/src/core/mission_control.rs',
   projectTypes: 'crates/missiond-core/src/types/project.rs',
   supervisor: 'crates/missiond-daemon/src/supervisor.rs',
+  providerLaunchPolicy: 'scripts/lib/v3_workstation_provider_launch_policy.mjs',
   aggregate: 'scripts/check-v3-code-isomorphism-complete.mjs',
 };
 
@@ -147,6 +151,8 @@ function checkFiles(root) {
     'search_enabled',
     'approval_policy',
     'tool_policy_path',
+    'skip_permissions',
+    'provider_authorization_allowlist',
     'read-only Gemini workstation-pool workers must declare :tool-policy-path',
   ]);
 
@@ -159,21 +165,35 @@ function checkFiles(root) {
     '"agy" | "agy-cli"',
     'fn startup_slot_config',
     'fn workstation_pool_slot_config',
+    'fn workstation_pool_provider_launch_policy',
     'reasoning_effort: worker.reasoning_effort.clone()',
     'search_enabled: Some(worker.search_enabled).filter',
     'async fn register_and_init_runtime_slot',
     'state.pty.init_slot(&pty_slot).await',
     'for worker in workstation_config.workstation_pool()',
-    'dangerously_skip_permissions: Some(false)',
+    'MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS',
+    'MISSIOND_PROVIDER_BOX_CLAUDE_CODE_MCP_AUTH_ALLOWLIST',
+    'dangerously_skip_permissions: Some(skip_permissions)',
     'tool_policy_path: worker.tool_policy_path.clone()',
     'reasoning_effort: worker.reasoning_effort.clone()',
     'search_enabled: worker.search_enabled',
-    'skip_permissions: false',
+    'env: HashMap::new()',
+    'env,',
     'state.mission.register_runtime_slot(slot_config)',
     'SlotManager: workstation pool registered from V3',
     'missiond_project_root()',
     'Project registry: overlaying missiond root from runtime environment',
     'Project registry: adding runtime missiond root overlay',
+  ]);
+
+  requireAll(diagnostics, FILES.spawner, sources.spawner, [
+    'original_slot_env',
+    'MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS',
+    'enforce_spawn_sandbox_policy',
+  ]);
+  requireAll(diagnostics, FILES.slotOrchestratorTypes, sources.slotOrchestratorTypes, [
+    'pub env: HashMap<String, String>',
+    'env: config.env.clone()',
   ]);
 
   requireAll(diagnostics, FILES.projectTypes, sources.projectTypes, [
@@ -192,8 +212,15 @@ function checkFiles(root) {
     'sandbox: req.sandbox.clone()',
     'approval_policy: req.approval_policy.clone()',
     'tool_policy_path: req.tool_policy_path.clone()',
+    'extra_env: req.env.clone()',
+    'Some(&req.env)',
     'canonical_source_for_engine(self.engine)',
     'TextComplete',
+  ]);
+  requireAll(diagnostics, FILES.ccController, sources.ccController, [
+    'dangerously_skip_permissions: req.skip_permissions',
+    'extra_env: req.env.clone()',
+    'Some(&req.env)',
   ]);
 
   requireAll(diagnostics, FILES.controlTree, sources.controlTree, [
@@ -333,6 +360,13 @@ function checkFiles(root) {
     '.list_slots()',
     's.config.id == SUPERVISOR_SLOT_ID',
     'if !supervisor_registered',
+  ]);
+  requireAll(diagnostics, FILES.providerLaunchPolicy, sources.providerLaunchPolicy, [
+    'augmentWorkstationProviderLaunchPolicy',
+    'loadWorkstationProviderLaunchPolicies',
+    'provider_authorization_allowlist',
+    ':provider-authorization-allowlist',
+    ':skip-permissions',
   ]);
   requireAll(diagnostics, FILES.aggregate, sources.aggregate, [
     "'workstation-pool'",
@@ -491,6 +525,7 @@ function validateClaudeWorker(file, worker, diagnostics) {
   requirePropText(diagnostics, file, props, ':model-profile', 'coding-default-opus-4-7');
   requirePropText(diagnostics, file, props, ':model', 'nil');
   requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
+  requireClaudeCodeLaunchPolicy(diagnostics, file, props);
   requirePropBool(diagnostics, file, props, ':write-allowed', true);
   requireListItems(diagnostics, file, props, ':task-classes', ['code', 'implementation', 'ops']);
   requireListItems(diagnostics, file, props, ':capabilities', ['code-read', 'code-write', 'mcp']);
@@ -509,6 +544,7 @@ function validateDeployOpsWorker(file, worker, diagnostics) {
   requirePropText(diagnostics, file, props, ':model-profile', 'coding-default-opus-4-7');
   requirePropText(diagnostics, file, props, ':model', 'nil');
   requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
+  requireClaudeCodeLaunchPolicy(diagnostics, file, props);
   requirePropBool(diagnostics, file, props, ':write-allowed', false);
   requireListItems(diagnostics, file, props, ':task-classes', ['deploy-ops', 'deployment', 'ops']);
   requireListItems(diagnostics, file, props, ':capabilities', ['deploy-read', 'deploy-center-query', 'mcp']);
@@ -555,9 +591,18 @@ function validateFastPatchWorker(file, worker, diagnostics) {
   requirePropText(diagnostics, file, props, ':role', 'patcher');
   requirePropText(diagnostics, file, props, ':model-profile', 'daily-sonnet');
   requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
+  requireClaudeCodeLaunchPolicy(diagnostics, file, props);
   requirePropBool(diagnostics, file, props, ':write-allowed', true);
   requireListItems(diagnostics, file, props, ':task-classes', ['patch', 'low-risk-fast-path']);
   requireListItems(diagnostics, file, props, ':capabilities', ['narrow-patch', 'scoped-commit']);
+}
+
+function requireClaudeCodeLaunchPolicy(diagnostics, file, props) {
+  requirePropBool(diagnostics, file, props, ':skip-permissions', true);
+  requireListItems(diagnostics, file, props, ':provider-authorization-allowlist', [
+    'mcp:missiond',
+    'mcp:supabase',
+  ]);
 }
 
 function validateGeminiFastWorker(file, worker, diagnostics) {
@@ -661,6 +706,8 @@ function buildFixture() {
       :timeout-secs 1800
       :default-use code-implementation
       :accepts-boardtask true
+      :skip-permissions true
+      :provider-authorization-allowlist ["mcp:missiond" "mcp:supabase"]
       :write-allowed true)
     (worker claude-code-deploy-ops
       :engine claude-code
@@ -675,6 +722,8 @@ function buildFixture() {
       :timeout-secs 2400
       :default-use deployment-operations
       :accepts-boardtask true
+      :skip-permissions true
+      :provider-authorization-allowlist ["mcp:missiond" "mcp:supabase"]
       :write-allowed false)
     (worker claude-code-fast-patch
       :engine claude-code
@@ -686,6 +735,8 @@ function buildFixture() {
       :timeout-secs 900
       :default-use narrow-patch
       :accepts-boardtask true
+      :skip-permissions true
+      :provider-authorization-allowlist ["mcp:missiond" "mcp:supabase"]
       :write-allowed true)
     (worker gemini-ultra-pro
       :engine gemini
@@ -775,24 +826,81 @@ pub(crate) fn boardtask_pool_candidates() {}
 find_form(source, "workstation-pool");
 "workstation-pool must include a Claude Code default BoardTask worker";
 "workstation-pool must include a read-only Gemini BoardTask worker";
+"workstation-pool must include a read-only Agy BoardTask worker";
 "workstation-pool must include a non-shard Codex master-control worker";
+"workstation-pool must include at least one Codex non-master worker lane";
 "claude-code-default"; "claude-code-deploy-ops"; "gemini-ultra-pro"; "codex-master-control";
+worker.engine == "agy";
+worker.engine == "codex";
+worker.role != "orchestrator";
 reasoning_effort; search_enabled; approval_policy; tool_policy_path;
+skip_permissions;
+provider_authorization_allowlist;
 "read-only Gemini workstation-pool workers must declare :tool-policy-path";`);
   write(root, 'main', `
 fn workstation_pool_model() {}
+fn jarvis_intent_author_config() {}
+fn jarvis_plan_author_config() {}
+GenericCliSlotManager::new;
+CliEngine::Agy;
+"agy" | "agy-cli";
 fn startup_slot_config() {}
 fn workstation_pool_slot_config() {}
+fn workstation_pool_provider_launch_policy() {}
 reasoning_effort: worker.reasoning_effort.clone();
 search_enabled: Some(worker.search_enabled).filter;
 dangerously_skip_permissions: Some(false);
+MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS;
+MISSIOND_PROVIDER_BOX_CLAUDE_CODE_MCP_AUTH_ALLOWLIST;
+dangerously_skip_permissions: Some(skip_permissions);
 tool_policy_path: worker.tool_policy_path.clone();
+reasoning_effort: worker.reasoning_effort.clone();
+search_enabled: worker.search_enabled;
+env: HashMap::new();
+env,;
 skip_permissions: false;
 async fn register_and_init_runtime_slot() { state.pty.init_slot(&pty_slot).await; state.mission.register_runtime_slot(slot_config); }
 for worker in workstation_config.workstation_pool() {}
-"SlotManager: workstation pool registered from V3";`);
+"SlotManager: workstation pool registered from V3";
+missiond_project_root();
+"Project registry: overlaying missiond root from runtime environment";
+"Project registry: adding runtime missiond root overlay";`);
+  write(root, 'genericCli', `
+GenericCliSlotManager;
+PTYSpawnOptions;
+reasoning_effort: req.reasoning_effort.clone();
+search_enabled: req.search_enabled;
+sandbox: req.sandbox.clone();
+approval_policy: req.approval_policy.clone();
+tool_policy_path: req.tool_policy_path.clone();
+extra_env: req.env.clone();
+Some(&req.env);
+canonical_source_for_engine(self.engine);
+TextComplete;`);
+  write(root, 'ccController', `
+dangerously_skip_permissions: req.skip_permissions;
+extra_env: req.env.clone();
+Some(&req.env);`);
+  write(root, 'spawner', `
+original_slot_env;
+MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS;
+enforce_spawn_sandbox_policy;`);
+  write(root, 'slotOrchestratorTypes', `
+pub env: HashMap<String, String>;
+env: config.env.clone();`);
+  write(root, 'controlTree', `
+Agy,
+Self::Agy => None;`);
+  write(root, 'projectTypes', `
+use std::path::Path;
+let cwd_path = Path::new(cwd);
+cwd_path.starts_with(Path::new(prefix));
+fn resolve_does_not_match_sibling_by_string_prefix() {}
+/Users/rickyhq/Projects/missiond-clean;`);
   write(root, 'ptySession', `
 CliEngine::Gemini;
+CliEngine::Agy;
+"agy".to_string();
 --approval-mode plan;
 --policy;
 --approval-mode yolo;
@@ -800,6 +908,11 @@ tool_policy_path: Option<&std::path::Path>;
 Gemini CLI: read-only tool policy enabled;
 Gemini CLI: plan/read-only approval mode enabled;
 gemini_command_uses_plan_mode_unless_permissions_are_skipped;`);
+  write(root, 'ptyRecognition', `
+CliEngine::Agy => recognize_agy(lines);
+fn recognize_agy() {}
+agy_idle_screen_is_idle;
+agy_auth_or_quota_error_is_blocked;`);
   write(root, 'autopilot', `
 fn board_task_workstation_class() {}
 async fn select_workstation_pool_slot() {}
@@ -850,6 +963,12 @@ pub(crate) async fn schedule_supervisor_patrol(state: &AppState) {
     let supervisor_registered = state.mission.list_slots().into_iter().any(|s| s.config.id == SUPERVISOR_SLOT_ID);
     if !supervisor_registered { return; }
 }`);
+  write(root, 'providerLaunchPolicy', `
+augmentWorkstationProviderLaunchPolicy;
+loadWorkstationProviderLaunchPolicies;
+provider_authorization_allowlist;
+:provider-authorization-allowlist;
+:skip-permissions;`);
   write(root, 'aggregate', `
 'workstation-pool';
 scripts/check-v3-workstation-pool-isomorphism.mjs;`);

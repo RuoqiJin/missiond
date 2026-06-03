@@ -222,6 +222,9 @@ requireIncludes('server', [
   'dispatch_accepted',
   'result_pending',
   'grounded_direct_answer',
+  'phase_code',
+  'jarvis_phase_error_code',
+  'JARVIS_BOARD_DISPATCH_FAILED',
   'requires_board_task',
   'stream_jarvis_grounded_direct_answer',
   'provider_box_engine_for_provider',
@@ -245,6 +248,8 @@ requireIncludes('jarvisChainSmoke', [
   'missiond.jarvis-chain-smoke.v1',
   '/api/monitor/jarvis',
   'missiond.jarvis-chain-monitor.v1',
+  'missiond.jarvis-chain-monitor.v2',
+  'JARVIS_MONITOR_TOPOLOGY_MISSING',
   'public-entry',
   'default-slot-readiness',
 ]);

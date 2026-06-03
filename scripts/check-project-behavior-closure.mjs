@@ -32,6 +32,8 @@ function main() {
       observed_count: 0,
       behavior_count: 0,
       effect_count: 0,
+      projection_ok: true,
+      projection_diagnostics: [],
       diagnostics: [{
         file: root,
         line: 1,
@@ -55,6 +57,10 @@ function main() {
     behavior_count: result.declared.behaviors.length,
     effect_count: result.declared.effects.length,
     tombstone_count: result.declared.tombstones.length,
+    scanner_profile_count: result.declared.scannerProfiles.length,
+    navigation_artifact: result.declared.navigationArtifact,
+    projection_ok: result.projection_ok,
+    projection_diagnostics: result.projectionDiagnostics,
     diagnostics: result.diagnostics,
   }, opts);
 }
@@ -116,6 +122,9 @@ function emit(result, opts) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else if (result.ok) {
     console.log(`project behavior closure OK (${result.projectId}, ${result.observed_count} observed behaviors)`);
+    if (result.projection_ok === false) {
+      console.error(`project behavior navigation projection has ${result.projection_diagnostics.length} diagnostic(s)`);
+    }
   } else {
     for (const d of result.diagnostics) {
       console.error(`${d.file}:${d.line ?? 1}:${d.column ?? 1}: ${d.code}: ${d.message}`);

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use missiond_core::evidence_redactor;
 use missiond_core::types::{ContextGatherRunInput, EvidenceItemInput, EvidenceSearchInput};
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
@@ -8,6 +9,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use crate::context::v3_blueprint_runtime::{
@@ -113,6 +115,38 @@ struct ContextBootArgs {
     include_capsule: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RepoSearchArgs {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default, alias = "sourceProfile")]
+    source_profile: Option<String>,
+    #[serde(
+        default,
+        alias = "includeRuntime",
+        deserialize_with = "crate::lenient::option_bool"
+    )]
+    include_runtime: Option<bool>,
+    #[serde(
+        default,
+        alias = "includeIgnored",
+        deserialize_with = "crate::lenient::option_bool"
+    )]
+    include_ignored: Option<bool>,
+    #[serde(
+        default,
+        alias = "includeHidden",
+        deserialize_with = "crate::lenient::option_bool"
+    )]
+    include_hidden: Option<bool>,
+    #[serde(default, deserialize_with = "crate::lenient::option_bool")]
+    regex: Option<bool>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default = "default_repo_search_limit")]
+    limit: usize,
+}
+
 const CODEX_BOOT_CONTEXT_REL: &str = ".missiond/v3/evidence/codex-boot-context.lisp";
 const CODEX_BOOT_CONTEXT_FALLBACK: &str =
     include_str!("../../../../../.missiond/v3/evidence/codex-boot-context.lisp");
@@ -121,6 +155,10 @@ const CONTEXT_GATHER_WORKER_VISIBLE_REL: &str = ".missiond/v3/runtime/context-ga
 
 fn default_limit() -> usize {
     8
+}
+
+fn default_repo_search_limit() -> usize {
+    25
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,6 +224,16 @@ fn context_gather_persist_read_model(args: &ContextGatherArgs) -> bool {
     context_gather_persist_artifact(args) || args.persist_read_model.unwrap_or(true)
 }
 
+#[derive(Debug)]
+struct RepoSearchPlan {
+    roots: Vec<String>,
+    include_hidden: bool,
+    include_ignored: bool,
+    cold_requested: bool,
+    cold_allowed: bool,
+    path_diagnostics: Vec<Value>,
+}
+
 fn source_selection_with_allowed_lanes(
     args: &ContextGatherArgs,
     profile: SourceProfile,
@@ -228,6 +276,328 @@ fn source_selection_with_allowed_lanes(
             args.include_raw_sources,
         ),
     }
+}
+
+fn repo_search_cold_requested(args: &RepoSearchArgs) -> bool {
+    args.include_runtime.unwrap_or(false)
+        || args.include_ignored.unwrap_or(false)
+        || args
+            .paths
+            .iter()
+            .any(|path| repo_search_path_is_cold_archive(path))
+}
+
+fn repo_search_plan(args: &RepoSearchArgs, profile: SourceProfile) -> RepoSearchPlan {
+    let cold_requested = repo_search_cold_requested(args);
+    let cold_allowed = profile == SourceProfile::FullDebug;
+    let include_ignored = cold_allowed && args.include_ignored.unwrap_or(cold_requested);
+    let include_hidden = args
+        .include_hidden
+        .unwrap_or(include_ignored || cold_allowed || !args.paths.is_empty());
+    let mut path_diagnostics = Vec::new();
+    let roots = if args.paths.is_empty() {
+        default_repo_search_roots(cold_allowed && args.include_runtime.unwrap_or(false))
+    } else {
+        args.paths
+            .iter()
+            .filter_map(|path| {
+                normalize_repo_search_path(path, cold_allowed, &mut path_diagnostics)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    RepoSearchPlan {
+        roots,
+        include_hidden,
+        include_ignored,
+        cold_requested,
+        cold_allowed,
+        path_diagnostics,
+    }
+}
+
+fn default_repo_search_roots(include_cold: bool) -> Vec<String> {
+    if include_cold {
+        return vec![".".to_string()];
+    }
+    [
+        ".missiond/v3/missiond-blueprint.lisp",
+        ".missiond/v3/shards",
+        ".missiond/v3/genome",
+        ".missiond/workflows",
+        ".missiond/frontend/board-blueprint.lisp",
+        "crates",
+        "packages",
+        "scripts",
+        "docs/guides",
+        "AGENTS.md",
+        "README.md",
+    ]
+    .iter()
+    .filter(|path| Path::new(path).exists())
+    .map(|path| (*path).to_string())
+    .collect()
+}
+
+fn normalize_repo_search_path(
+    path: &str,
+    cold_allowed: bool,
+    diagnostics: &mut Vec<Value>,
+) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        diagnostics.push(json!({
+            "path": trimmed,
+            "status": "rejected",
+            "reason": "parent_dir_not_allowed",
+        }));
+        return None;
+    }
+    if path.is_absolute() {
+        match env::current_dir()
+            .ok()
+            .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf))
+        {
+            Some(relative) => {
+                return normalize_repo_search_path(
+                    &relative.display().to_string(),
+                    cold_allowed,
+                    diagnostics,
+                )
+            }
+            None => {
+                diagnostics.push(json!({
+                    "path": trimmed,
+                    "status": "rejected",
+                    "reason": "absolute_path_outside_repo",
+                }));
+                return None;
+            }
+        }
+    }
+    let normalized = trimmed.trim_start_matches("./").to_string();
+    if repo_search_path_is_cold_archive(&normalized) && !cold_allowed {
+        diagnostics.push(json!({
+            "path": normalized,
+            "status": "profile_filtered",
+            "reason": "cold_archive_requires_full_debug",
+        }));
+        return None;
+    }
+    if !Path::new(&normalized).exists() {
+        diagnostics.push(json!({
+            "path": normalized,
+            "status": "missing",
+            "reason": "path_not_found",
+        }));
+        return None;
+    }
+    Some(normalized)
+}
+
+fn repo_search_path_is_cold_archive(path: &str) -> bool {
+    let normalized = path.trim_start_matches("./");
+    normalized.starts_with(".missiond/v3/runtime/")
+        || normalized.starts_with(".missiond/runtime-state/")
+        || normalized.starts_with(".missiond/tasks/")
+        || normalized.starts_with(".missiond/research/")
+        || normalized.starts_with(".missiond/claudecode/")
+        || normalized.starts_with("docs/audit/")
+        || normalized.contains("true-user-utterances")
+        || normalized.contains("transcript")
+        || normalized.contains("conversation-audit")
+        || normalized.contains("deployment-usage")
+}
+
+fn repo_search_lane_for_path(path: &str) -> (&'static str, &'static str, &'static str) {
+    let normalized = path.trim_start_matches("./");
+    if repo_search_path_is_cold_archive(normalized) {
+        return (
+            "cold_archive",
+            "forensics_only_cold_archive",
+            "explicit_path_or_full_debug_only",
+        );
+    }
+    if normalized.contains("conversation") || normalized.contains("session-trace") {
+        return (
+            "conversation_audit",
+            "provider_durable_conversation_read_model",
+            "raw_opt_in_only",
+        );
+    }
+    if normalized.starts_with(".missiond/v3/")
+        || normalized.starts_with(".missiond/workflows/")
+        || normalized.starts_with(".missiond/frontend/")
+        || normalized.ends_with("intent.lisp")
+        || normalized.ends_with("blueprint.lisp")
+    {
+        return (
+            "project_ssot",
+            "file_first_lisp_and_compiled_project_universe",
+            "compact_only",
+        );
+    }
+    ("support_refs", "implementation_reference", "compact_only")
+}
+
+fn repo_search_hit_allowed(path: &str, allowed_lanes: &[String]) -> bool {
+    let (lane_id, _, _) = repo_search_lane_for_path(path);
+    allowed_lanes.iter().any(|lane| lane == lane_id)
+}
+
+fn parse_rg_line(line: &str) -> Option<(&str, u64, &str)> {
+    let mut parts = line.splitn(3, ':');
+    let path = parts.next()?;
+    let line_no = parts.next()?.parse::<u64>().ok()?;
+    let text = parts.next().unwrap_or("");
+    Some((path, line_no, text))
+}
+
+fn compact_repo_search_text(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= 320 {
+        return collapsed;
+    }
+    let mut truncated = collapsed.chars().take(320).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+async fn handle_repo_search(args: Value) -> Result<ToolResult> {
+    let args: RepoSearchArgs = serde_json::from_value(args)?;
+    let query = args.query.as_deref().unwrap_or("").trim();
+    if query.is_empty() {
+        return Ok(ToolResult::error("mission_repo_search requires query"));
+    }
+
+    let profile = SourceProfile::from_arg(args.source_profile.as_deref());
+    let policy = EvidenceLaneRuntimeConfig::default();
+    let allowed_lanes = allowed_lanes_for_profile(&policy, profile);
+    let plan = repo_search_plan(&args, profile);
+    let limit = args.limit.clamp(1, 100);
+    if plan.roots.is_empty() {
+        return Ok(ToolResult::json_pretty(&json!({
+            "schema": "missiond.repo-search.v1",
+            "ok": true,
+            "query": query,
+            "source_profile": profile.as_str(),
+            "allowed_lanes": allowed_lanes,
+            "hits": [],
+            "metrics": {
+                "raw_hit_count": 0,
+                "profile_filtered_count": 0,
+                "truncated_count": 0,
+                "cold_requested": plan.cold_requested,
+                "cold_allowed": plan.cold_allowed,
+                "include_hidden": plan.include_hidden,
+                "include_ignored": plan.include_ignored,
+                "filter_before_vector": true
+            },
+            "diagnostics": plan.path_diagnostics,
+        })));
+    }
+
+    let mut command = Command::new("rg");
+    command
+        .arg("--line-number")
+        .arg("--no-heading")
+        .arg("--color")
+        .arg("never")
+        .arg("--max-count")
+        .arg("8")
+        .arg("--max-filesize")
+        .arg("2M");
+    if !args.regex.unwrap_or(false) {
+        command.arg("--fixed-strings");
+    }
+    if plan.include_hidden {
+        command.arg("--hidden");
+    }
+    if plan.include_ignored {
+        command.arg("--no-ignore");
+    }
+    command.arg(query);
+    for root in &plan.roots {
+        command.arg(root);
+    }
+
+    let output = command.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut raw_hit_count = 0usize;
+    let mut profile_filtered_count = 0usize;
+    let mut hits = Vec::new();
+    for line in stdout.lines() {
+        let Some((path, line_no, text)) = parse_rg_line(line) else {
+            continue;
+        };
+        raw_hit_count += 1;
+        if !repo_search_hit_allowed(path, &allowed_lanes) {
+            profile_filtered_count += 1;
+            continue;
+        }
+        if hits.len() >= limit {
+            continue;
+        }
+        let (lane_id, authority_class, raw_policy) = repo_search_lane_for_path(path);
+        hits.push(json!({
+            "lane_id": lane_id,
+            "authority_class": authority_class,
+            "source_type": "repo_search_hit",
+            "source_ref": format!("{path}:{line_no}"),
+            "path": path,
+            "line": line_no,
+            "summary": compact_repo_search_text(text),
+            "raw_policy": raw_policy,
+            "injectable_by_default": lane_id != "cold_archive" && lane_id != "conversation_audit",
+            "provenance": {
+                "tool": "mission_repo_search",
+                "source_profile": profile.as_str(),
+                "filter_before_vector": true,
+            }
+        }));
+    }
+    let accepted_count = raw_hit_count.saturating_sub(profile_filtered_count);
+    let truncated_count = accepted_count.saturating_sub(hits.len());
+    let status_ok = output.status.success() || output.status.code() == Some(1);
+    Ok(ToolResult::json_pretty(&json!({
+        "schema": "missiond.repo-search.v1",
+        "ok": status_ok,
+        "query": query,
+        "source_profile": profile.as_str(),
+        "allowed_lanes": allowed_lanes,
+        "path_scope": {
+            "roots": plan.roots,
+            "include_hidden": plan.include_hidden,
+            "include_ignored": plan.include_ignored,
+            "cold_requested": plan.cold_requested,
+            "cold_allowed": plan.cold_allowed,
+            "rule": "repo search is lane-filtered before result injection; cold/runtime/archive paths require source_profile=full_debug plus explicit include flags or paths"
+        },
+        "hits": hits,
+        "metrics": {
+            "raw_hit_count": raw_hit_count,
+            "profile_filtered_count": profile_filtered_count,
+            "hit_count": hits.len(),
+            "truncated_count": truncated_count,
+            "cold_requested": plan.cold_requested,
+            "cold_allowed": plan.cold_allowed,
+            "raw_sources_omitted": !plan.include_ignored,
+            "filter_before_vector": true
+        },
+        "diagnostics": plan.path_diagnostics,
+        "rg": {
+            "exit_code": output.status.code(),
+            "stderr": compact_repo_search_text(&stderr),
+        }
+    })))
 }
 
 fn infra_os_feature_enabled() -> bool {
@@ -865,6 +1235,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     if name == "mission_context_boot" {
         return handle_context_boot(args);
     }
+    if name == "mission_repo_search" {
+        return handle_repo_search(args).await;
+    }
 
     let args: ContextGatherArgs = serde_json::from_value(args)?;
     let profile = SourceProfile::from_arg(args.source_profile.as_deref());
@@ -934,6 +1307,36 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "error": err.to_string()
             })),
         }
+    }
+    if let Some(compiled_service) = compiled_service_runtime_payload_for_context(
+        effective_project_id.as_deref(),
+        if effective_project_id.is_none() {
+            Some(&query)
+        } else {
+            None
+        },
+    ) {
+        let resolved_project_id = text_from_sources(
+            &[Some(&compiled_service)],
+            &["project", "id", "project_id", "projectId"],
+        );
+        if let Some(resolved_project_id) = resolved_project_id {
+            if effective_project_id.as_deref() != Some(resolved_project_id.as_str()) {
+                diagnostics.push(json!({
+                    "source": "compiled_service_resolution",
+                    "status": "resolved_service_lookup",
+                    "requested_project_id": effective_project_id.clone(),
+                    "resolved_project_id": resolved_project_id.clone(),
+                    "service_id": text_field(&compiled_service, "id"),
+                    "deploy_center_slug": compiled_service
+                        .get("supportCatalog")
+                        .and_then(|catalog| text_field(catalog, "deploy_center_slug")),
+                    "authority": "compiled-project-universe"
+                }));
+                effective_project_id = Some(resolved_project_id);
+            }
+        }
+        sources.insert("compiled_service_runtime".to_string(), compiled_service);
     }
 
     if selection.include_project {
@@ -1270,6 +1673,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "diagnostics": diagnostics,
         "next_action": "Synthesize grounded intent. If intent is confirmed, assign a plan-authoring worker to compile plan.lisp from the confirmed intent plus tool/resource inventory."
     });
+
+    payload = redact_context_payload(&payload);
 
     let mut artifact_hash_for_run: Option<String> = None;
 
@@ -2098,6 +2503,7 @@ fn first_service_runtime_payload<'a>(
                     })
             })
         })
+        .or_else(|| sources.get("compiled_service_runtime"))
 }
 
 fn compiled_service_runtime_payload_for_project(project_id: Option<&str>) -> Option<Value> {
@@ -2112,12 +2518,84 @@ fn compiled_service_runtime_payload_for_project(project_id: Option<&str>) -> Opt
         .map(compiled_service_runtime_entry_to_value)
 }
 
+fn compiled_service_runtime_payload_for_context(
+    project_id: Option<&str>,
+    query: Option<&str>,
+) -> Option<Value> {
+    compiled_service_runtime_payload_for_project(project_id)
+        .or_else(|| compiled_service_runtime_payload_for_query(query))
+}
+
+fn compiled_service_runtime_payload_for_query(query: Option<&str>) -> Option<Value> {
+    let lookup = normalized_lookup_key(query)?;
+    let project_root = crate::helpers::missiond_project_root();
+    let universe = load_compiled_project_universe(&project_root, None);
+    let payload = universe.payload?;
+    payload
+        .services
+        .iter()
+        .find(|service| compiled_service_matches_query(service, &lookup))
+        .map(compiled_service_runtime_entry_to_value)
+}
+
 fn compiled_service_matches_lookup(service: &CompiledServiceRuntimeEntry, lookup: &str) -> bool {
-    [service.id.as_deref(), service.project.as_deref()]
+    compiled_service_lookup_values(service)
         .into_iter()
-        .flatten()
-        .filter_map(|value| normalized_lookup_key(Some(value)))
         .any(|value| value == lookup)
+}
+
+fn compiled_service_matches_query(service: &CompiledServiceRuntimeEntry, lookup: &str) -> bool {
+    compiled_service_lookup_values(service)
+        .into_iter()
+        .any(|value| lookup_contains_identifier(lookup, &value))
+}
+
+fn compiled_service_lookup_values(service: &CompiledServiceRuntimeEntry) -> Vec<String> {
+    let catalog = service.support_catalog.as_ref();
+    let mut values = Vec::new();
+    push_normalized_lookup(&mut values, service.id.as_deref());
+    push_normalized_lookup(&mut values, service.project.as_deref());
+    push_normalized_lookup(&mut values, service.public_base_url.as_deref());
+    push_normalized_lookup(&mut values, service.frontend_url.as_deref());
+    push_normalized_lookup(&mut values, service.api_base_url.as_deref());
+    for domain in &service.domains {
+        push_normalized_lookup(&mut values, Some(domain));
+    }
+    if let Some(catalog) = catalog {
+        push_normalized_lookup(&mut values, catalog.service_id.as_deref());
+        push_normalized_lookup(&mut values, catalog.project_id.as_deref());
+        push_normalized_lookup(&mut values, catalog.deploy_center_slug.as_deref());
+        push_normalized_lookup(&mut values, catalog.runtime_target.as_deref());
+        push_normalized_lookup(&mut values, catalog.container.as_deref());
+        push_normalized_lookup(&mut values, catalog.public_base_url.as_deref());
+        push_normalized_lookup(&mut values, catalog.frontend_url.as_deref());
+        push_normalized_lookup(&mut values, catalog.api_base_url.as_deref());
+        for domain in &catalog.domains {
+            push_normalized_lookup(&mut values, Some(domain));
+        }
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn push_normalized_lookup(values: &mut Vec<String>, value: Option<&str>) {
+    if let Some(value) = normalized_lookup_key(value) {
+        values.push(value);
+    }
+}
+
+fn lookup_contains_identifier(haystack: &str, needle: &str) -> bool {
+    if haystack == needle {
+        return true;
+    }
+    if needle.len() < 3 {
+        return false;
+    }
+    haystack
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+        .any(|token| token == needle)
+        || (needle.starts_with("xjp-") && haystack.contains(needle))
 }
 
 fn compiled_service_runtime_entry_to_value(service: &CompiledServiceRuntimeEntry) -> Value {
@@ -2140,6 +2618,7 @@ fn compiled_service_runtime_entry_to_value(service: &CompiledServiceRuntimeEntry
         "dependencies": service.dependencies,
         "opsCapability": service.ops_capability,
         "surface": service.surface,
+        "deploymentChannels": service.deployment_channels,
         "supportCatalog": service
             .support_catalog
             .as_ref()
@@ -4494,6 +4973,37 @@ fn summarize_source(key: &str, value: &Value) -> Value {
             }
             Value::Object(map)
         }
+        "compiled_service_runtime" => {
+            let mut map = summary_base(key);
+            for field in [
+                "id",
+                "project",
+                "root",
+                "environment",
+                "publicBaseUrl",
+                "frontendUrl",
+                "apiBaseUrl",
+                "domains",
+                "health",
+                "surface",
+            ] {
+                insert_field(&mut map, value, field);
+            }
+            if let Some(catalog) = value.get("supportCatalog") {
+                for field in [
+                    "deploy_center_slug",
+                    "runtime_target",
+                    "executor",
+                    "container",
+                    "service_manifest_refs",
+                    "db_migration_namespace",
+                    "database_namespace",
+                ] {
+                    insert_field(&mut map, catalog, field);
+                }
+            }
+            Value::Object(map)
+        }
         "ssot" => {
             let mut map = summary_base(key);
             if let Some(text) = value.get("text").and_then(Value::as_str) {
@@ -4869,22 +5379,45 @@ fn value_shape(value: &Value) -> &'static str {
 }
 
 fn context_pack_artifact_payload(payload: &Value, include_raw_sources: bool) -> Value {
-    if include_raw_sources {
-        return payload.clone();
-    }
-    let mut compact = payload.clone();
-    if let Some(object) = compact.as_object_mut() {
-        object.remove("sources");
-        object.insert("raw_sources_omitted".to_string(), Value::Bool(true));
-        object.insert(
-            "raw_sources_policy".to_string(),
-            Value::String(
-                "Raw legacy sources are omitted from the worker context pack; use evidence_lanes or rerun with include_raw_sources=true/full_debug for diagnostics."
-                    .to_string(),
-            ),
-        );
-    }
+    let mut compact = if include_raw_sources {
+        payload.clone()
+    } else {
+        let mut compact = payload.clone();
+        if let Some(object) = compact.as_object_mut() {
+            object.remove("sources");
+            object.insert("raw_sources_omitted".to_string(), Value::Bool(true));
+            object.insert(
+                "raw_sources_policy".to_string(),
+                Value::String(
+                    "Raw legacy sources are omitted from the worker context pack; use evidence_lanes or rerun with include_raw_sources=true/full_debug for diagnostics."
+                        .to_string(),
+                ),
+            );
+        }
+        compact
+    };
+    compact = redact_context_payload(&compact);
     compact
+}
+
+fn redact_context_payload(payload: &Value) -> Value {
+    let (mut redacted, report) = evidence_redactor::redact_json_value_with_report(payload);
+    if report.redacted {
+        if let Some(object) = redacted.as_object_mut() {
+            object.insert(
+                "evidence_redaction".to_string(),
+                json!({
+                    "schema": "missiond.evidence-redaction-report.v1",
+                    "policy": "missiond.evidence-redactor",
+                    "redacted": true,
+                    "redaction_count": report.redaction_count,
+                    "fingerprints": report.fingerprints,
+                    "rule": "Credential-like values are redacted before context-gather payloads are returned, archived, or mirrored for worker-visible files."
+                }),
+            );
+        }
+    }
+    redacted
 }
 
 fn build_context_gather_run_input(
@@ -5086,7 +5619,7 @@ fn handle_context_boot(args: Value) -> Result<ToolResult> {
         "capsule_chars": capsule_len,
         "layers": ["L0-always-on", "L1-current-task", "L2-grounded-facts", "L3-cold-evidence"],
         "capsule": if include_capsule { Value::String(capsule) } else { Value::Null },
-        "next_action": "Use this boot capsule as the collaboration protocol. For missing task/project facts, call mission_context_gather with explicit unknowns instead of preloading broad KB or logs."
+        "next_action": "Use this boot capsule as the collaboration protocol. For missing task/project facts, call mission_context_gather with explicit unknowns; for repo text lookup, call mission_repo_search instead of shell broad search or --no-ignore."
     })))
 }
 
@@ -5136,7 +5669,8 @@ fn materialize_context_capsule(hash: &str, lisp_content: &str) -> Result<PathBuf
 }
 
 fn materialize_context_pack_file(hash: &str, payload: &Value) -> Result<MaterializedContextPack> {
-    let bytes = serde_json::to_vec_pretty(payload)?;
+    let redacted_payload = evidence_redactor::redact_json_value(payload);
+    let bytes = serde_json::to_vec_pretty(&redacted_payload)?;
     let canonical_dir = context_gather_runtime_dir();
     fs::create_dir_all(&canonical_dir)?;
     let canonical_path = canonical_dir.join(format!("{hash}.json"));
@@ -5397,13 +5931,16 @@ mod tests {
 
     use serde_json::{json, Value};
 
-    use crate::context::v3_blueprint_runtime::EvidenceLaneRuntimeConfig;
+    use crate::context::v3_blueprint_runtime::{
+        CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog, EvidenceLaneRuntimeConfig,
+    };
 
     use super::{
         attach_infra_os_disabled_support_fallback, build_evidence_items,
         build_evidence_items_with_options, build_evidence_lanes,
         build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
-        build_support_catalog, collect_evidence_refs_from_value, context_gather_persist_artifact,
+        build_support_catalog, collect_evidence_refs_from_value, compiled_service_matches_lookup,
+        compiled_service_matches_query, context_gather_persist_artifact,
         context_gather_persist_read_model, context_gather_worker_visible_dir_for,
         context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_items,
         dedupe_evidence_search_items, deployment_event_drop_reason_is_sample_worthy,
@@ -5416,15 +5953,20 @@ mod tests {
         filter_incomplete_deployment_closure_evidence_items,
         filter_stale_compiled_policy_evidence_items_with_fingerprint,
         filter_stale_runtime_environment_evidence_items_with_dir,
-        optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
+        optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source,
+        repo_search_hit_allowed, repo_search_lane_for_path, repo_search_plan, response_sources,
         source_selection, summarize_source, support_catalog_has_content,
         support_catalog_response_view, synthesize_unknowns_with_source_summaries,
         CompiledDeploymentPolicyFingerprint, ContextGatherArgs, DeploymentEventFilterResult,
-        SourceProfile, DEPLOYMENT_EVENT_RELEVANT_KINDS,
+        RepoSearchArgs, SourceProfile, DEPLOYMENT_EVENT_RELEVANT_KINDS,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
         serde_json::from_value(value).expect("context gather args")
+    }
+
+    fn repo_args(value: serde_json::Value) -> RepoSearchArgs {
+        serde_json::from_value(value).expect("repo search args")
     }
 
     #[test]
@@ -5450,6 +5992,126 @@ mod tests {
 
         assert!(!context_gather_persist_artifact(&args));
         assert!(context_gather_persist_read_model(&args));
+    }
+
+    #[test]
+    fn repo_search_default_scope_excludes_runtime_cold_archive() {
+        let args = repo_args(json!({
+            "query": "xjp-domain-service",
+            "paths": [".missiond/v3/runtime/deployment-usage"]
+        }));
+
+        let plan = repo_search_plan(&args, SourceProfile::IntentDefault);
+
+        assert!(plan.cold_requested);
+        assert!(!plan.cold_allowed);
+        assert!(!plan.include_ignored);
+        assert!(plan.roots.is_empty());
+        assert_eq!(
+            plan.path_diagnostics
+                .first()
+                .and_then(|value| value.get("reason"))
+                .and_then(Value::as_str),
+            Some("cold_archive_requires_full_debug")
+        );
+    }
+
+    #[test]
+    fn repo_search_full_debug_can_opt_into_ignored_runtime() {
+        let args = repo_args(json!({
+            "query": "xjp-domain-service",
+            "source_profile": "full_debug",
+            "include_runtime": true,
+            "include_ignored": true
+        }));
+
+        let plan = repo_search_plan(&args, SourceProfile::FullDebug);
+
+        assert!(plan.cold_requested);
+        assert!(plan.cold_allowed);
+        assert!(plan.include_hidden);
+        assert!(plan.include_ignored);
+        assert_eq!(plan.roots, vec![".".to_string()]);
+    }
+
+    #[test]
+    fn repo_search_filters_hits_by_profile_lanes() {
+        let default_lanes = super::default_allowed_lanes_for_profile(SourceProfile::IntentDefault);
+        let full_debug_lanes = super::default_allowed_lanes_for_profile(SourceProfile::FullDebug);
+
+        assert!(repo_search_hit_allowed(
+            ".missiond/v3/shards/universe/project-registry.lisp",
+            &default_lanes
+        ));
+        assert!(!repo_search_hit_allowed(
+            ".missiond/v3/runtime/deployment-usage/2026-06-02-codex-deployment-usage.json",
+            &default_lanes
+        ));
+        assert!(repo_search_hit_allowed(
+            ".missiond/v3/runtime/deployment-usage/2026-06-02-codex-deployment-usage.json",
+            &full_debug_lanes
+        ));
+        assert_eq!(
+            repo_search_lane_for_path(".missiond/v3/runtime/deployment-usage/run.json").0,
+            "cold_archive"
+        );
+    }
+
+    fn payments_service_runtime_fixture() -> CompiledServiceRuntimeEntry {
+        CompiledServiceRuntimeEntry {
+            id: Some("payments".to_string()),
+            project: Some("payments".to_string()),
+            root: Some("/repo/services/payments".to_string()),
+            intent: None,
+            backend: Some("services/payments".to_string()),
+            frontend: None,
+            operations: None,
+            environment: Some("production".to_string()),
+            public_base_url: None,
+            frontend_url: None,
+            api_base_url: Some("https://auth.xiaojinpro.com/payments".to_string()),
+            domains: vec!["auth.xiaojinpro.com".to_string()],
+            health: vec!["/payments/health/ready".to_string()],
+            dependencies: Vec::new(),
+            ops_capability: Some("deploy-ops".to_string()),
+            surface: Some("gcp-runtime".to_string()),
+            deployment: None,
+            frontend_deployment: None,
+            build_lane: None,
+            deployment_channels: Vec::new(),
+            support_catalog: Some(CompiledServiceSupportCatalog {
+                service_id: Some("payments".to_string()),
+                project_id: Some("payments".to_string()),
+                domains: vec!["auth.xiaojinpro.com".to_string()],
+                public_base_url: None,
+                frontend_url: None,
+                api_base_url: Some("https://auth.xiaojinpro.com/payments".to_string()),
+                health: vec!["/payments/health/ready".to_string()],
+                dependencies: Vec::new(),
+                deploy_center_slug: Some("xjp-payments".to_string()),
+                runtime_target: Some("gcp-runtime".to_string()),
+                executor: Some("gcp-agent".to_string()),
+                container: Some("xjp-payments".to_string()),
+                service_manifest_refs: vec!["services/payments/service.manifest.toml".to_string()],
+                credential_refs: Vec::new(),
+                source_evidence: Vec::new(),
+                db_migration_namespace: None,
+                database_namespace: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn compiled_service_lookup_matches_deploy_center_slug() {
+        let service = payments_service_runtime_fixture();
+
+        assert!(compiled_service_matches_lookup(&service, "xjp-payments"));
+        assert!(compiled_service_matches_lookup(&service, "payments"));
+        assert!(compiled_service_matches_query(
+            &service,
+            "inspect-xjp-payments-deployment-evidence"
+        ));
+        assert!(!compiled_service_matches_lookup(&service, "xjp-asr"));
     }
 
     #[test]
@@ -6788,6 +7450,26 @@ mod tests {
         );
         let raw = context_pack_artifact_payload(&payload, true);
         assert!(raw.get("sources").is_some());
+    }
+
+    #[test]
+    fn context_pack_redacts_credentials_even_when_raw_sources_are_included() {
+        let payload = json!({
+            "schema": "missiond.context-gather.v1",
+            "sources": {
+                "infra": {
+                    "value": "104.194.81.38 | sshpass -p 'plain-password' ssh root@104.194.81.38",
+                    "secretRef": "secret-store://infra/bwg-vps/tunnel-ssh"
+                }
+            },
+            "credential_refs": [{"secretRef": "secret-store://infra/bwg-vps/tunnel-ssh"}]
+        });
+        let raw = context_pack_artifact_payload(&payload, true);
+        let rendered = serde_json::to_string(&raw).unwrap();
+        assert!(!rendered.contains("plain-password"));
+        assert!(rendered.contains("<redacted:credential:"));
+        assert!(rendered.contains("secret-store://infra/bwg-vps/tunnel-ssh"));
+        assert!(raw.get("evidence_redaction").is_some());
     }
 
     #[test]

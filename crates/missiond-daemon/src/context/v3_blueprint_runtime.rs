@@ -231,6 +231,7 @@ pub(crate) struct StartupSlotRuntimeConfig {
     pub role: Option<String>,
     pub model_profile: Option<String>,
     pub timeout_secs: u64,
+    #[serde(default)]
     pub skip_permissions: bool,
 }
 
@@ -260,6 +261,9 @@ pub(crate) struct WorkstationPoolRuntimeConfig {
     pub default_use: String,
     pub accepts_boardtask: bool,
     pub write_allowed: bool,
+    pub skip_permissions: bool,
+    #[serde(default)]
+    pub provider_authorization_allowlist: Vec<String>,
     pub reasoning_effort: Option<String>,
     pub search_enabled: bool,
     pub sandbox: Option<String>,
@@ -540,7 +544,11 @@ struct CompiledV3LispSourceLoad {
 pub(crate) struct CompiledProjectUniverse {
     pub projects: Vec<CompiledProjectUniverseEntry>,
     pub services: Vec<CompiledServiceRuntimeEntry>,
+    pub domain_management: Option<serde_json::Value>,
     pub maturity: Vec<CompiledProjectMaturityEntry>,
+    pub deployment_channels: Vec<serde_json::Value>,
+    pub deployment_channel_diagnostics: Vec<serde_json::Value>,
+    pub deployment_channel_summary: Option<serde_json::Value>,
 }
 
 #[allow(dead_code)]
@@ -589,6 +597,14 @@ pub(crate) struct CompiledServiceRuntimeEntry {
     pub dependencies: Vec<String>,
     pub ops_capability: Option<String>,
     pub surface: Option<String>,
+    #[serde(default)]
+    pub deployment: Option<serde_json::Value>,
+    #[serde(default)]
+    pub frontend_deployment: Option<serde_json::Value>,
+    #[serde(default)]
+    pub build_lane: Option<serde_json::Value>,
+    #[serde(default)]
+    pub deployment_channels: Vec<serde_json::Value>,
     #[serde(default)]
     pub support_catalog: Option<CompiledServiceSupportCatalog>,
 }
@@ -685,7 +701,15 @@ struct CompiledProjectUniversePayload {
     #[serde(default)]
     services: Vec<CompiledServiceRuntimeEntry>,
     #[serde(default)]
+    domain_management: Option<serde_json::Value>,
+    #[serde(default)]
     maturity: Vec<CompiledProjectMaturityEntry>,
+    #[serde(default)]
+    deployment_channels: Vec<serde_json::Value>,
+    #[serde(default)]
+    deployment_channel_diagnostics: Vec<serde_json::Value>,
+    #[serde(default)]
+    deployment_channel_summary: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2033,6 +2057,10 @@ pub(crate) fn parse_workstation_config(
                     .or_else(|| keyword_value(&tokens, ":search_enabled"))
                     .and_then(|value| parse_bool_token(&value))
                     .unwrap_or(false);
+                let skip_permissions = keyword_value(&tokens, ":skip-permissions")
+                    .or_else(|| keyword_value(&tokens, ":skip_permissions"))
+                    .and_then(|value| parse_bool_token(&value))
+                    .unwrap_or(false);
                 config.workstation_pool.push(WorkstationPoolRuntimeConfig {
                     id: tokens[2].clone(),
                     engine: non_empty_keyword(&tokens, ":engine")?,
@@ -2053,6 +2081,13 @@ pub(crate) fn parse_workstation_config(
                         .or_else(|_| non_empty_keyword(&tokens, ":default_use"))?,
                     accepts_boardtask,
                     write_allowed,
+                    skip_permissions,
+                    provider_authorization_allowlist: string_list_keyword(
+                        &tokens,
+                        ":provider-authorization-allowlist",
+                    )
+                    .or_else(|_| string_list_keyword(&tokens, ":provider_authorization_allowlist"))
+                    .unwrap_or_default(),
                     reasoning_effort: optional_non_nil_keyword(&tokens, ":reasoning-effort")
                         .or_else(|| optional_non_nil_keyword(&tokens, ":reasoning_effort")),
                     search_enabled,
@@ -3420,7 +3455,11 @@ pub(crate) fn load_compiled_project_universe(
         payload: loaded.payload.map(|payload| CompiledProjectUniverse {
             projects: payload.projects,
             services: payload.services,
+            domain_management: payload.domain_management,
             maturity: payload.maturity,
+            deployment_channels: payload.deployment_channels,
+            deployment_channel_diagnostics: payload.deployment_channel_diagnostics,
+            deployment_channel_summary: payload.deployment_channel_summary,
         }),
         snapshot: loaded.snapshot,
         diagnostics: loaded.diagnostics,

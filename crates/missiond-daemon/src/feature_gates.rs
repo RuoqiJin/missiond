@@ -186,6 +186,7 @@ fn memory_tool(name: &str) -> bool {
         || name == "mission_embedding_ops"
         || name == "mission_context_boot"
         || name == "mission_context_gather"
+        || name == "mission_repo_search"
         || name == "mission_code_search"
         || name == "mission_embedding_stats"
         || name == "mission_habit_scan"

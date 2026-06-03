@@ -316,12 +316,12 @@
         :entry [mission_context_boot resident-master-start codex-worker-start external-chat-handoff]
         :core ((step s1 :logic "load the small versioned capsule from .missiond/v3/evidence/codex-boot-context.lisp")
                (step s2 :logic "validate the capsule has L0/L1/L2/L3 layers, required collaboration rules, and no secrets/raw logs/bulk chat history")
-               (step s3 :logic "return L0 always-on protocol plus optional L1 task ids; tell the agent to call mission_context_gather for bounded L2 facts")
+               (step s3 :logic "return L0 always-on protocol plus optional L1 task ids; tell the agent to call mission_context_gather for bounded L2 facts and mission_repo_search for profile-gated repo text lookup")
                (step s4 :logic "keep historical conversations, provider logs, and old Board tasks as L3 cold evidence opened only by explicit audit/debug intent"))
         :egress [codex_boot_context_capsule external_handoff_card boot_context_diagnostic])
       (function knowledge-memory
         :surface memory-kb
-        :entry [mission_context_boot mission_context_gather mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
+        :entry [mission_context_boot mission_context_gather mission_repo_search mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
         :core ((step s1 :logic "load memory-kb-policy and learning-engine-policy for realtime extraction batch, preview budgets, learning cadences, and pty send budgets")
                (step s2 :logic "resolve project/global memory scope and normalize KB or intent query; high-frequency intent grounding should use mission_context_gather to aggregate KB, SSOT, project registry, skill evidence, infra evidence, active Board task records, and bounded conversation logs before falling back to leaf tools")
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")

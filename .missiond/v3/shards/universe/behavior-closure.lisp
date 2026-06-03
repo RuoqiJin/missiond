@@ -5,6 +5,25 @@
   :owner typed-lisp-compiler
   :rule "MissionD program-level SSOT closure: every observed active behavior class discovered from code must be claimed here or tombstoned; generated observed JSON is diagnostic evidence, not editable SSOT."
 
+  (navigation-contract
+    :schema "missiond.behavior-navigation.v2"
+    :human-ssot ".missiond/behavior-universe.lisp and V3 behavior-closure shards declare behavior/effect ownership only"
+    :observed-ir "scripts/lib/behavior_universe.mjs emits scanner evidence with semantic_id, legacy_id, file, line, symbol, effect, and stability"
+    :compiled-projection "compiled-behavior-navigation.json is machine navigation evidence; it must not be the authoring SSOT"
+    :missiond-runtime-cache "$MISSIOND_RUNTIME_DIR/compiled/compiled-behavior-navigation.json"
+    :external-runtime-cache "$MISSIOND_RUNTIME_DIR/projects/<project-id>/compiled/compiled-behavior-navigation.json"
+    :identity "v2 semantic observed id starts at symbol granularity: <kind>:<file>#<symbol>:<effect-or-role>; legacy file:line ids are fallback evidence only"
+    :checker "node scripts/check-project-behavior-closure.mjs --project <id> --json"
+    :rule "Closure diagnostics fail human SSOT; projection diagnostics report stale/missing navigation artifacts and carry regeneration commands.")
+
+  (scanner-profile
+    :id missiond-default-behavior-scanner
+    :language mixed
+    :mode semantic-id-v2
+    :coverage ["rust" "javascript" "typescript" "python"]
+    :manual-contracts ["unsupported languages/frameworks declare manual behavior contracts rather than synthetic observed coverage"]
+    :rule "Scanner profiles describe coverage and fallback policy; they never invent observed behavior.")
+
   (behavior
     :id missiond-background-workers
     :kind worker
@@ -57,8 +76,8 @@
     :kind scheduler
     :owner conversation-ingestion
     :observed ["background-task:crates/missiond-core/src/agy_cli/watcher.rs:67"
-               "background-task:crates/missiond-core/src/agy_cli/watcher.rs:148"
-               "scheduler:crates/missiond-core/src/agy_cli/watcher.rs:300"]
+               "background-task:crates/missiond-core/src/agy_cli/watcher.rs:*"
+               "scheduler:crates/missiond-core/src/agy_cli/watcher.rs:*"]
     :code ["crates/missiond-core/src/agy_cli/watcher.rs"]
     :effects []
     (anchor
@@ -68,12 +87,12 @@
       :symbol "new")
     (anchor
       :role scheduler
-      :observed "background-task:crates/missiond-core/src/agy_cli/watcher.rs:148"
+      :observed "background-task:crates/missiond-core/src/agy_cli/watcher.rs:*"
       :file "crates/missiond-core/src/agy_cli/watcher.rs"
       :symbol "start")
     (anchor
       :role scheduler
-      :observed "scheduler:crates/missiond-core/src/agy_cli/watcher.rs:300"
+      :observed "scheduler:crates/missiond-core/src/agy_cli/watcher.rs:*"
       :file "crates/missiond-core/src/agy_cli/watcher.rs"
       :symbol "agy_cursor_persist_loop")
     (trigger
@@ -96,7 +115,12 @@
     :observed ["mcp-tool:*"]
     :code ["crates/missiond-mcp/src/tools/**"
            "crates/missiond-mcp/src/gen_gateway.rs"]
-    :effects [mission-global-instruction-write])
+    :effects [mission-global-instruction-write]
+    (anchor
+      :role tool
+      :observed "mcp-tool:mission_repo_search"
+      :file "crates/missiond-mcp/src/tools/knowledge/context_gather.rs"
+      :symbol "mission_repo_search"))
 
   (behavior
     :id missiond-routes-and-cli
@@ -129,6 +153,74 @@
            "packages/**/*.ts"
            "packages/**/*.tsx"]
     :effects [])
+
+  (behavior
+    :id repo-search-rg-subprocess
+    :kind subprocess
+    :owner memory-kb
+    :observed ["subprocess:crates/missiond-daemon/src/handlers/knowledge/context_gather.rs:*"]
+    :code ["crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:crates/missiond-daemon/src/handlers/knowledge/context_gather.rs:*"
+      :file "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
+      :symbol "handle_repo_search")
+    (trigger
+      :from-file "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
+      :from-symbol "handle_repo_search"
+      :calls "rg with source_profile lane gates and cold archive opt-in"))
+
+  (behavior
+    :id deployment-channel-coverage-compile-check-subprocess
+    :kind subprocess
+    :owner project-registry
+    :observed ["subprocess:scripts/check-deployment-channel-coverage.mjs:*"]
+    :code ["scripts/check-deployment-channel-coverage.mjs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/check-deployment-channel-coverage.mjs:*"
+      :file "scripts/check-deployment-channel-coverage.mjs"
+      :symbol "main")
+    (trigger
+      :from-file "scripts/check-deployment-channel-coverage.mjs"
+      :from-symbol "main"
+      :calls "node scripts/compile-v3-runtime.mjs --check --json"))
+
+  (behavior
+    :id jarvis-runtime-topology-check-subprocess
+    :kind subprocess
+    :owner ops-infra
+    :observed ["subprocess:scripts/check-jarvis-runtime-topology.mjs:*"]
+    :code ["scripts/check-jarvis-runtime-topology.mjs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/check-jarvis-runtime-topology.mjs:*"
+      :file "scripts/check-jarvis-runtime-topology.mjs"
+      :symbol "Jarvis runtime topology check")
+    (trigger
+      :from-file "scripts/check-jarvis-runtime-topology.mjs"
+      :from-symbol "Jarvis runtime topology check"
+      :calls "validates Jarvis edge, tunnel, launchd, deploy-agent, and compiled runtime topology authority"))
+
+  (behavior
+    :id runtime-evidence-redaction-check-subprocess
+    :kind subprocess
+    :owner evidence-collector
+    :observed ["subprocess:scripts/check-runtime-evidence-redaction.mjs:*"]
+    :code ["scripts/check-runtime-evidence-redaction.mjs"]
+    :effects []
+    (anchor
+      :role subprocess
+      :observed "subprocess:scripts/check-runtime-evidence-redaction.mjs:*"
+      :file "scripts/check-runtime-evidence-redaction.mjs"
+      :symbol "main")
+    (trigger
+      :from-file "scripts/check-runtime-evidence-redaction.mjs"
+      :from-symbol "main"
+      :calls "scans context-gather worker and runtime shared-artifact mirrors for credential-like literals"))
 
   (behavior
     :id board-runtime-metadata-backfill-psql

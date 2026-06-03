@@ -2378,6 +2378,10 @@ mod tests {
             dependencies: vec!["postgres".to_string()],
             ops_capability: Some("deploy-center".to_string()),
             surface: Some("vm-compose".to_string()),
+            deployment: None,
+            frontend_deployment: None,
+            build_lane: None,
+            deployment_channels: Vec::new(),
             support_catalog: Some(CompiledServiceSupportCatalog {
                 service_id: Some("payments".to_string()),
                 project_id: Some("payments".to_string()),

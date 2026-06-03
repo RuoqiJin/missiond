@@ -660,6 +660,21 @@ fn recognize_codex_with_style(
         .with_screen_signals(signals);
     }
 
+    if is_codex_rate_limit_model_switch_prompt(&lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Codex,
+            PtyCanonicalState::Blocked,
+            0.93,
+            "codex:rate_limit_model_switch_prompt",
+        )
+        .with_blocked_kind("model_switch_prompt")
+        .with_phase("model_switch")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
+    }
+
     if is_codex_model_picker(lines, &lower) {
         return PtyRecognitionSnapshot::new(
             CliEngine::Codex,
@@ -963,6 +978,13 @@ fn is_codex_model_picker(lines: &[String], lower: &str) -> bool {
         && lower.contains("press enter to confirm or esc to go back"))
         || (lower.contains("access legacy models by running codex -m")
             && codex_model_picker_rows(lines).len() >= 2)
+}
+
+fn is_codex_rate_limit_model_switch_prompt(lower: &str) -> bool {
+    lower.contains("approaching rate limits")
+        && lower.contains("switch to")
+        && lower.contains("keep current model")
+        && lower.contains("press enter to confirm")
 }
 
 fn is_codex_permission_picker(lines: &[String], lower: &str) -> bool {
@@ -1392,8 +1414,16 @@ fn codex_line_is_active_status(line: &str) -> bool {
 
 fn is_codex_placeholder_text(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase();
-    normalized == "find and fix a bug in @filename"
-        || normalized == "find and fix a bug in filename"
+    matches!(
+        normalized.as_str(),
+        "find and fix a bug in @filename"
+            | "find and fix a bug in filename"
+            | "improve documentation in @filename"
+            | "improve documentation in filename"
+            | "implement {feature}"
+            | "explain this codebase"
+            | "run /review on my current changes"
+    )
 }
 
 fn is_codex_footer_line(value: &str) -> bool {
@@ -1807,6 +1837,7 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
     let current_activity = has_current_claude_activity_line(lines);
     let identity = extract_claude_code_screen_identity(lines);
     let startup_signals = extract_claude_code_startup_config_signals(lines, &lower);
+    let composer_signals = extract_claude_code_composer_signals(lines);
     let mcp = extract_claude_code_mcp_screen(lines);
 
     if let Some((kind, reason)) = provider_unavailable_match(&lower) {
@@ -1828,6 +1859,11 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
             .and_then(|signals| signals.startup_prompt_kind.as_deref())
             .unwrap_or("startup_config");
         let (reason, blocked_kind, phase) = match startup_kind {
+            "mcp_server_authorization" => (
+                "claude_code:mcp_server_authorization_prompt",
+                "provider_authorization",
+                "startup_provider_authorization",
+            ),
             "oauth_authorization" => (
                 "claude_code:oauth_authorization_prompt",
                 "auth_code_required",
@@ -1916,7 +1952,8 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
             "claude_code:turn_completion_verb",
         )
         .with_elapsed(elapsed)
-        .with_screen_identity(identity);
+        .with_screen_identity(identity)
+        .with_screen_signals(composer_signals);
     }
 
     if (lower.contains("auto mode on") || has_idle_prompt(lines)) && !current_activity {
@@ -1926,7 +1963,8 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
             0.9,
             "claude_code:prompt_idle",
         )
-        .with_screen_identity(identity);
+        .with_screen_identity(identity)
+        .with_screen_signals(composer_signals);
     }
 
     if lower.contains("esc to interrupt")
@@ -1942,7 +1980,8 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
             "claude_code:active_spinner",
         )
         .with_elapsed(elapsed)
-        .with_screen_identity(identity);
+        .with_screen_identity(identity)
+        .with_screen_signals(composer_signals);
         if let Some(tool) = extract_tool_name(lines) {
             snapshot = snapshot.with_tool(tool).with_phase("tool");
         } else if is_claude_code_logout_command_visible(lines) {
@@ -1962,6 +2001,42 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
         "claude_code:no_match",
     )
     .with_screen_identity(identity)
+}
+
+fn extract_claude_code_composer_signals(lines: &[String]) -> Option<ProviderScreenSignals> {
+    let mut signals = ProviderScreenSignals::default();
+    for line in lines.iter().rev() {
+        let Some(prompt_text) = strip_claude_code_prompt_marker(line) else {
+            continue;
+        };
+        if is_claude_code_placeholder_text(prompt_text) {
+            signals.placeholder_visible = true;
+            signals.placeholder_text = Some(normalize_identity_value(prompt_text));
+        }
+        break;
+    }
+    if signals.is_empty() {
+        None
+    } else {
+        Some(signals)
+    }
+}
+
+fn strip_claude_code_prompt_marker(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    trimmed
+        .strip_prefix('❯')
+        .or_else(|| trimmed.strip_prefix('›'))
+        .or_else(|| trimmed.strip_prefix('>'))
+        .map(str::trim)
+}
+
+fn is_claude_code_placeholder_text(value: &str) -> bool {
+    let normalized = normalize_identity_value(value).trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "try \"fix lint errors\"" | "try \"how does <filepath> work?\""
+    )
 }
 
 fn extract_claude_code_mcp_screen(lines: &[String]) -> Option<ProviderMcpScreen> {
@@ -2217,6 +2292,8 @@ fn extract_claude_code_startup_config_signals(
         && lower.contains("claude can make mistakes")
         && lower.contains("prompt injection")
         && lower.contains("press enter to continue");
+    let mcp_server_authorization_visible = lower.contains("new mcp server found in this project")
+        && lower.contains("mcp servers may execute code");
     let startup_prompt_kind = if theme_prompt_visible {
         "theme_picker"
     } else if login_method_visible {
@@ -2227,6 +2304,8 @@ fn extract_claude_code_startup_config_signals(
         "login_success_continue"
     } else if security_notes_continue_visible {
         "security_notes_continue"
+    } else if mcp_server_authorization_visible {
+        "mcp_server_authorization"
     } else {
         return None;
     };
@@ -2722,6 +2801,7 @@ fn snapshot_to_detection(snapshot: PtyRecognitionSnapshot) -> Option<StateDetect
             snapshot.blocked_kind.as_deref(),
             Some(
                 "model_picker"
+                    | "model_switch_prompt"
                     | "permission_picker"
                     | "slash_command_menu"
                     | "slash_command_input"
@@ -3352,6 +3432,23 @@ mod tests {
     }
 
     #[test]
+    fn codex_rate_limit_model_switch_prompt_is_blocked() {
+        let result = recognize_codex(&lines(&[
+            "Switch to gpt-5.4-mini for lower credit usage?",
+            "Approaching rate limits",
+            "› 1. Switch to gpt-5.4-mini                 Small, fast, and cost-efficient model",
+            "  2. Keep current model",
+            "  3. Keep current model (never show again)  Hide future rate limit reminders about this model",
+            "Press enter to confirm or esc to go back",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "codex:rate_limit_model_switch_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("model_switch_prompt"));
+        assert_eq!(result.phase.as_deref(), Some("model_switch"));
+    }
+
+    #[test]
     fn codex_permission_picker_tracks_selected_and_visible_modes() {
         let result = recognize_codex(&lines(&[
             "Update Model Permissions",
@@ -3513,6 +3610,26 @@ mod tests {
         assert_eq!(
             signals.placeholder_text.as_deref(),
             Some("Improve documentation in @filename")
+        );
+        assert_eq!(signals.last_user_message, None);
+    }
+
+    #[test]
+    fn codex_unstyled_startup_placeholder_is_screen_signal() {
+        let result = recognize_codex(&lines(&[
+            "│ >_ OpenAI Codex (v0.136.0-alpha.2) │",
+            "│ model:     gpt-5.5 xhigh   /model to change │",
+            "│ directory: ~/Projects/missiond │",
+            "› Implement {feature}",
+            "  gpt-5.5 xhigh · ~/Projects/missiond",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let signals = result.screen_signals.expect("codex signals");
+        assert!(signals.placeholder_visible);
+        assert_eq!(
+            signals.placeholder_text.as_deref(),
+            Some("Implement {feature}")
         );
         assert_eq!(signals.last_user_message, None);
     }
@@ -4359,6 +4476,50 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_idle_placeholder_is_screen_signal() {
+        let result = recognize_claude_code(&lines(&[
+            " ▐▛███▜▌   Claude Code v2.1.159",
+            "▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · Claude Max",
+            "  ▘▘ ▝▝    ~/Projects/missiond",
+            "",
+            "────────────────────────────────────────────────────────────────",
+            "❯ Try \"fix lint errors\"",
+            "────────────────────────────────────────────────────────────────",
+            "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let signals = result.screen_signals.expect("claude code signals");
+        assert!(signals.placeholder_visible);
+        assert_eq!(
+            signals.placeholder_text.as_deref(),
+            Some("Try \"fix lint errors\"")
+        );
+    }
+
+    #[test]
+    fn claude_code_idle_filepath_placeholder_is_screen_signal() {
+        let result = recognize_claude_code(&lines(&[
+            " ▐▛███▜▌   Claude Code v2.1.161",
+            "▝▜█████▛▘  Opus 4.8 with xhigh effort · Claude Max",
+            "  ▘▘ ▝▝    ~/Projects/missiond",
+            "",
+            "────────────────────────────────────────────────────────────────",
+            "❯ Try \"how does <filepath> work?\"",
+            "────────────────────────────────────────────────────────────────",
+            "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        let signals = result.screen_signals.expect("claude code signals");
+        assert!(signals.placeholder_visible);
+        assert_eq!(
+            signals.placeholder_text.as_deref(),
+            Some("Try \"how does <filepath> work?\"")
+        );
+    }
+
+    #[test]
     fn claude_code_permission_footer_modes_are_structured_identity() {
         for (footer, expected) in [
             ("? for shortcuts · ← for agents", "default"),
@@ -4723,6 +4884,37 @@ mod tests {
             signals.startup_prompt_kind.as_deref(),
             Some("security_notes_continue")
         );
+    }
+
+    #[test]
+    fn claude_code_mcp_server_authorization_is_provider_authorization_blocked() {
+        let result = recognize_claude_code(&lines(&[
+            "New MCP server found in this project: supabase",
+            "MCP servers may execute code or access system resources.",
+            "❯ 1. Use this MCP server",
+            "  2. Continue without using this MCP server",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "claude_code:mcp_server_authorization_prompt");
+        assert_eq!(
+            result.blocked_kind.as_deref(),
+            Some("provider_authorization")
+        );
+        assert_eq!(
+            result.phase.as_deref(),
+            Some("startup_provider_authorization")
+        );
+        let signals = result.screen_signals.expect("startup signals");
+        assert_eq!(
+            signals.startup_prompt_kind.as_deref(),
+            Some("mcp_server_authorization")
+        );
+        assert_eq!(
+            signals.selected_startup_option.as_deref(),
+            Some("Use this MCP server")
+        );
+        assert_eq!(signals.selected_startup_option_index, Some(1));
     }
 
     #[test]

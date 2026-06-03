@@ -13,7 +13,7 @@
     :entrypoint mission_project.resolve
     :resolver-statuses [resolved ambiguous unregistered_candidate not_found stale_runtime]
     :lookup-sources [missiond-db compiled-project-universe service-runtime-universe cwd-root-prefix explicit-domain explicit-url unregistered-root-candidate]
-    :compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url]
+    :compiled-universe-fields [aliases service_ids domains public_base_url frontend_url api_base_url domain_management]
     :rule "External agents MUST resolve project identity from names, aliases, domains, URLs, and cwd before querying KB, Board, conversations, SSOT summaries, or dispatching workers."
     :result-contract
       [:status :query :normalized :matched_project_id :matched_project :candidate_projects :candidate_roots :registration_proposal :diagnostics :next_actions]
@@ -21,6 +21,7 @@
       ["mission_project resolve is read-only and MUST NOT register or mutate projects."
        "Exact project id/domain/alias matches outrank fuzzy path or conversation evidence."
        "Compiled project-universe MUST expose aliases and service-runtime domains/URLs so ClaudeCode and Codex do not need ad-hoc filesystem grep to identify projects."
+       "Agents that answer domain, DNS, subdomain, Cloudflare, Aliyun DNS, certificate, or public URL questions from MissionD project management MUST consult compiled domain_management and xjp-domain-service before reporting authority or mutating DNS."
        "mission_project get MUST accept id/project/project_id/projectId, enrich DB-backed and compiled-only projects with compiledProject/serviceRuntime/supportCatalog when available, and expose explicit db_status plus compiled_status so get does not contradict resolve."
        "If compiled project-universe is stale or unavailable, resolve MUST return a structured stale_runtime diagnostic and continue with DB/explicit query facts instead of hard-failing ordinary project discovery."
        "Unknown domains such as a new product site MUST return unregistered_candidate with a registration_proposal rather than treating the project as absent."
@@ -39,7 +40,7 @@
 
 (project-management-taxonomy
     :schema "missiond.project-management-taxonomy.v1"
-    :fields [management-domain runtime-layer]
+    :fields [management-domain runtime-layer deployment-channels deployment-channel-drift]
     :rule "Every registered project declares both an ownership universe and a runtime layer so MissionD does not confuse XJP platform backends, MissionD production systems, ops infrastructure, brand sites, and product-service projects."
     :management-domains
       ((domain missiond-production-system
@@ -56,12 +57,14 @@
          :meaning "Public brand, portfolio, blog, and content sites such as ruoqijin.com and jinstudio.com.")
        (domain external-infra
          :meaning "External infrastructure runtime that products consume but that is not itself a user-facing product."))
-    :runtime-layers [control-plane-frontend devtool platform-monorepo support-backend ops-service ops-agent ops-tool platform-frontend mobile-client public-content-site brand-site product-fullstack product-api product-frontend external-infra-runtime]
+    :runtime-layers [control-plane-frontend devtool platform-monorepo support-backend support-agent ops-service ops-agent ops-tool platform-frontend mobile-client public-content-site brand-site product-fullstack product-api product-frontend external-infra-runtime]
     :invariants
       ["XiaojinPro core backends MUST NOT be used as product-service roots just because a product calls them."
        "MissionD production-system projects MUST stay separate from user-facing product-service-layer apps."
        "Brand/content sites are managed projects, but their runtime layer is not platform support backend unless they own shared APIs."
-       "Project queries, Board dispatch, and deploy-ops context packs MUST preserve management-domain and runtime-layer labels."])
+       "Project queries, Board dispatch, and deploy-ops context packs MUST preserve management-domain and runtime-layer labels."
+       "MissionD project management MUST show per-project deployment-channels derived from deployment-channel-plane/service-runtime-universe: build lane, runtime target/deploy-center or VM lane, and frontend hosting lane when present."
+       "Project management MUST distinguish declared MissionD channel intent, repo/workflow inferred build facts, and deploy-center live observed facts so a runtime deploy-center lane is never mistaken for a deploy-center build lane."])
 
 (registry-authority-map
     :schema "missiond.registry-authority-map.v1"
@@ -298,7 +301,7 @@
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/xjp-domain-service-blueprint.lisp"
       :status contract-first-service
-      :missiond-role "registered XJP domain management service; owns Cloudflare DNS inventory, approval-gated DNS apply, durable audit, and service-domain bindings for xiaojins.com"
+      :missiond-role "registered XJP domain management service; owns Cloudflare and Aliyun DNS inventory, approval-gated DNS apply, durable audit, and service-domain bindings for owned XJP zones"
       :surface project-registry)
     (project :id xjp-mail-service
       :aliases [xjp-mail "邮箱服务" mail-service support-mail customer-mail google-workspace-mail]

@@ -1,6 +1,6 @@
   (grounding-search-aggregate
     :schema "missiond.grounding-search-aggregate.v1"
-    :purpose "Provide one high-frequency fact-gathering entry before plan.lisp, Board triage, deploy decisions, worker delegation, or non-Jarvis intent review so operators do not have to remember every retrieval surface. Jarvis strict gate is intentionally ordered as intent.lisp confirmation first, then full MissionD grounding."
+    :purpose "Provide one high-frequency fact-gathering entry before plan.lisp, Board triage, deploy decisions, worker delegation, or non-Jarvis intent review so operators do not have to remember every retrieval surface. Jarvis iOS/openai traffic still authors intent.lisp before full MissionD grounding, but the default gate is internal archive-and-continue rather than a user confirmation card; explicit manual review mode may retain intent confirmation."
     :primary-tool mission_context_gather
     :default-sources [runtime_truth project_ssot reviewed_kb active_board support_refs]
     :typed-evidence-lanes [runtime_truth project_ssot reviewed_kb active_board skill_evidence conversation_audit cold_archive support_refs]
@@ -39,7 +39,11 @@
        (source response-source-compaction
          :tool mission_context_gather
          :scope default-response
-         :rule "mission_context_gather default responses expose source_summaries, evidence_lanes, evidence_items, support_catalog, and raw_sources_omitted=true; legacy raw sources are returned only when include_raw_sources=true or source_profile=full_debug. evidence_refs in compact mode are derived from compact summaries, not raw skill/conversation/source payloads."))
+         :rule "mission_context_gather default responses expose source_summaries, evidence_lanes, evidence_items, support_catalog, and raw_sources_omitted=true; legacy raw sources are returned only when include_raw_sources=true or source_profile=full_debug. evidence_refs in compact mode are derived from compact summaries, not raw skill/conversation/source payloads.")
+       (source repo-search-facade
+         :tool mission_repo_search
+         :scope profile-aware-repo-text
+         :rule "Agents and worker prompts MUST use mission_repo_search for repository text lookup when authority matters. The facade wraps rg with source_profile, active-authoring/source defaults, lane tagging, and cold/runtime/archive access only when source_profile=full_debug plus explicit include_runtime/include_ignored/path opt-in is present. Direct shell rg --hidden --no-ignore is for human forensics only and must be reflected as full_debug evidence if it informs MissionD context."))
     :functions
       ((function context-gather-before-intent
          :entry [user-request BoardTaskCreated external-intent-envelope unknowns-inventory]
@@ -48,13 +52,13 @@
                 (step s3 :logic "synthesize evidence_refs and remaining unknowns into intent.lisp review packet")
                 (step s4 :logic "write high-confidence inferred user intent as memory:decision candidate only after evidence refs are attached"))
          :egress [context-gather-result intent-review-packet intent-memory-candidate])
-       (function jarvis-grounding-after-intent-confirmation
-         :entry [JarvisSSE confirmed-intent intent_artifact_id mission_context_gather provider-interaction-box ClaudeCode-MCP]
-         :core ((step s1 :logic "do not run full context gathering before intent.lisp confirmation; the first user turn authors only reviewable intent.lisp")
-                (step s2 :logic "after missiond_intent_confirmed=true, call mission_context_gather(persist=true) to materialize grounding_context_id, context_pack_path, and worker-readable context_pack_file")
-                (step s3 :logic "submit a provider-box ClaudeCode worker-turn with MissionD/XJP MCP enabled, no shell, scoped write access only to target grounding_report_file, and confirmed intent artifact metadata")
+       (function jarvis-grounding-after-intent-archive
+         :entry [JarvisSSE archived-intent intent_artifact_id mission_context_gather provider-interaction-box ClaudeCode-MCP]
+         :core ((step s1 :logic "author intent.lisp first and persist it as an archive/replay artifact; default Jarvis iOS/openai traffic MUST NOT block on a user confirmation card")
+                (step s2 :logic "after intent_artifact_id is available, call mission_context_gather(persist=true) to materialize grounding_context_id, context_pack_path, and worker-readable context_pack_file")
+                (step s3 :logic "submit a provider-box ClaudeCode worker-turn with MissionD/XJP MCP enabled, no shell, scoped write access only to target grounding_report_file, and archived intent artifact metadata")
                 (step s4 :logic "require the worker to write interaction-grounding-report Markdown with upstream/downstream evidence, Board/session/artifact facts, permission boundary, unknowns, and plan-author recommendations")
-                (step s5 :logic "store the Markdown report as shared_artifacts(kind=interaction-grounding-report) and carry grounding_report_file/hash/worker ids into plan.lisp payloads and confirmation metadata"))
+                (step s5 :logic "store the Markdown report as shared_artifacts(kind=interaction-grounding-report) and carry grounding_report_file/hash/worker ids into key judgment, plan.lisp, dispatch metadata, archive, and replay"))
          :egress [context-gather-result interaction-grounding-report grounding_report_file grounding_report_hash plan-author-input])
        (function task-record-indexing
          :entry [BoardTask workflow_run task-result-artifact audit-event]
@@ -87,6 +91,8 @@
        "mission_context_gather MUST filter persisted evidence_items that reference compiled-deployment-policy path/source_hash values or runtime_environment compiled_runtime_dir values not matching the active MISSIOND_COMPILED_RUNTIME_DIR before returning or injecting them; context_noise_metrics.evidence_item_read_model MUST expose freshness_filtered_count plus compiled_policy_filtered_count and runtime_environment_filtered_count."
        "mission_context_gather MUST assign stable evidence_item IDs for volatile compact projections runtime_environment, support_catalog, and deployment_closure_policy using profile/project/task/source identity rather than release path/hash-bearing summary text, so upsert overwrites the current projection instead of accumulating stale per-deploy content-hash rows."
        "mission_context_gather MUST filter persisted generic deploy-closure compact evidence that lacks project/service/deploy-center/runtime identity, such as placeholder service deployment closure support with deploy-center/runtime-target defaults; context_noise_metrics.evidence_item_read_model MUST expose incomplete_filtered_count."
+       "mission_repo_search MUST be the default repo text lookup surface for workers and agents; it MUST apply source_profile lane allowlists before returning hits, search active SSOT/source roots by default, and refuse cold runtime/archive paths outside full_debug."
+       "mission_repo_search source_profile=full_debug MUST expose include_ignored/include_runtime/cold_requested/cold_allowed metrics whenever it uses --hidden, --no-ignore, or cold runtime/archive roots."
        "mission_context_gather MUST aggregate runtime_environment, KB, active SSOT, project registry, skill operational evidence, infra evidence, active Board task records, and bounded conversation logs through authority-aware evidence lanes rather than one flat prompt preload."
        "Board/task/workflow records are searchable retrieval evidence, not active long-term memory unless promoted by an explicit review workflow."
        "Conversation logs are searched by query and bounded window; they are not default prompt preloads."
@@ -119,6 +125,18 @@
          :storage "shared_artifacts(kind=interaction-grounding-report)"
          :fields [interaction_id conversation_id chat_id grounding_context_id context_pack_path context_pack_file grounding_report_file confirmed_intent_artifact_id grounding_worker_slot_id grounding_worker_turn_id provider_session_identity content evidence_sources unknowns plan_author_recommendations]
          :rule "Jarvis full context collection after confirmed intent is a ClaudeCode provider-box worker-turn with MissionD/XJP MCP mounted. It MUST write a bounded Markdown report file before plan.lisp authoring and persist that report as this artifact kind. The report is evidence for plan.lisp, grounded_direct_answer, BoardTask runtime_metadata, archive, and replay; it is not a BoardTask result and must not itself create/settle a BoardTask.")
+      (kind interaction-key-judgment
+         :schema "missiond.interaction-key-judgment.v1"
+         :id-field artifact_hash
+         :storage "shared_artifacts(kind=interaction-key-judgment)"
+         :fields [interaction_id conversation_id chat_id grounding_context_id grounding_report_file grounding_report_hash intent_artifact_id judgment confidence rejected_hypotheses evidence_refs planning_implications acceptance_focus author provider slot_id model]
+         :rule "After ClaudeCode writes interaction-grounding-report and before plan.lisp authoring, Codex CLI GPT-5.5 xhigh MUST produce a concise key judgment artifact from the user input plus the grounding report, such as '不是算力差异，是用量差异'. This is a planning premise, not a user confirmation gate and not an implementation step. plan.lisp MUST cite this artifact/hash, use its planning_implications, and fail closed if the key judgment is absent or low-confidence without explanation.")
+      (kind interaction-communication
+         :schema "missiond.interaction-communication.v1"
+         :id-field artifact_hash
+         :storage "shared_artifacts(kind=interaction-communication)"
+         :fields [interaction_id conversation_id chat_id phase communicator_provider communicator_engine communicator_slot_id communicator_model intent_artifact_id grounding_context_id grounding_report_hash key_judgment_artifact_id plan_artifact_id board_task_id final_task_id task_result_artifact_hash plan_summary status_summary result_summary caveats next_actions sources_used]
+         :rule "Jarvis user-facing speech after plan authoring, BoardTask dispatch, follow-up, or terminal result SHOULD be produced by the communication officer lane. The communicator is a read-only AGY/Gemini 3.1 Pro provider-box turn: it may summarize current plan/status/result from archived artifacts and task-result-artifact evidence, but MUST NOT change intent.lisp, key judgment, plan.lisp, atomization, BoardTask state, or claim execution that has not completed.")
       (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
          :id-field artifact_hash
@@ -136,7 +154,7 @@
          :id-field artifact_hash
          :storage "shared_artifacts(kind=interaction-direct-answer)"
          :fields [interaction_id grounding_context_id grounding_report_file grounding_report_artifact_path grounding_report_hash intent_artifact_id plan_artifact_id execution_mode requires_board_task answer_policy provider content sources_used]
-        :rule "After mandatory intent.lisp, interaction-grounding-report, and plan.lisp confirmation, execution_mode=grounded_direct_answer with requires_board_task=false answers through provider-interaction-box mode=grounded-direct-answer, streams answer_delta events, and writes this interaction result artifact before terminal final. The default provider is codex_cli via MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER; selected providers must be registered provider-box drivers. Missing provider-box auth, unavailable provider CLI, missing grounding report, or missing matched durable final is a typed failure and must not fall back to BoardTask, xjpcode text-only, local code search, or fabricated answers.")
+        :rule "After mandatory archived intent.lisp, interaction-grounding-report, key judgment, and archived plan.lisp, execution_mode=grounded_direct_answer with requires_board_task=false answers through provider-interaction-box and writes this interaction result artifact before terminal final. The default user-facing materializer is the Jarvis communication officer (AGY/Gemini 3.1 Pro) unless explicitly overridden. Missing provider-box auth, unavailable provider CLI, missing grounding report, or missing matched durable final is a typed failure and must not fall back to BoardTask, xjpcode text-only, local code search, or fabricated answers.")
       (kind provider-interaction-turn
          :schema "missiond.provider-interaction-turn.v1"
          :id-field turn_id
@@ -171,8 +189,8 @@
          :schema "missiond.plan-atomization-graph.v1"
          :id-field atom_graph_id
          :storage "shared_artifacts(kind=plan-atomization-graph)"
-         :fields [atom_graph_id interaction_id grounding_context_id intent_artifact_id plan_artifact_id shard_nodes atom_tasks dependency_edges serial_groups parallel_groups predicted_tool_sequence context_sources detour_budget]
-         :rule "A confirmed plan.lisp is a prediction and decomposition input, not a worker prompt. Before implementation dispatch, MissionD compiles it into shard_nodes and atom_tasks. Every atom task MUST declare execution_order=serial or execution_order=parallel, serial atoms MUST be represented by dependsOn/dependency_edges, parallel atoms MUST share a parallel_group without mutual dependencies, and provider workers receive only atom-level context slices."))
+         :fields [atom_graph_id interaction_id grounding_context_id intent_artifact_id key_judgment_artifact_id plan_artifact_id shard_nodes atom_tasks dependency_edges serial_groups parallel_groups predicted_tool_sequence context_sources detour_budget assignment_policy]
+         :rule "A confirmed plan.lisp is a prediction and decomposition input, not a worker prompt. Jarvis plan authoring MUST split broad work into up to ten workstreams, and each workstream into up to ten atom tasks; small objectives may mark unused atoms not_applicable with a reason, but broad work MUST avoid fake padding. Every atom task MUST declare category=query|code_change|deploy_ops|judgment|acceptance, assignee_engine=claude_code|codex, execution_order=serial|parallel, depends_on, parallel_group, read_scope/write_scope, and acceptance. Assignment is fixed: query/code_change/deploy_ops go to ClaudeCode workers; judgment/acceptance go to Codex CLI GPT-5.5 xhigh workers. Serial atoms MUST be represented by dependsOn/dependency_edges, parallel atoms MUST share a parallel_group without mutual dependencies, and provider workers receive only atom-level context slices."))
     :functions
       ((function context-gather-artifact
          :entry [mission_context_gather unknowns-inventory BoardTask source_id project_id]
@@ -183,14 +201,15 @@
                 (step s5 :logic "Jarvis worker prompts must prefer context_pack_file; if unavailable, they may use mission_shared_memory(action=artifact_get, hash=...) or mission_context_slice. Opaque artifact URIs without retrieval instructions are invalid")
                 (step s6 :logic "Jarvis worker prompts must include target engine/pool, write_policy, read/write scope, confirmed intent_artifact_id, confirmed plan_artifact_id, and a compact accepted execution slice for no-MCP workers"))
          :egress [grounding_context_id context_pack_path context_pack_file canonical_context_pack_file sources_used diagnostics shared_artifact])
-       (function plan-atomization-compiler
-         :entry [confirmed-plan.lisp grounding_context_id intent_artifact_id plan_artifact_id provider-text-only-source]
+      (function plan-atomization-compiler
+         :entry [archived-plan.lisp grounding_context_id intent_artifact_id key_judgment_artifact_id plan_artifact_id provider-text-only-source]
          :core ((step s1 :logic "treat plan.lisp as a high-level forecast of the route, risks, evidence, and expected implementation surfaces; never dispatch it directly to a worker")
                 (step s2 :logic "optionally ask ClaudeCode/Codex/Agy proposal sources through provider-interaction-box mode=pure-text-single-turn with no tools, no shell, no file reads, no MCP, and no hidden subagents; legacy provider-text-only-source remains migration-only")
-                (step s3 :logic "compile the accepted plan into shard_nodes, then recursively split each shard into atom_tasks whose objective is small enough for a low-skill worker to execute or verify")
-                (step s4 :logic "attach context_sources, predicted_tool_sequence, acceptance, read_scope, write_scope, and detour_budget to each atom")
-                (step s5 :logic "derive dependency_edges, serial_groups, and parallel_groups; serial atoms lower to BoardTask dependsOn, while parallel atoms lower to independent BoardTasks sharing a parallel_group")
-                (step s6 :logic "persist plan-atomization-graph and write atom_task_id, atom_path, execution_order, dependency_policy, and parallel_group into BoardTask runtime_metadata/task_contracts"))
+                (step s3 :logic "compile the accepted plan plus key_judgment planning_implications into shard_nodes, then recursively split each shard into up to ten atom_tasks whose objective is small enough for a low-skill worker to execute or verify")
+                (step s4 :logic "assign query/code_change/deploy_ops atoms to ClaudeCode workers and judgment/acceptance atoms to Codex CLI GPT-5.5 xhigh workers")
+                (step s5 :logic "attach context_sources, predicted_tool_sequence, acceptance, read_scope, write_scope, and detour_budget to each atom")
+                (step s6 :logic "derive dependency_edges, serial_groups, and parallel_groups; serial atoms lower to BoardTask dependsOn, while parallel atoms lower to independent BoardTasks sharing a parallel_group")
+                (step s7 :logic "persist plan-atomization-graph and write atom_task_id, atom_path, execution_order, dependency_policy, and parallel_group into BoardTask runtime_metadata/task_contracts"))
          :egress [plan-atomization-graph atom_task_contracts BoardTask.runtime_metadata task_contracts])
        (function xjpcode-atom-worker-runtime
          :entry [atom_task_contract context_capsule_lisp read_scope write_scope tool_policy xjpcode-worker]

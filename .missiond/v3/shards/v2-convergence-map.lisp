@@ -468,7 +468,8 @@
         :v3-function knowledge-memory
         :surface memory-kb
         :tools [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon
-                mission_code_search mission_memory mission_insight mission_intent mission_context_gather mission_context_boot])
+                mission_code_search mission_memory mission_insight mission_intent mission_context_gather mission_context_boot
+                mission_repo_search])
       (tool-group shared-memory-tools
         :status code-aligned
         :v2-source ".missiond/tasks/schema/shared-memory-v1.lisp :: shared-memory-schema missiond.shared-memory.v1 (compatibility projection)"

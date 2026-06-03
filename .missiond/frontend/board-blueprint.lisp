@@ -75,11 +75,11 @@
       :fields [runtime dynamic revalidate]
       :rule "Runtime-only MissionD proxy API routes must export nodejs runtime, force-dynamic, and revalidate=0 so production builds never collect MissionD IPC data at build time.")
     (projection service-runtime-universe
-      :source [mission_project.universe service-runtime-universe]
+      :source [mission_project.universe mission_project.deployment_channels service-runtime-universe deployment-channel-plane]
       :entry ["packages/board/src/app/api/projects/route.ts"
               "packages/board/src/components/SystemDashboard.tsx"]
-      :fields [serviceId project root environment publicBaseUrl issuer domains dnsProvider dnsCapability deployment proxy ports health dependencies opsCapability sourceEvidence risks]
-      :rule "SystemDashboard must show production service domain/deployment/DNS capability from MissionD Universe, not from local hardcoded cards.")
+      :fields [serviceId project root environment publicBaseUrl issuer domains dnsProvider dnsCapability deployment buildLane frontendDeployment deploymentChannels channelKind authority sourceRef observedStatus driftStatus proxy ports health dependencies opsCapability sourceEvidence risks]
+      :rule "SystemDashboard must show production service domain/deployment/DNS capability and per-project deploymentChannels from MissionD Universe/deployment-channel-plane, not from local hardcoded cards.")
     (projection infrastructure-universe
       :source [mission_infra_query.infrastructure-universe mission_infra_query.skill_evidence mission_infra_query.credential_refs mission_infra_query.reconcile]
       :entry ["packages/board/src/app/api/infra/route.ts"

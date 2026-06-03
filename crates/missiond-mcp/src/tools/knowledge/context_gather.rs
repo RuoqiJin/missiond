@@ -22,8 +22,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "default": "intent_default",
                         "description": "source_profile alias"
                     },
-                    "project_id": {"type": "string", "description": "MissionD project id"},
-                    "project": {"type": "string", "description": "project_id alias"},
+                    "project_id": {"type": "string", "description": "MissionD project/service id; deploy_ops also accepts Deploy Center slugs such as xjp-payments and resolves them through compiled service runtime"},
+                    "project": {"type": "string", "description": "project_id alias; may be a Deploy Center slug for service-scoped deploy evidence"},
                     "skill": {"type": "string", "description": "优先指定 skill topic"},
                     "infra_target": {"type": "string", "description": "优先指定 runtime target id"},
                     "infraTarget": {"type": "string", "description": "infra_target alias"},
@@ -52,6 +52,42 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "conversationTimeRange": {"type": "string", "default": "last_30d", "description": "conversation_time_range alias"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 25, "default": 8}
                 }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_repo_search",
+            "Profile-aware repo search facade：用 Evidence Lane policy 包住 rg，默认只搜 active SSOT/source；cold runtime/archive/raw 历史必须 source_profile=full_debug 并显式 opt-in。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Fixed-string search query by default"},
+                    "source_profile": {
+                        "type": "string",
+                        "enum": ["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
+                        "default": "intent_default",
+                        "description": "Evidence lane profile applied before returning repo hits"
+                    },
+                    "sourceProfile": {
+                        "type": "string",
+                        "enum": ["intent_default", "deploy_ops", "conversation_audit", "full_debug"],
+                        "default": "intent_default",
+                        "description": "source_profile alias"
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional repo-relative path allowlist. Cold/archive paths are ignored unless full_debug."
+                    },
+                    "include_runtime": {"type": "boolean", "default": false, "description": "Allow cold runtime/archive roots only with source_profile=full_debug"},
+                    "includeRuntime": {"type": "boolean", "default": false, "description": "include_runtime alias"},
+                    "include_ignored": {"type": "boolean", "default": false, "description": "Use --no-ignore only when source_profile=full_debug"},
+                    "includeIgnored": {"type": "boolean", "default": false, "description": "include_ignored alias"},
+                    "include_hidden": {"type": "boolean", "description": "Use --hidden; defaults on for explicit hidden SSOT paths and full_debug"},
+                    "includeHidden": {"type": "boolean", "description": "include_hidden alias"},
+                    "regex": {"type": "boolean", "default": false, "description": "Treat query as a regex instead of fixed string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25}
+                },
+                "required": ["query"]
             }),
         ),
         ToolDefinition::new(

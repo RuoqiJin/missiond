@@ -175,12 +175,12 @@ impl EngineController for GenericCliController {
                 sandbox: req.sandbox.clone(),
                 approval_policy: req.approval_policy.clone(),
                 tool_policy_path: req.tool_policy_path.clone(),
-                extra_env: std::collections::HashMap::new(),
+                extra_env: req.env.clone(),
                 initial_prompt: None,
                 command_override: None,
                 ..Default::default()
             },
-            None,
+            Some(&req.env),
         )
         .await?;
         let session_id = format!("pty-{}", slot_id);

@@ -34,6 +34,7 @@ const DEFAULT_CODEX_SLOT: &str = "slot-codex-provider-box";
 const OBSERVE_SETTLE_MS: u64 = 350;
 const OBSERVE_STABLE_POLL_MS: u64 = 120;
 const OBSERVE_STABLE_MAX_MS: u64 = 1_000;
+const PROMPT_SUBMISSION_IDLE_GRACE_SECS: u64 = 30;
 const CODEX_EXEC_TEXT_PROVIDER: &str = "codex_exec_text";
 const CODEX_RESEARCH_PROVIDER: &str = "codex_research";
 const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
@@ -166,6 +167,12 @@ enum CodexTrustSelection {
     Continue,
     Quit,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodexRateLimitPromptSelection {
+    selected_index: usize,
+    target_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1062,6 +1069,58 @@ impl CodexProviderDriver {
         after
     }
 
+    async fn slot_session_is_idle(&self, slot_id: &str) -> bool {
+        self.pty
+            .get_status(slot_id)
+            .await
+            .as_ref()
+            .is_some_and(|info| info.state == SessionState::Idle)
+    }
+
+    async fn codex_ready_for_prompt(&self, slot_id: &str, observation: &CodexObservation) -> bool {
+        is_ready_for_codex_text(observation) && self.slot_session_is_idle(slot_id).await
+    }
+
+    async fn wait_step_until_ready_for_prompt(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        timeout: Duration,
+        expected_change: impl Into<Option<String>>,
+    ) -> CodexObservation {
+        let before = self.observe(slot_id).await;
+        let started = Instant::now();
+        let after = loop {
+            let observation = self.observe(slot_id).await;
+            if self.codex_ready_for_prompt(slot_id, &observation).await
+                || started.elapsed() >= timeout
+            {
+                break observation;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+
+        let status = if self.codex_ready_for_prompt(slot_id, &after).await {
+            PtyStepVerificationStatus::Verified
+        } else if before.text != after.text {
+            PtyStepVerificationStatus::Ambiguous
+        } else {
+            PtyStepVerificationStatus::Unchanged
+        };
+        result.record_step(PtyStepRecord::new(
+            Self::pty_observation(slot_id, &before),
+            PtyStepAction {
+                action_type: "wait".to_string(),
+                human_input: format!("wait {}s", timeout.as_secs()),
+                redacted: false,
+            },
+            Self::pty_observation(slot_id, &after),
+            expected_change.into(),
+            status,
+        ));
+        after
+    }
+
     async fn ensure_startup_ready_locked(
         &self,
         result: &mut ProviderBoxResult,
@@ -1073,29 +1132,65 @@ impl CodexProviderDriver {
                 slot_id,
                 Duration::from_secs(CODEX_STARTUP_READY_WAIT_SECS),
                 Some("wait for Codex startup surface".to_string()),
-                |obs| is_ready_for_codex_text(obs) || is_codex_workspace_trust_prompt(obs),
+                |obs| {
+                    is_ready_for_codex_text(obs)
+                        || is_codex_workspace_trust_prompt(obs)
+                        || is_codex_rate_limit_model_switch_prompt(obs)
+                },
             )
             .await;
 
-        if is_codex_workspace_trust_prompt(&observation) {
-            observation = match self
-                .accept_workspace_trust_locked(result, slot_id, observation)
-                .await
-            {
-                Some(observation) => observation,
-                None => return CodexStartupOutcome::Failed,
-            };
+        loop {
+            if is_codex_workspace_trust_prompt(&observation) {
+                observation = match self
+                    .accept_workspace_trust_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return CodexStartupOutcome::Failed,
+                };
+                continue;
+            }
+            if is_codex_rate_limit_model_switch_prompt(&observation) {
+                observation = match self
+                    .dismiss_rate_limit_model_switch_prompt_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return CodexStartupOutcome::Failed,
+                };
+                continue;
+            }
+            break;
         }
 
-        if is_ready_for_codex_text(&observation) {
+        if is_ready_for_codex_text(&observation) && !self.slot_session_is_idle(slot_id).await {
+            observation = self
+                .wait_step_until_ready_for_prompt(
+                    result,
+                    slot_id,
+                    Duration::from_secs(8),
+                    Some("wait for Codex PTY session state to become idle".to_string()),
+                )
+                .await;
+        }
+
+        if self.codex_ready_for_prompt(slot_id, &observation).await {
             CodexStartupOutcome::Ready
         } else {
+            let session_state = self
+                .pty
+                .get_status(slot_id)
+                .await
+                .as_ref()
+                .map(|info| format!("{:?}", info.state));
             result.status = ProviderBoxStatus::Blocked;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
                 "Codex startup did not reach a ready composer",
                 json!({
                     "slot_id": slot_id,
+                    "session_state": session_state,
                     "state": observation.snapshot.state,
                     "reason": observation.snapshot.reason,
                     "blocked_kind": observation.snapshot.blocked_kind,
@@ -1167,28 +1262,117 @@ impl CodexProviderDriver {
                 Some("confirm Codex workspace trust selection".to_string()),
             )
             .await;
-        if !is_ready_for_codex_text(&observation) {
+        if !self.codex_ready_for_prompt(slot_id, &observation).await {
             observation = self
-                .wait_step_until(
+                .wait_step_until_ready_for_prompt(
                     result,
                     slot_id,
                     Duration::from_secs(CODEX_TRUST_READY_WAIT_SECS),
                     Some("wait for Codex composer after workspace trust confirmation".to_string()),
-                    is_ready_for_codex_text,
                 )
                 .await;
         }
-        if is_ready_for_codex_text(&observation) {
+        if self.codex_ready_for_prompt(slot_id, &observation).await {
             Some(observation)
         } else {
+            let session_state = self
+                .pty
+                .get_status(slot_id)
+                .await
+                .as_ref()
+                .map(|info| format!("{:?}", info.state));
             result.status = ProviderBoxStatus::Blocked;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
                 "Codex workspace trust confirmation did not reach the composer",
                 json!({
                     "slot_id": slot_id,
+                    "session_state": session_state,
                     "state": observation.snapshot.state,
                     "reason": observation.snapshot.reason,
+                }),
+            ));
+            None
+        }
+    }
+
+    async fn dismiss_rate_limit_model_switch_prompt_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        mut observation: CodexObservation,
+    ) -> Option<CodexObservation> {
+        let Some(selection) = codex_rate_limit_prompt_selection(&observation) else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex rate-limit model switch prompt was visible but its selection was not recognizable",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "rule": "provider-box must keep the requested model and dismiss the prompt before submitting work"
+                }),
+            ));
+            return None;
+        };
+
+        let (key_name, bytes, steps) = if selection.target_index >= selection.selected_index {
+            (
+                "down",
+                "\x1b[B",
+                selection.target_index - selection.selected_index,
+            )
+        } else {
+            (
+                "up",
+                "\x1b[A",
+                selection.selected_index - selection.target_index,
+            )
+        };
+
+        for _ in 0..steps {
+            let _ = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key(key_name),
+                    bytes,
+                    Some("move Codex rate-limit prompt to keep current model".to_string()),
+                )
+                .await;
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("dismiss Codex rate-limit prompt without switching model".to_string()),
+            )
+            .await;
+        if !self.codex_ready_for_prompt(slot_id, &observation).await {
+            observation = self
+                .wait_step_until_ready_for_prompt(
+                    result,
+                    slot_id,
+                    Duration::from_secs(5),
+                    Some("wait for Codex composer after rate-limit prompt dismissal".to_string()),
+                )
+                .await;
+        }
+
+        if self.codex_ready_for_prompt(slot_id, &observation).await {
+            Some(observation)
+        } else {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex rate-limit prompt dismissal did not reach a ready composer",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "blocked_kind": observation.snapshot.blocked_kind,
                 }),
             ));
             None
@@ -1208,16 +1392,32 @@ impl CodexProviderDriver {
                     None => return false,
                 };
             }
-            if is_ready_for_codex_text(&observation) {
+            if is_codex_rate_limit_model_switch_prompt(&observation) {
+                observation = match self
+                    .dismiss_rate_limit_model_switch_prompt_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return false,
+                };
+            }
+            if self.codex_ready_for_prompt(slot_id, &observation).await {
                 return true;
             }
             if started.elapsed() > Duration::from_secs(8) {
+                let session_state = self
+                    .pty
+                    .get_status(slot_id)
+                    .await
+                    .as_ref()
+                    .map(|info| format!("{:?}", info.state));
                 result.status = ProviderBoxStatus::Blocked;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
                     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
                     "Codex slot is not ready for provider-box prompt submission",
                     json!({
                         "slot_id": slot_id,
+                        "session_state": session_state,
                         "state": observation.snapshot.state,
                         "reason": observation.snapshot.reason,
                         "blocked_kind": observation.snapshot.blocked_kind,
@@ -1280,6 +1480,8 @@ impl CodexProviderDriver {
         let timeout_secs = request.timeout_secs.unwrap_or(180).clamp(10, 7_200);
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         let mut idle_seen_at: Option<Instant> = None;
+        let mut unconfirmed_idle_seen_at: Option<Instant> = None;
+        let mut prompt_submission_confirmed = false;
 
         loop {
             if let Some(final_turn) = self
@@ -1307,6 +1509,20 @@ impl CodexProviderDriver {
             }
 
             let observation = self.observe(slot_id).await;
+            prompt_submission_confirmed |= codex_prompt_submission_observed(request, &observation);
+            if is_codex_rate_limit_model_switch_prompt(&observation) {
+                if self
+                    .dismiss_rate_limit_model_switch_prompt_locked(result, slot_id, observation)
+                    .await
+                    .is_none()
+                {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.slot_id = Some(slot_id.to_string());
+                    return result.clone();
+                }
+                idle_seen_at = None;
+                continue;
+            }
             if observation.snapshot.state == PtyCanonicalState::Blocked {
                 let mut failed = ProviderBoxResult::base(request, ProviderBoxStatus::Blocked);
                 failed.slot_id = Some(slot_id.to_string());
@@ -1327,12 +1543,65 @@ impl CodexProviderDriver {
                 observation.snapshot.state,
                 PtyCanonicalState::Idle | PtyCanonicalState::Complete
             ) {
+                if !prompt_submission_confirmed {
+                    if let Some(seen_at) = unconfirmed_idle_seen_at {
+                        if seen_at.elapsed()
+                            >= Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS)
+                        {
+                            let mut failed =
+                                ProviderBoxResult::base(request, ProviderBoxStatus::Failed);
+                            failed.slot_id = Some(slot_id.to_string());
+                            failed.step_records = result.step_records.clone();
+                            let session_state = self
+                                .pty
+                                .get_status(slot_id)
+                                .await
+                                .as_ref()
+                                .map(|info| format!("{:?}", info.state));
+                            failed.add_diagnostic(ProviderBoxDiagnostic::error(
+                                DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                                "Codex returned to input before the provider-box prompt submission was observable",
+                                json!({
+                                    "slot_id": slot_id,
+                                    "correlation_id": request.correlation_id,
+                                    "session_state": session_state,
+                                    "codex_home": self.codex_home.display().to_string(),
+                                    "prompt_submission_confirmed": false,
+                                    "grace_secs": PROMPT_SUBMISSION_IDLE_GRACE_SECS,
+                                    "rule": "cold-start/default provider turns are ignored until the current correlation id is observed"
+                                }),
+                            ));
+                            return failed;
+                        }
+                    } else {
+                        unconfirmed_idle_seen_at = Some(Instant::now());
+                    }
+                    idle_seen_at = None;
+                    tokio::time::sleep(Duration::from_millis(750)).await;
+                    continue;
+                }
+                unconfirmed_idle_seen_at = None;
                 if let Some(seen_at) = idle_seen_at {
                     if seen_at.elapsed() >= Duration::from_secs(3) {
                         let mut failed =
                             ProviderBoxResult::base(request, ProviderBoxStatus::Failed);
                         failed.slot_id = Some(slot_id.to_string());
                         failed.step_records = result.step_records.clone();
+                        let screen_signals = observation.snapshot.screen_signals.clone();
+                        let last_user_message = screen_signals
+                            .as_ref()
+                            .and_then(|signals| signals.last_user_message.clone());
+                        let placeholder_visible = screen_signals
+                            .as_ref()
+                            .is_some_and(|signals| signals.placeholder_visible);
+                        let placeholder_text = screen_signals
+                            .as_ref()
+                            .and_then(|signals| signals.placeholder_text.clone());
+                        let prompt_submission_confirmed =
+                            observation.text.contains(&request.correlation_id)
+                                || last_user_message.as_deref().is_some_and(|message| {
+                                    message.contains(&request.correlation_id)
+                                });
                         failed.add_diagnostic(ProviderBoxDiagnostic::error(
                             DIAG_PROVIDER_DURABLE_FINAL_MISSING,
                             "Codex returned to input but no matching durable rollout final was found",
@@ -1340,6 +1609,10 @@ impl CodexProviderDriver {
                                 "slot_id": slot_id,
                                 "correlation_id": request.correlation_id,
                                 "codex_home": self.codex_home.display().to_string(),
+                                "prompt_submission_confirmed": prompt_submission_confirmed,
+                                "last_user_message": last_user_message,
+                                "placeholder_visible": placeholder_visible,
+                                "placeholder_text": placeholder_text,
                                 "rule": "PTY screen text is diagnostic only; no fallback final was synthesized"
                             }),
                         ));
@@ -1350,6 +1623,7 @@ impl CodexProviderDriver {
                 }
             } else {
                 idle_seen_at = None;
+                unconfirmed_idle_seen_at = None;
             }
 
             if Instant::now() >= deadline {
@@ -2942,6 +3216,7 @@ impl ProviderDriver for CodexProviderDriver {
             status: true,
             mcp_status: true,
             mcp_reconnect: false,
+            prompt_authorization: false,
         }
     }
 
@@ -3551,6 +3826,21 @@ fn is_ready_for_codex_text(observation: &CodexObservation) -> bool {
         && observation.snapshot.reason != "session_state:Exited"
 }
 
+fn codex_prompt_submission_observed(
+    request: &ProviderInteractionRequest,
+    observation: &CodexObservation,
+) -> bool {
+    if observation.text.contains(&request.correlation_id) {
+        return true;
+    }
+    observation
+        .snapshot
+        .screen_signals
+        .as_ref()
+        .and_then(|signals| signals.last_user_message.as_deref())
+        .is_some_and(|message| message.contains(&request.correlation_id))
+}
+
 fn is_codex_empty_composer(observation: &CodexObservation) -> bool {
     observation
         .snapshot
@@ -3569,6 +3859,64 @@ fn is_codex_workspace_trust_prompt(observation: &CodexObservation) -> bool {
                 && lower.contains("no, quit")
                 && lower.contains("press enter to continue")
         }
+}
+
+fn is_codex_rate_limit_model_switch_prompt(observation: &CodexObservation) -> bool {
+    observation.snapshot.reason == "codex:rate_limit_model_switch_prompt"
+        || observation.snapshot.blocked_kind.as_deref() == Some("model_switch_prompt")
+        || {
+            let lower = observation.text.to_ascii_lowercase();
+            lower.contains("approaching rate limits")
+                && lower.contains("switch to")
+                && lower.contains("keep current model")
+                && lower.contains("press enter to confirm")
+        }
+}
+
+fn codex_rate_limit_prompt_selection(
+    observation: &CodexObservation,
+) -> Option<CodexRateLimitPromptSelection> {
+    if !is_codex_rate_limit_model_switch_prompt(observation) {
+        return None;
+    }
+
+    let mut selected_index: Option<usize> = None;
+    let mut first_keep_index: Option<usize> = None;
+    let mut never_show_index: Option<usize> = None;
+    let mut row_index = 0usize;
+
+    for line in &observation.lines {
+        let trimmed = line.trim_start();
+        let selected =
+            trimmed.starts_with('›') || trimmed.starts_with('>') || trimmed.starts_with('❯');
+        let body = trimmed
+            .trim_start_matches(|ch| matches!(ch, '›' | '>' | '❯'))
+            .trim_start();
+        let Some((number, label)) = body.split_once('.') else {
+            continue;
+        };
+        if number.trim().parse::<usize>().is_err() {
+            continue;
+        }
+
+        if selected {
+            selected_index = Some(row_index);
+        }
+        let label_lower = label.to_ascii_lowercase();
+        if label_lower.contains("keep current model") {
+            first_keep_index.get_or_insert(row_index);
+            if label_lower.contains("never show again") {
+                never_show_index = Some(row_index);
+            }
+        }
+        row_index += 1;
+    }
+
+    let target_index = never_show_index.or(first_keep_index)?;
+    Some(CodexRateLimitPromptSelection {
+        selected_index: selected_index.unwrap_or(0),
+        target_index,
+    })
 }
 
 fn selected_codex_workspace_trust_option(observation: &CodexObservation) -> CodexTrustSelection {
@@ -4514,6 +4862,9 @@ fn extract_correlated_rollout(path: &Path, correlation_id: &str) -> Option<Codex
     let mut final_text = None;
 
     for line in reader.lines().map_while(Result::ok) {
+        if !after_marker && !line.contains(correlation_id) {
+            continue;
+        }
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -4530,12 +4881,8 @@ fn extract_correlated_rollout(path: &Path, correlation_id: &str) -> Option<Codex
         if !after_marker {
             continue;
         }
-        if event.pointer("/payload/type").and_then(Value::as_str) == Some("user_message") {
-            if !event_contains_text(&event, correlation_id) {
-                after_marker = false;
-                final_text = None;
-            }
-            continue;
+        if codex_event_is_user_message(&event) && !event_contains_text(&event, correlation_id) {
+            break;
         }
         if let Some(text) = codex_assistant_text(&event) {
             if !text.trim().is_empty() {
@@ -4553,6 +4900,12 @@ fn extract_correlated_rollout(path: &Path, correlation_id: &str) -> Option<Codex
 
 fn event_contains_text(event: &Value, needle: &str) -> bool {
     value_text(event).contains(needle)
+}
+
+fn codex_event_is_user_message(event: &Value) -> bool {
+    event.pointer("/payload/type").and_then(Value::as_str) == Some("user_message")
+        || (event.pointer("/payload/type").and_then(Value::as_str) == Some("message")
+            && event.pointer("/payload/role").and_then(Value::as_str) == Some("user"))
 }
 
 fn codex_assistant_text(event: &Value) -> Option<String> {
@@ -4893,6 +5246,89 @@ mod tests {
     }
 
     #[test]
+    fn rollout_extractor_preserves_final_when_slot_is_reused() {
+        let dir = std::env::temp_dir().join(format!(
+            "missiond-codex-provider-box-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("rollout.jsonl");
+        let corr = "corr-first";
+        let first_user = json!({
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": format!("hello {corr}")}
+        });
+        let first_final = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "last_agent_message": "first durable final"
+            }
+        });
+        let next_user = json!({
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "unrelated later turn"}
+        });
+        let next_final = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "last_agent_message": "later durable final"
+            }
+        });
+        fs::write(
+            &path,
+            format!("{first_user}\n{first_final}\n{next_user}\n{next_final}\n"),
+        )
+        .expect("write");
+
+        let turn = extract_correlated_rollout(&path, corr).expect("turn");
+
+        assert_eq!(turn.final_text, "first durable final");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rollout_extractor_treats_response_item_user_as_next_turn_boundary() {
+        let dir = std::env::temp_dir().join(format!(
+            "missiond-codex-provider-box-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("rollout.jsonl");
+        let corr = "corr-response-item";
+        let first_user = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": format!("hello {corr}")}]
+            }
+        });
+        let first_final = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "last_agent_message": "response item durable final"
+            }
+        });
+        let next_user = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "unrelated later turn"}]
+            }
+        });
+        fs::write(&path, format!("{first_user}\n{first_final}\n{next_user}\n")).expect("write");
+
+        let turn = extract_correlated_rollout(&path, corr).expect("turn");
+
+        assert_eq!(turn.final_text, "response item durable final");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn correlated_prompt_preserves_existing_correlation() {
         let mut request = ProviderInteractionRequest::new(
             super::super::types::BoxCommand::WorkerTurn,
@@ -5134,6 +5570,34 @@ mod tests {
 
         assert!(is_ready_for_codex_text(&observation));
         assert!(is_codex_empty_composer(&observation));
+    }
+
+    #[test]
+    fn codex_startup_placeholder_composer_is_treated_as_empty_input() {
+        let lines = vec![
+            "│ >_ OpenAI Codex (v0.136.0-alpha.2) │".to_string(),
+            "│ model:     gpt-5.5 xhigh   /model to change │".to_string(),
+            "│ directory: ~/Projects/missiond │".to_string(),
+            "› Implement {feature}".to_string(),
+            "  gpt-5.5 xhigh · ~/Projects/missiond".to_string(),
+        ];
+        let snapshot = recognize_screen(CliEngine::Codex, &lines, SessionState::Idle);
+        let observation = CodexObservation {
+            text: lines.join("\n"),
+            lines,
+            snapshot,
+        };
+
+        assert!(is_ready_for_codex_text(&observation));
+        assert!(is_codex_empty_composer(&observation));
+        assert_eq!(
+            observation
+                .snapshot
+                .screen_signals
+                .as_ref()
+                .and_then(|signals| signals.last_user_message.as_deref()),
+            None
+        );
     }
 
     #[test]
@@ -5453,6 +5917,35 @@ Weekly limit:                [████████████████�
         assert_eq!(analysis.allowed_tool_event_count, 1);
         assert_eq!(analysis.final_text.as_deref(), Some("durable final"));
         assert!(analysis.violation.is_none());
+    }
+
+    #[test]
+    fn codex_rate_limit_prompt_selection_prefers_keep_current_never_show() {
+        let lines = vec![
+            "Switch to gpt-5.4-mini for lower credit usage?".to_string(),
+            "Approaching rate limits".to_string(),
+            "› 1. Switch to gpt-5.4-mini                 Small, fast, and cost-efficient model"
+                .to_string(),
+            "  2. Keep current model".to_string(),
+            "  3. Keep current model (never show again)  Hide future rate limit reminders"
+                .to_string(),
+            "Press enter to confirm or esc to go back".to_string(),
+        ];
+        let snapshot = recognize_screen(CliEngine::Codex, &lines, SessionState::Idle);
+        let observation = CodexObservation {
+            text: lines.join("\n"),
+            lines,
+            snapshot,
+        };
+
+        assert!(is_codex_rate_limit_model_switch_prompt(&observation));
+        assert_eq!(
+            codex_rate_limit_prompt_selection(&observation),
+            Some(CodexRateLimitPromptSelection {
+                selected_index: 0,
+                target_index: 2,
+            })
+        );
     }
 
     #[test]

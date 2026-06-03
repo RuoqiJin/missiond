@@ -7,6 +7,7 @@ import { runLispc } from './lib/ocaml_lispc.mjs';
 import { buildAgentSlices, buildProjectAgentNavigation } from './lib/v3_agent_slices.mjs';
 import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 import { RUNTIME_DOMAIN_SPECS } from './lib/v3_runtime_domains.mjs';
+import { augmentWorkstationProviderLaunchPolicy } from './lib/v3_workstation_provider_launch_policy.mjs';
 import { generateBehaviorNavigation } from './propose-behavior-navigation.mjs';
 
 const LEGACY_REPO_OUT_DIR = '.missiond/v3/runtime/compiled';
@@ -81,7 +82,7 @@ function main() {
     });
   }
   for (const target of targets) {
-    const compiled = bundleTargets[target.id];
+    let compiled = bundleTargets[target.id];
     if (!compiled || !targetCompiledOk(compiled)) {
       results.push({
         id: target.id,
@@ -90,6 +91,13 @@ function main() {
         stderr: bundle?.stderr ?? '',
       });
       continue;
+    }
+    if (target.id === 'universe') {
+      compiled = augmentProjectUniverseDeploymentChannels(compiled);
+      compiled = augmentProjectUniverseDomainManagement(compiled);
+    }
+    if (target.id === 'runtime-config') {
+      augmentWorkstationProviderLaunchPolicy(compiled.payload, { repo: process.cwd() });
     }
     const outPath = path.join(outDir, target.file);
     fs.writeFileSync(outPath, `${JSON.stringify(compiled, null, 2)}\n`);
@@ -104,6 +112,11 @@ function main() {
         continue;
       }
       const outPath = path.join(outDir, domainTarget.file);
+      if (domainTarget.domain === 'workstation') {
+        augmentWorkstationProviderLaunchPolicy(domainTarget.compiled.payload, {
+          repo: process.cwd(),
+        });
+      }
       fs.writeFileSync(outPath, `${JSON.stringify(domainTarget.compiled, null, 2)}\n`);
       results.push({
         id: `runtime-domain:${domainTarget.domain}`,
@@ -419,6 +432,664 @@ function normalizeGateChecks(rows) {
     .filter((entry) => entry.id && entry.argv.length > 0);
 }
 
+function augmentProjectUniverseDomainManagement(compiled) {
+  const payload = compiled?.payload ?? {};
+  const config = readDomainControlPlaneConfig();
+  const declaredRecords = readDomainRecordMap();
+  const rows = new Map();
+  const addDomain = (domain, patch = {}) => {
+    const normalized = normalizeManagedDomain(domain);
+    if (!normalized || domainExcluded(normalized, config)) return;
+    const zone = zoneForDomain(normalized, config.managed_zones);
+    if (!zone) return;
+    const current = rows.get(normalized) ?? {
+      domain: normalized,
+      zone,
+      managed_by: config.authority,
+      mutation_policy: config.mutation_policy,
+      management_status: 'inventory_only_record_missing',
+      sources: [],
+    };
+    rows.set(normalized, mergeDomainManagementRow(current, patch));
+  };
+
+  for (const zone of config.managed_zones) {
+    addDomain(zone, {
+      source_kind: 'domain-control-managed-zone',
+      management_status: 'zone_inventory',
+    });
+  }
+  for (const domain of config.required_domains) {
+    addDomain(domain, {
+      source_kind: 'domain-control-required-binding',
+      management_status: 'required_binding_missing_service_runtime',
+    });
+  }
+
+  for (const service of arrayOrEmpty(payload.services)) {
+    const serviceId = stringOrNull(service?.id);
+    const projectId = stringOrNull(service?.project) ?? serviceId;
+    for (const domain of stringArray(service?.domains)) {
+      addDomain(domain, {
+        owner_service_id: serviceId,
+        owner_project_id: projectId,
+        source_kind: 'service-runtime-domains',
+      });
+    }
+    for (const domain of domainsFromText([
+      service?.public_base_url,
+      service?.frontend_url,
+      service?.api_base_url,
+      service?.frontend_deployment?.production_domain,
+    ].filter(Boolean).join(' '))) {
+      addDomain(domain, {
+        owner_service_id: serviceId,
+        owner_project_id: projectId,
+        source_kind: 'service-runtime-url',
+      });
+    }
+  }
+
+  for (const project of arrayOrEmpty(payload.projects)) {
+    const projectId = stringOrNull(project?.id);
+    const text = [
+      ...stringArray(project?.aliases),
+      project?.missiond_role,
+    ].filter(Boolean).join(' ');
+    for (const domain of domainsFromText(text)) {
+      addDomain(domain, {
+        owner_project_id: projectId,
+        source_kind: 'project-registry-domain-reference',
+      });
+    }
+  }
+
+  for (const [domain, records] of declaredRecords) {
+    addDomain(domain, {
+      source_kind: 'dns-records',
+      declared_records: records,
+      management_status: records.some((record) => record.authority === config.authority)
+        ? 'desired_state_declared'
+        : 'legacy_cloudflare_record_to_import',
+    });
+  }
+
+  const domains = [...rows.values()]
+    .map((row) => compactObject({
+      ...row,
+      sources: uniqueStrings(row.sources),
+      declared_records: arrayOrEmpty(row.declared_records),
+    }))
+    .sort((a, b) => String(a.zone).localeCompare(String(b.zone)) || String(a.domain).localeCompare(String(b.domain)));
+  payload.domain_management = {
+    schema_version: config.schema,
+    authority: config.authority,
+    entrypoint: config.entrypoint,
+    managed_zones: config.managed_zones,
+    excluded_domains: config.excluded_domains,
+    required_domains: config.required_domains,
+    mutation_policy: config.mutation_policy,
+    default_mode: config.default_mode,
+    source_kinds: config.source_kinds,
+    agent_prompt: config.agent_prompt,
+    domains,
+    summary: {
+      domain_count: domains.length,
+      zone_count: config.managed_zones.length,
+      required_domain_count: config.required_domains.length,
+      desired_state_declared_count: domains.filter((row) => row.management_status === 'desired_state_declared').length,
+      legacy_import_count: domains.filter((row) => row.management_status === 'legacy_cloudflare_record_to_import').length,
+      inventory_only_count: domains.filter((row) => row.management_status?.includes('inventory')).length,
+    },
+    source_ref: '.missiond/v3/shards/universe/service-runtime.lisp#domain-control-plane',
+  };
+  return compiled;
+}
+
+function mergeDomainManagementRow(current, patch) {
+  const next = {
+    ...current,
+    ...compactObject({
+      owner_project_id: patch.owner_project_id ?? current.owner_project_id,
+      owner_service_id: patch.owner_service_id ?? current.owner_service_id,
+      management_status: preferManagementStatus(current.management_status, patch.management_status),
+    }),
+  };
+  const source = compactObject({
+    kind: patch.source_kind,
+    owner_project_id: patch.owner_project_id,
+    owner_service_id: patch.owner_service_id,
+  });
+  if (source.kind) next.sources = [...arrayOrEmpty(current.sources), source];
+  if (patch.declared_records) {
+    next.declared_records = [
+      ...arrayOrEmpty(current.declared_records),
+      ...arrayOrEmpty(patch.declared_records),
+    ];
+  }
+  return next;
+}
+
+function preferManagementStatus(current, candidate) {
+  if (!candidate) return current;
+  const rank = {
+    desired_state_declared: 5,
+    legacy_cloudflare_record_to_import: 4,
+    required_binding_missing_service_runtime: 3,
+    zone_inventory: 2,
+    inventory_only_record_missing: 1,
+  };
+  return (rank[candidate] ?? 0) >= (rank[current] ?? 0) ? candidate : current;
+}
+
+function readDomainControlPlaneConfig() {
+  const defaults = {
+    schema: 'missiond.domain-control-plane.v1',
+    authority: 'xjp-domain-service',
+    entrypoint: 'https://domains.xiaojins.com/v1/domains',
+    managed_zones: ['xiaojins.com', 'xiaojinpro.top', 'xiaojinpro.com'],
+    required_domains: [],
+    excluded_domains: ['xjp-asr-web.vercel.app', 'cname.vercel-dns.com'],
+    mutation_policy: 'approval-required',
+    default_mode: 'read-only-inventory',
+    source_kinds: [],
+    agent_prompt: 'For domain or DNS questions, consult xjp-domain-service before answering authority or mutating DNS.',
+  };
+  const text = safeRead('.missiond/v3/shards/universe/service-runtime.lisp');
+  const start = text.indexOf('(domain-control-plane');
+  if (start === -1) return defaults;
+  const close = findBalancedClose(text, start);
+  const form = close === -1 ? '' : text.slice(start, close + 1);
+  return {
+    schema: keywordValue(form, 'schema') ?? defaults.schema,
+    authority: keywordValue(form, 'authority') ?? defaults.authority,
+    entrypoint: keywordValue(form, 'entrypoint') ?? defaults.entrypoint,
+    managed_zones: keywordListValue(form, 'managed-zones').map(normalizeManagedDomain).filter(Boolean),
+    required_domains: keywordListValue(form, 'required-domains').map(normalizeManagedDomain).filter(Boolean),
+    excluded_domains: keywordListValue(form, 'excluded-domains').map(normalizeManagedDomain).filter(Boolean),
+    mutation_policy: keywordValue(form, 'mutation-policy') ?? defaults.mutation_policy,
+    default_mode: keywordValue(form, 'default-mode') ?? defaults.default_mode,
+    source_kinds: keywordListValue(form, 'source-kinds'),
+    agent_prompt: keywordValue(form, 'agent-prompt') ?? defaults.agent_prompt,
+  };
+}
+
+function readDomainRecordMap() {
+  const records = new Map();
+  const text = safeRead('.missiond/v3/shards/universe/service-runtime.lisp');
+  for (const { serviceId, body } of extractServiceRuntimeForms(text)) {
+    for (const record of extractDnsRecordForms(body).map((form) => normalizeDnsRecordForm(form, serviceId))) {
+      if (!record?.name) continue;
+      const domain = normalizeManagedDomain(record.name);
+      if (!domain) continue;
+      if (!records.has(domain)) records.set(domain, []);
+      records.get(domain).push(record);
+    }
+  }
+  return records;
+}
+
+function extractDnsRecordForms(serviceForm) {
+  const forms = [];
+  const single = parseKeywordForm(serviceForm, 'dns-record');
+  if (single) forms.push(single);
+  const plural = parseKeywordBracketBody(serviceForm, 'dns-records');
+  if (plural) forms.push(...extractColonForms(plural));
+  return forms;
+}
+
+function extractColonForms(text) {
+  const forms = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const start = text.indexOf('(:', cursor);
+    if (start === -1) break;
+    const close = findBalancedClose(text, start);
+    if (close === -1) break;
+    forms.push(text.slice(start + 1, close));
+    cursor = close + 1;
+  }
+  return forms;
+}
+
+function parseKeywordBracketBody(text, key) {
+  const start = keywordMarkerIndex(text, key);
+  if (start === -1) return null;
+  const open = text.indexOf('[', start + key.length + 1);
+  if (open === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = open; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '[') depth += 1;
+    if (ch === ']') {
+      depth -= 1;
+      if (depth === 0) return text.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+function normalizeDnsRecordForm(form, serviceId) {
+  return compactObject({
+    service_id: serviceId,
+    type: keywordValue(form, 'type'),
+    name: keywordValue(form, 'name'),
+    content: keywordValue(form, 'content'),
+    proxied: boolOrNull(keywordValue(form, 'proxied')),
+    ttl: numberOrNull(keywordValue(form, 'ttl')),
+    authority: keywordValue(form, 'authority'),
+    status: keywordValue(form, 'status') ?? 'declared',
+  });
+}
+
+function normalizeManagedDomain(value) {
+  const raw = stringOrNull(value);
+  if (!raw) return null;
+  const withoutScheme = raw.replace(/^https?:\/\//i, '');
+  const host = withoutScheme.split('/')[0].split('?')[0].split('#')[0].trim().toLowerCase();
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host) ? host : null;
+}
+
+function domainsFromText(text) {
+  const matches = String(text ?? '').match(/\b(?:[a-z0-9-]+\.)+(?:com|top|ai|cn|app|io)\b/gi) ?? [];
+  return [...new Set(matches.map(normalizeManagedDomain).filter(Boolean))];
+}
+
+function domainExcluded(domain, config) {
+  if (config.excluded_domains.includes(domain)) return true;
+  if (domain.endsWith('.vercel.app')) return true;
+  if (domain === 'ghcr.io' || domain.endsWith('.ghcr.io')) return true;
+  return false;
+}
+
+function zoneForDomain(domain, zones) {
+  return zones
+    .filter((zone) => domain === zone || domain.endsWith(`.${zone}`))
+    .sort((a, b) => b.length - a.length)[0] ?? null;
+}
+
+function keywordListValue(text, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = text.match(new RegExp(`:${escaped}\\s+\\[([^\\]]*)\\]`));
+  if (!match) return [];
+  const values = [];
+  const tokenRe = /"([^"]+)"|([^\s\]]+)/g;
+  for (const token of match[1].matchAll(tokenRe)) values.push(token[1] ?? token[2]);
+  return values.filter((value) => value && value !== 'nil');
+}
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const key = JSON.stringify(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+function augmentProjectUniverseDeploymentChannels(compiled) {
+  const serviceChannels = readServiceDeploymentChannelMap();
+  const inference = inferDeploymentChannelsForUniverse(compiled, serviceChannels);
+  const services = Array.isArray(compiled?.payload?.services) ? compiled.payload.services : [];
+  const diagnostics = [...inference.diagnostics];
+  const allChannels = [];
+  for (const service of services) {
+    const serviceId = stringOrNull(service?.id);
+    if (!serviceId) continue;
+    const channels = serviceChannels.get(serviceId);
+    if (channels?.deployment) service.deployment = channels.deployment;
+    if (channels?.frontend_deployment) service.frontend_deployment = channels.frontend_deployment;
+    if (channels?.build_lane) service.build_lane = channels.build_lane;
+    if (channels?.proxy) service.proxy = channels.proxy;
+    if (channels?.jarvis_runtime_topology) service.jarvis_runtime_topology = channels.jarvis_runtime_topology;
+
+    const explicit = channels?.deployment_channels ?? [];
+    const legacy = channels ? buildServiceDeploymentChannels(service, channels) : [];
+    const inferred = inference.channelsByService.get(serviceId) ?? [];
+    const merged = mergeDeploymentChannels([...explicit, ...legacy, ...inferred]);
+    service.deployment_channels = merged;
+    allChannels.push(...merged);
+
+    const serviceDiagnostics = deploymentChannelDiagnosticsForService(service, merged);
+    diagnostics.push(...serviceDiagnostics);
+  }
+  compiled.payload.deployment_channels = allChannels;
+  compiled.payload.deployment_channel_diagnostics = diagnostics;
+  compiled.payload.deployment_channel_summary = buildDeploymentChannelSummary(allChannels, diagnostics);
+  compiled.payload.jarvis_runtime_topologies = services
+    .map((service) => service.jarvis_runtime_topology)
+    .filter((topology) => topology && typeof topology === 'object');
+  return compiled;
+}
+
+function buildServiceDeploymentChannels(service, channels) {
+  const serviceId = stringOrNull(service?.id);
+  const projectId = stringOrNull(service?.project) ?? serviceId;
+  const rows = [];
+  if (channels.build_lane) {
+    rows.push(compactObject({
+      id: `${serviceId}:build`,
+      service_id: serviceId,
+      project_id: projectId,
+      surface: 'build',
+      substrate: channels.build_lane.id ?? 'privatecloud',
+      channel_kind: nativeBuildChannelKind(channels.build_lane),
+      build_lane: channels.build_lane.id,
+      builder: channels.build_lane.builder,
+      executor: channels.build_lane.executor,
+      source_sync: channels.build_lane.source_sync,
+      dockerfile: channels.build_lane.dockerfile,
+      manifest: channels.build_lane.manifest,
+      artifact_lane: channels.build_lane.artifact_lane,
+      image: channels.build_lane.image,
+      authority: channels.build_lane.authority ?? 'deploy-center',
+      target_side_build_prohibited: channels.build_lane.target_side_build_prohibited,
+      declared_status: 'declared',
+      observed_status: 'not_queried',
+      drift_status: 'not_checked',
+      source_ref: `.missiond/v3/shards/universe/service-runtime.lisp#service:${serviceId}:build-lane`,
+    }));
+  }
+  if (channels.deployment) {
+    rows.push(compactObject({
+      id: `${serviceId}:runtime`,
+      service_id: serviceId,
+      project_id: projectId,
+      surface: 'runtime',
+      substrate: channels.deployment.substrate,
+      channel_kind: runtimeChannelKind(channels.deployment.substrate),
+      deploy_center_slug: channels.deployment.dc_slug,
+      runtime_target: channels.deployment.runtime_target,
+      executor: channels.deployment.executor,
+      container: channels.deployment.container,
+      host_bind: channels.deployment.host_bind ?? channels.deployment.local_bind,
+      proxy: channels.deployment.proxy,
+      artifact_lane: channels.deployment.artifact_delivery_lane,
+      image_env: channels.deployment.image_env,
+      authority: channels.deployment.authority,
+      target_side_build_prohibited: channels.deployment.target_side_build_prohibited,
+      declared_status: 'declared',
+      observed_status: 'not_queried',
+      drift_status: 'not_checked',
+      source_ref: `.missiond/v3/shards/universe/service-runtime.lisp#service:${serviceId}:deployment`,
+    }));
+  }
+  if (channels.frontend_deployment) {
+    rows.push(compactObject({
+      id: `${serviceId}:frontend`,
+      service_id: serviceId,
+      project_id: projectId,
+      surface: 'frontend',
+      substrate: channels.frontend_deployment.substrate,
+      channel_kind: channels.frontend_deployment.substrate === 'vercel' ? 'vercel' : 'unknown',
+      project: channels.frontend_deployment.project,
+      root_directory: channels.frontend_deployment.root_directory,
+      production_domain: channels.frontend_deployment.production_domain,
+      fallback_domain: channels.frontend_deployment.fallback_domain,
+      authority: channels.frontend_deployment.authority ?? 'vercel',
+      declared_status: 'declared',
+      observed_status: 'not_queried',
+      drift_status: 'not_checked',
+      source_ref: `.missiond/v3/shards/universe/service-runtime.lisp#service:${serviceId}:frontend-deployment`,
+    }));
+  }
+  return rows;
+}
+
+function inferDeploymentChannelsForUniverse(compiled, serviceChannels) {
+  const channelsByService = new Map();
+  const diagnostics = [];
+  const services = Array.isArray(compiled?.payload?.services) ? compiled.payload.services : [];
+  for (const service of services) {
+    const serviceId = stringOrNull(service?.id);
+    if (!serviceId) continue;
+    const declared = serviceChannels.get(serviceId) ?? {};
+    const root = stringOrNull(service?.root);
+    const projectId = stringOrNull(service?.project) ?? serviceId;
+    const deployCenterSlug = declared.deployment?.dc_slug
+      ?? stringOrNull(service?.deployment?.dc_slug ?? service?.deployment?.dcSlug)
+      ?? stringOrNull(service?.support_catalog?.deploy_center_slug ?? service?.supportCatalog?.deployCenterSlug);
+    const needsBuildChannel = serviceNeedsBuildChannel(service, declared);
+    const inferred = [];
+
+    if (root) {
+      inferred.push(...inferProjectLocalDeployCenterChannels({ serviceId, projectId, root }));
+      if (needsBuildChannel) {
+        const workflowFacts = readGithubWorkflowFactsForRoot(root);
+        const serviceRegistry = readServiceRegistryForRoot(root);
+        const registryEntry = matchServiceRegistryEntry(serviceId, deployCenterSlug, serviceRegistry);
+        const workflow = selectWorkflowFact({ serviceId, deployCenterSlug, registryEntry, workflowFacts });
+        if (workflow) {
+          inferred.push(githubActionsBuildChannel({ serviceId, projectId, workflow, registryEntry }));
+        }
+      }
+    }
+
+    if (inferred.length > 0) {
+      channelsByService.set(serviceId, inferred);
+    } else if (root && needsBuildChannel) {
+      diagnostics.push({
+        kind: 'build_channel_not_inferred',
+        service_id: serviceId,
+        project_id: projectId,
+        root,
+        message: `${serviceId} has runtime/backend facts but no declared or inferred build channel`,
+      });
+    }
+  }
+  return { channelsByService, diagnostics };
+}
+
+function inferProjectLocalDeployCenterChannels({ serviceId, projectId, root }) {
+  const file = firstExistingPath([
+    path.join(root, `deploy/deploy-center/project.${serviceId}.json`),
+    path.join(root, 'deploy/deploy-center/project.json'),
+  ]);
+  if (!file) return [];
+  const config = readJsonIfExists(file);
+  if (!config || typeof config !== 'object') return [];
+  const project = config.project ?? {};
+  const stages = config.stages ?? {};
+  const rows = [];
+  const build = stages.build;
+  const buildDeployType = stringOrNull(build?.config?.deploy_type);
+  if (build?.enabled !== false && (buildDeployType === 'native_workflow' || buildDeployType === 'docker_build')) {
+    const isNativeWorkflow = buildDeployType === 'native_workflow';
+    rows.push(compactObject({
+      id: `${serviceId}:build:project-local`,
+      service_id: serviceId,
+      project_id: projectId,
+      surface: 'build',
+      substrate: isNativeWorkflow ? 'privatecloud-rust-build-lane' : 'privatecloud-docker-build-lane',
+      channel_kind: isNativeWorkflow ? 'native_workflow' : 'privatecloud_docker_build',
+      authority: 'deploy-center',
+      source_ref: `${file}#stages.build`,
+      deploy_center_slug: stringOrNull(project.slug) ?? stringOrNull(build.stage_project_slug),
+      executor: stringOrNull(build.executor_name),
+      builder: stringOrNull(build.config.builder_id),
+      source_sync: 'deploy-center-codebase',
+      dockerfile: stringOrNull(build.config.dockerfile),
+      image: stringOrNull(build.config.image),
+      artifact_lane: stringOrNull(build.config.artifact_lane),
+      workflow: buildDeployType,
+      target_side_build_prohibited: true,
+      declared_status: 'inferred',
+      observed_status: 'not_queried',
+      drift_status: 'not_checked',
+    }));
+  }
+  const deploy = stages.deploy;
+  if (deploy?.enabled !== false && deploy?.config) {
+    rows.push(compactObject({
+      id: `${serviceId}:runtime:project-local`,
+      service_id: serviceId,
+      project_id: projectId,
+      surface: 'runtime',
+      substrate: 'deploy-center',
+      channel_kind: 'deploy_center_runtime',
+      authority: 'deploy-center',
+      source_ref: `${file}#stages.deploy`,
+      deploy_center_slug: stringOrNull(project.slug) ?? stringOrNull(deploy.stage_project_slug),
+      executor: stringOrNull(deploy.executor_name),
+      image: stringOrNull(deploy.config.image),
+      image_env: stringOrNull(deploy.config.image_env),
+      target_side_build_prohibited: deploy.config.no_build === true,
+      declared_status: 'inferred',
+      observed_status: 'not_queried',
+      drift_status: 'not_checked',
+    }));
+  }
+  return rows;
+}
+
+function firstExistingPath(paths) {
+  for (const candidate of paths) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function githubActionsBuildChannel({ serviceId, projectId, workflow, registryEntry }) {
+  const image = stringOrNull(workflow.image) ?? stringOrNull(registryEntry?.image);
+  const deployCenterSlug = stringOrNull(workflow.dc_project) ?? stringOrNull(registryEntry?.dc_slug);
+  return compactObject({
+    id: `${serviceId}:build:github-actions`,
+    service_id: serviceId,
+    project_id: projectId,
+    surface: 'build',
+    substrate: 'github-actions',
+    channel_kind: 'github_actions',
+    authority: 'github-actions',
+    source_ref: workflow.source_ref,
+    workflow: workflow.file,
+    deploy_center_slug: deployCenterSlug,
+    image,
+    dockerfile: stringOrNull(workflow.dockerfile),
+    service_name: stringOrNull(workflow.service_name),
+    declared_status: 'inferred',
+    observed_status: 'not_queried',
+    drift_status: 'not_checked',
+  });
+}
+
+function mergeDeploymentChannels(channels) {
+  const rows = [];
+  const seen = new Set();
+  for (const channel of channels) {
+    if (!channel || typeof channel !== 'object') continue;
+    const serviceId = stringOrNull(channel.service_id ?? channel.serviceId) ?? 'service';
+    const surface = stringOrNull(channel.surface) ?? 'runtime';
+    const key = `${serviceId}:${surface}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(compactObject({
+      ...channel,
+      service_id: serviceId,
+      project_id: stringOrNull(channel.project_id ?? channel.projectId),
+      surface,
+      channel_kind: stringOrNull(channel.channel_kind ?? channel.channelKind) ?? channelKindForChannel(channel),
+      declared_status: stringOrNull(channel.declared_status ?? channel.declaredStatus) ?? 'declared',
+      observed_status: stringOrNull(channel.observed_status ?? channel.observedStatus) ?? 'not_queried',
+      drift_status: stringOrNull(channel.drift_status ?? channel.driftStatus) ?? 'not_checked',
+    }));
+  }
+  return rows;
+}
+
+function deploymentChannelDiagnosticsForService(service, channels) {
+  const serviceId = stringOrNull(service?.id);
+  if (!serviceId || !serviceNeedsBuildChannel(service, {})) return [];
+  const buildChannels = channels.filter((channel) => channel.surface === 'build');
+  if (buildChannels.length === 1) return [];
+  return [{
+    kind: buildChannels.length === 0 ? 'missing_build_channel' : 'multiple_build_channels',
+    service_id: serviceId,
+    project_id: stringOrNull(service?.project) ?? serviceId,
+    build_channel_count: buildChannels.length,
+    message: `${serviceId} must expose exactly one build channel or an explicit exception`,
+  }];
+}
+
+function buildDeploymentChannelSummary(channels, diagnostics) {
+  const byKind = {};
+  const bySurface = {};
+  for (const channel of channels) {
+    const kind = stringOrNull(channel.channel_kind) ?? 'unknown';
+    const surface = stringOrNull(channel.surface) ?? 'unknown';
+    byKind[kind] = (byKind[kind] ?? 0) + 1;
+    bySurface[surface] = (bySurface[surface] ?? 0) + 1;
+  }
+  return {
+    total: channels.length,
+    by_kind: byKind,
+    by_surface: bySurface,
+    diagnostics: diagnostics.length,
+  };
+}
+
+function channelKindForChannel(channel) {
+  if (channel.surface === 'build') return nativeBuildChannelKind(channel);
+  if (channel.surface === 'runtime') return runtimeChannelKind(channel.substrate);
+  if (channel.surface === 'frontend' && channel.substrate === 'vercel') return 'vercel';
+  return 'unknown';
+}
+
+function nativeBuildChannelKind(buildLane) {
+  const id = stringOrNull(buildLane?.id ?? buildLane?.build_lane ?? buildLane?.buildLane ?? buildLane?.substrate);
+  if (id?.includes('docker-build') || id?.includes('docker_build')) return 'privatecloud_docker_build';
+  if (id?.includes('privatecloud') || id?.includes('native')) return 'native_workflow';
+  return 'unknown';
+}
+
+function runtimeChannelKind(substrate) {
+  if (substrate === 'deploy-center') return 'deploy_center_runtime';
+  if (substrate === 'gcp-vm') return 'gcp_vm';
+  if (substrate === 'vercel') return 'vercel';
+  if (substrate === 'kubernetes') return 'kubernetes';
+  if (substrate === 'local-node' || substrate === 'launchd') return 'local_runtime';
+  return substrate ? String(substrate).replaceAll('-', '_') : 'unknown';
+}
+
+function serviceNeedsBuildChannel(service, declared) {
+  if (declared?.build_lane || (declared?.deployment_channels ?? []).some((channel) => channel.surface === 'build')) {
+    return false;
+  }
+  const environment = stringOrNull(service?.environment) ?? '';
+  if (environment === 'local-dev') return false;
+  const deployment = declared?.deployment ?? service?.deployment ?? {};
+  const substrate = stringOrNull(deployment?.substrate);
+  if (!substrate) return Boolean(service?.backend);
+  if (['vercel', 'lovable-or-static-host', 'local-node', 'gcp-caddy-edge'].includes(substrate)) return false;
+  return Boolean(service?.backend) || ['deploy-center', 'gcp-vm', 'aliyun-ecs', 'kubernetes'].includes(substrate);
+}
+
+function compactObject(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null && item !== undefined && item !== ''));
+}
+
 function buildDeploymentPolicy(universeJson) {
   const payload = universeJson?.payload ?? {};
   const projects = Array.isArray(payload.projects) ? payload.projects : [];
@@ -583,6 +1254,14 @@ function readProjectMaturityMap() {
 }
 
 function readServiceDeploymentMap() {
+  const map = new Map();
+  for (const [serviceId, channels] of readServiceDeploymentChannelMap()) {
+    if (channels.deployment) map.set(serviceId, channels.deployment);
+  }
+  return map;
+}
+
+function readServiceDeploymentChannelMap() {
   const file = '.missiond/v3/shards/universe/service-runtime.lisp';
   const map = new Map();
   let text = '';
@@ -591,40 +1270,426 @@ function readServiceDeploymentMap() {
   } catch {
     return map;
   }
-  const serviceRe = /\(service\s+:id\s+([^\s\)]+)([\s\S]*?)(?=\n\s*\(service\s+:id\s+|\n\s*\)\s*\)\s*$)/g;
-  for (const serviceMatch of text.matchAll(serviceRe)) {
-    const serviceId = serviceMatch[1];
-    const body = serviceMatch[2];
-    const deploymentMatch = body.match(/:deployment\s+\(([^\)]*)\)/);
-    if (!deploymentMatch) continue;
-    const deployment = deploymentMatch[1];
-    const dcSlug = keywordValue(deployment, 'dc_slug');
-    const substrate = keywordValue(deployment, 'substrate');
-    const runtimeTarget = keywordValue(deployment, 'runtime-target')
-      ?? keywordValue(deployment, 'runtime_target');
-    const executor = keywordValue(deployment, 'executor');
-    const container = keywordValue(deployment, 'container')
-      ?? keywordValue(deployment, 'container_name')
-      ?? keywordValue(deployment, 'container-name');
-    const artifactDeliveryLane = keywordValue(deployment, 'artifact-delivery-lane')
-      ?? keywordValue(deployment, 'artifact_delivery_lane')
-      ?? keywordValue(deployment, 'artifact-lane')
-      ?? keywordValue(deployment, 'artifact_lane');
-    const targetSideBuildAllowed = boolOrNull(
-      keywordValue(deployment, 'target-side-build-allowed')
-      ?? keywordValue(deployment, 'target_side_build_allowed'),
-    );
-    map.set(serviceId, {
-      dc_slug: dcSlug,
-      substrate,
-      runtime_target: runtimeTarget,
-      executor,
-      container,
-      artifact_delivery_lane: artifactDeliveryLane,
-      target_side_build_allowed: targetSideBuildAllowed,
-    });
+  for (const { serviceId, body } of extractServiceRuntimeForms(text)) {
+    const deployment = parseKeywordForm(body, 'deployment');
+    const frontendDeployment = parseKeywordForm(body, 'frontend-deployment');
+    const buildLane = parseKeywordForm(body, 'build-lane');
+    const proxy = parseKeywordForm(body, 'proxy');
+    const jarvisRuntimeTopology = parseKeywordForm(body, 'jarvis-runtime-topology');
+    const deploymentChannels = parseKeywordForm(body, 'deployment-channels');
+    if (!deployment && !frontendDeployment && !buildLane && !proxy && !jarvisRuntimeTopology && !deploymentChannels) continue;
+    map.set(serviceId, compactObject({
+      deployment: deployment ? normalizeDeploymentForm(deployment) : null,
+      frontend_deployment: frontendDeployment ? normalizeFrontendDeploymentForm(frontendDeployment) : null,
+      build_lane: buildLane ? normalizeBuildLaneForm(buildLane) : null,
+      proxy: proxy ? normalizeProxyForm(proxy) : null,
+      jarvis_runtime_topology: jarvisRuntimeTopology
+        ? normalizeJarvisRuntimeTopologyForm(jarvisRuntimeTopology, serviceId)
+        : null,
+      deployment_channels: deploymentChannels
+        ? normalizeExplicitDeploymentChannelsForm(deploymentChannels, serviceId)
+        : [],
+    }));
   }
   return map;
+}
+
+function extractServiceRuntimeForms(text) {
+  const forms = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const start = text.indexOf('(service', cursor);
+    if (start === -1) break;
+    const formStart = text.slice(start, start + 80);
+    const idMatch = formStart.match(/^\(service\s+:id\s+([^\s\)]+)/);
+    if (!idMatch) {
+      cursor = start + '(service'.length;
+      continue;
+    }
+    const close = findBalancedClose(text, start);
+    if (close === -1) break;
+    forms.push({
+      serviceId: idMatch[1],
+      body: text.slice(start, close + 1),
+    });
+    cursor = close + 1;
+  }
+  return forms;
+}
+
+function normalizeDeploymentForm(form) {
+  return compactObject({
+    dc_slug: keywordValue(form, 'dc_slug'),
+    substrate: keywordValue(form, 'substrate'),
+    runtime_target: keywordValue(form, 'runtime-target') ?? keywordValue(form, 'runtime_target'),
+    origin: keywordValue(form, 'origin'),
+    tunnel_client: keywordValue(form, 'tunnel-client') ?? keywordValue(form, 'tunnel_client'),
+    target_service: keywordValue(form, 'target-service') ?? keywordValue(form, 'target_service'),
+    executor: keywordValue(form, 'executor'),
+    container: keywordValue(form, 'container') ?? keywordValue(form, 'container_name') ?? keywordValue(form, 'container-name'),
+    service: keywordValue(form, 'service'),
+    namespace: keywordValue(form, 'namespace'),
+    deployment: keywordValue(form, 'deployment'),
+    host_bind: keywordValue(form, 'host-bind') ?? keywordValue(form, 'host_bind'),
+    local_bind: keywordValue(form, 'local-bind') ?? keywordValue(form, 'local_bind'),
+    proxy: keywordValue(form, 'proxy'),
+    image_env: keywordValue(form, 'image-env') ?? keywordValue(form, 'image_env'),
+    authority: keywordValue(form, 'authority'),
+    artifact_delivery_lane: keywordValue(form, 'artifact-delivery-lane')
+      ?? keywordValue(form, 'artifact_delivery_lane')
+      ?? keywordValue(form, 'artifact-lane')
+      ?? keywordValue(form, 'artifact_lane'),
+    target_side_build_allowed: boolOrNull(
+      keywordValue(form, 'target-side-build-allowed')
+      ?? keywordValue(form, 'target_side_build_allowed'),
+    ),
+    target_side_build_prohibited: boolOrNull(
+      keywordValue(form, 'target-side-build-prohibited')
+      ?? keywordValue(form, 'target_side_build_prohibited'),
+    ),
+  });
+}
+
+function normalizeProxyForm(form) {
+  return compactObject({
+    kind: keywordValue(form, 'kind'),
+    domain: keywordValue(form, 'domain'),
+    upstream: keywordValue(form, 'upstream'),
+    routes: keywordListValue(form, 'routes'),
+    sse_no_buffer: boolOrNull(keywordValue(form, 'sse-no-buffer') ?? keywordValue(form, 'sse_no_buffer')),
+    flush_interval: keywordValue(form, 'flush-interval') ?? keywordValue(form, 'flush_interval'),
+    read_timeout: keywordValue(form, 'read-timeout') ?? keywordValue(form, 'read_timeout'),
+    write_timeout: keywordValue(form, 'write-timeout') ?? keywordValue(form, 'write_timeout'),
+    stream_timeout: keywordValue(form, 'stream-timeout') ?? keywordValue(form, 'stream_timeout'),
+    route_generation: keywordValue(form, 'route-generation') ?? keywordValue(form, 'route_generation'),
+  });
+}
+
+function normalizeJarvisRuntimeTopologyForm(form, serviceId) {
+  return compactObject({
+    schema: keywordValue(form, 'schema') ?? 'missiond.jarvis-runtime-topology.v1',
+    service_id: serviceId,
+    edge_node: keywordValue(form, 'edge-node') ?? keywordValue(form, 'edge_node'),
+    edge_domain: keywordValue(form, 'edge-domain') ?? keywordValue(form, 'edge_domain'),
+    edge_public_ip: keywordValue(form, 'edge-public-ip') ?? keywordValue(form, 'edge_public_ip'),
+    edge_proxy: keywordValue(form, 'edge-proxy') ?? keywordValue(form, 'edge_proxy'),
+    origin_node: keywordValue(form, 'origin-node') ?? keywordValue(form, 'origin_node'),
+    origin: keywordValue(form, 'origin'),
+    tunnel_server_url: keywordValue(form, 'tunnel-server-url') ?? keywordValue(form, 'tunnel_server_url'),
+    tunnel_client_id: keywordValue(form, 'tunnel-client-id') ?? keywordValue(form, 'tunnel_client_id'),
+    target_node: keywordValue(form, 'target-node') ?? keywordValue(form, 'target_node'),
+    target_service: keywordValue(form, 'target-service') ?? keywordValue(form, 'target_service'),
+    target_local_url: keywordValue(form, 'target-local-url') ?? keywordValue(form, 'target_local_url'),
+    expected_deploy_agent_version: keywordValue(form, 'expected-deploy-agent-version') ?? keywordValue(form, 'expected_deploy_agent_version'),
+    launchd_unit: keywordValue(form, 'launchd-unit') ?? keywordValue(form, 'launchd_unit'),
+    launchd_plist: keywordValue(form, 'launchd-plist') ?? keywordValue(form, 'launchd_plist'),
+    local_health_url: keywordValue(form, 'local-health-url') ?? keywordValue(form, 'local_health_url'),
+    route_generation: keywordValue(form, 'route-generation') ?? keywordValue(form, 'route_generation'),
+    proxy_no_buffer: boolOrNull(keywordValue(form, 'proxy-no-buffer') ?? keywordValue(form, 'proxy_no_buffer')),
+    proxy_flush_interval: keywordValue(form, 'proxy-flush-interval') ?? keywordValue(form, 'proxy_flush_interval'),
+    proxy_read_timeout: keywordValue(form, 'proxy-read-timeout') ?? keywordValue(form, 'proxy_read_timeout'),
+    proxy_write_timeout: keywordValue(form, 'proxy-write-timeout') ?? keywordValue(form, 'proxy_write_timeout'),
+    proxy_stream_timeout: keywordValue(form, 'proxy-stream-timeout') ?? keywordValue(form, 'proxy_stream_timeout'),
+    streaming_policy: keywordValue(form, 'streaming-policy') ?? keywordValue(form, 'streaming_policy'),
+    authority: keywordValue(form, 'authority'),
+    source_ref: `.missiond/v3/shards/universe/service-runtime.lisp#service:${serviceId}:jarvis-runtime-topology`,
+  });
+}
+
+function normalizeFrontendDeploymentForm(form) {
+  return compactObject({
+    substrate: keywordValue(form, 'substrate'),
+    project: keywordValue(form, 'project'),
+    root_directory: keywordValue(form, 'root-directory') ?? keywordValue(form, 'root_directory'),
+    production_domain: keywordValue(form, 'production-domain') ?? keywordValue(form, 'production_domain'),
+    fallback_domain: keywordValue(form, 'fallback-domain') ?? keywordValue(form, 'fallback_domain'),
+    authority: keywordValue(form, 'authority'),
+  });
+}
+
+function normalizeBuildLaneForm(form) {
+  return compactObject({
+    id: keywordValue(form, 'id'),
+    builder: keywordValue(form, 'builder'),
+    executor: keywordValue(form, 'executor'),
+    source_sync: keywordValue(form, 'source-sync') ?? keywordValue(form, 'source_sync'),
+    dockerfile: keywordValue(form, 'dockerfile'),
+    image: keywordValue(form, 'image'),
+    artifact_lane: keywordValue(form, 'artifact-lane') ?? keywordValue(form, 'artifact_lane'),
+    manifest: keywordValue(form, 'manifest'),
+    authority: keywordValue(form, 'authority'),
+    target_side_build_prohibited: boolOrNull(
+      keywordValue(form, 'target-side-build-prohibited')
+      ?? keywordValue(form, 'target_side_build_prohibited'),
+    ),
+  });
+}
+
+function normalizeExplicitDeploymentChannelsForm(form, serviceId) {
+  return extractNamedForms(form, 'channel')
+    .map((channelForm, index) => {
+      const surface = keywordValue(channelForm, 'surface') ?? 'runtime';
+      return compactObject({
+        id: keywordValue(channelForm, 'id') ?? `${serviceId}:${surface}:declared:${index}`,
+        service_id: keywordValue(channelForm, 'service-id') ?? keywordValue(channelForm, 'service_id') ?? serviceId,
+        project_id: keywordValue(channelForm, 'project-id') ?? keywordValue(channelForm, 'project_id'),
+        surface,
+        channel_kind: keywordValue(channelForm, 'channel-kind') ?? keywordValue(channelForm, 'channel_kind'),
+        substrate: keywordValue(channelForm, 'substrate'),
+        authority: keywordValue(channelForm, 'authority'),
+        source_ref: keywordValue(channelForm, 'source-ref') ?? keywordValue(channelForm, 'source_ref') ?? `.missiond/v3/shards/universe/service-runtime.lisp#service:${serviceId}:deployment-channels`,
+        workflow: keywordValue(channelForm, 'workflow'),
+        deploy_center_slug: keywordValue(channelForm, 'deploy-center-slug') ?? keywordValue(channelForm, 'deploy_center_slug'),
+        executor: keywordValue(channelForm, 'executor'),
+        builder: keywordValue(channelForm, 'builder'),
+        source_sync: keywordValue(channelForm, 'source-sync') ?? keywordValue(channelForm, 'source_sync'),
+        dockerfile: keywordValue(channelForm, 'dockerfile'),
+        manifest: keywordValue(channelForm, 'manifest'),
+        artifact_lane: keywordValue(channelForm, 'artifact-lane') ?? keywordValue(channelForm, 'artifact_lane'),
+        image: keywordValue(channelForm, 'image'),
+        runtime_target: keywordValue(channelForm, 'runtime-target') ?? keywordValue(channelForm, 'runtime_target'),
+        deploy_type: keywordValue(channelForm, 'deploy-type') ?? keywordValue(channelForm, 'deploy_type'),
+        stage: keywordValue(channelForm, 'stage'),
+        stage_project_slug: keywordValue(channelForm, 'stage-project-slug') ?? keywordValue(channelForm, 'stage_project_slug'),
+        vercel_project: keywordValue(channelForm, 'vercel-project') ?? keywordValue(channelForm, 'vercel_project'),
+        root_directory: keywordValue(channelForm, 'root-directory') ?? keywordValue(channelForm, 'root_directory'),
+        production_domain: keywordValue(channelForm, 'production-domain') ?? keywordValue(channelForm, 'production_domain'),
+        target_side_build_prohibited: boolOrNull(
+          keywordValue(channelForm, 'target-side-build-prohibited')
+          ?? keywordValue(channelForm, 'target_side_build_prohibited'),
+        ),
+        declared_status: keywordValue(channelForm, 'declared-status') ?? keywordValue(channelForm, 'declared_status') ?? 'declared',
+        observed_status: keywordValue(channelForm, 'observed-status') ?? keywordValue(channelForm, 'observed_status') ?? 'not_queried',
+        drift_status: keywordValue(channelForm, 'drift-status') ?? keywordValue(channelForm, 'drift_status') ?? 'not_checked',
+      });
+    });
+}
+
+function extractNamedForms(text, name) {
+  const forms = [];
+  let cursor = 0;
+  const marker = `(${name}`;
+  while (cursor < text.length) {
+    const start = text.indexOf(marker, cursor);
+    if (start === -1) break;
+    const close = findBalancedClose(text, start);
+    if (close === -1) break;
+    forms.push(text.slice(start + marker.length, close));
+    cursor = close + 1;
+  }
+  return forms;
+}
+
+function parseKeywordForm(text, key) {
+  const start = keywordMarkerIndex(text, key);
+  if (start === -1) return null;
+  let open = text.indexOf('(', start + key.length + 1);
+  if (open === -1) return null;
+  const close = findBalancedClose(text, open);
+  return close === -1 ? null : text.slice(open + 1, close);
+}
+
+function keywordMarkerIndex(text, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`:${escaped}(?![A-Za-z0-9_-])`).exec(text);
+  return match?.index ?? -1;
+}
+
+const workflowFactsCache = new Map();
+const serviceRegistryCache = new Map();
+
+function readGithubWorkflowFactsForRoot(root) {
+  const repoRoot = findAncestorDir(root, '.github/workflows');
+  if (!repoRoot) return { byFile: new Map(), byDcSlug: new Map(), genericBuildWorkflows: [] };
+  if (workflowFactsCache.has(repoRoot)) return workflowFactsCache.get(repoRoot);
+  const workflowsDir = path.join(repoRoot, '.github/workflows');
+  const byFile = new Map();
+  const byDcSlug = new Map();
+  const genericBuildWorkflows = [];
+  for (const fileName of safeReaddir(workflowsDir)) {
+    if (!fileName.endsWith('.yml') && !fileName.endsWith('.yaml')) continue;
+    const file = path.join(workflowsDir, fileName);
+    const text = safeRead(file);
+    if (!text) continue;
+    const fact = compactObject({
+      file: fileName,
+      path: file,
+      source_ref: file,
+      service_name: yamlScalar(text, 'service_name'),
+      dockerfile: yamlScalar(text, 'dockerfile'),
+      image: yamlScalar(text, 'image') ?? workflowEnvValue(text, 'IMAGE'),
+      dc_project: yamlScalar(text, 'dc_project') ?? deployCenterTriggerSlug(text),
+      uses_reusable_deploy: text.includes('./.github/workflows/reusable-deploy.yml'),
+      build_signal: workflowHasBuildSignal(text),
+    });
+    byFile.set(fileName, fact);
+    if (fact.dc_project) byDcSlug.set(fact.dc_project, fact);
+    if (fact.build_signal) genericBuildWorkflows.push(fact);
+  }
+  const result = { repoRoot, byFile, byDcSlug, genericBuildWorkflows };
+  workflowFactsCache.set(repoRoot, result);
+  return result;
+}
+
+function readServiceRegistryForRoot(root) {
+  const repoRoot = findAncestorFileRoot(root, 'services.yaml');
+  if (!repoRoot) return null;
+  const file = path.join(repoRoot, 'services.yaml');
+  if (serviceRegistryCache.has(file)) return serviceRegistryCache.get(file);
+  const text = safeRead(file);
+  if (!text) return null;
+  const entries = new Map();
+  let current = null;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/\s+#.*$/, '');
+    const top = line.match(/^([A-Za-z0-9_-]+):\s*$/);
+    if (top) {
+      current = { key: top[1], source_ref: `${file}#${top[1]}` };
+      entries.set(current.key, current);
+      continue;
+    }
+    if (!current) continue;
+    const field = line.match(/^\s{2}([A-Za-z0-9_-]+):\s*(.+?)\s*$/);
+    if (field) current[field[1]] = stripYamlScalar(field[2]);
+  }
+  const byDcSlug = new Map();
+  for (const entry of entries.values()) {
+    if (entry.dc_slug) byDcSlug.set(entry.dc_slug, entry);
+  }
+  const registry = { file, entries, byDcSlug };
+  serviceRegistryCache.set(file, registry);
+  return registry;
+}
+
+function matchServiceRegistryEntry(serviceId, deployCenterSlug, registry) {
+  if (!registry) return null;
+  const aliases = new Map([
+    ['xjp-image-service', 'image'],
+    ['xjp-video-service', 'video'],
+    ['xjp-domain-service', 'domain'],
+    ['xjp-mail-service', 'mail'],
+    ['xiaojinpro-backend', 'monolith'],
+  ]);
+  const direct = registry.entries.get(serviceId) ?? registry.entries.get(aliases.get(serviceId));
+  if (direct) return direct;
+  return deployCenterSlug ? registry.byDcSlug.get(deployCenterSlug) ?? null : null;
+}
+
+function selectWorkflowFact({ serviceId, deployCenterSlug, registryEntry, workflowFacts }) {
+  if (!workflowFacts) return null;
+  const registryWorkflow = registryEntry?.ga_workflow;
+  if (registryWorkflow && workflowFacts.byFile.has(registryWorkflow)) {
+    return workflowFacts.byFile.get(registryWorkflow);
+  }
+  if (deployCenterSlug && workflowFacts.byDcSlug.has(deployCenterSlug)) {
+    return workflowFacts.byDcSlug.get(deployCenterSlug);
+  }
+  const preferred = workflowFacts.genericBuildWorkflows.find((workflow) => {
+    const file = workflow.file ?? '';
+    return file.includes(serviceId) || file.includes(serviceId.replace(/^xjp-/, ''));
+  });
+  if (preferred) return preferred;
+  const releaseWorkflow = workflowFacts.genericBuildWorkflows.find((workflow) => (
+    /deploy|publish|release|image/i.test(workflow.file ?? '')
+  ));
+  if (releaseWorkflow) return releaseWorkflow;
+  if (workflowFacts.genericBuildWorkflows.length === 1) return workflowFacts.genericBuildWorkflows[0];
+  return null;
+}
+
+function findAncestorDir(start, relativeDir) {
+  let cursor = path.resolve(start);
+  for (let i = 0; i < 8; i += 1) {
+    if (fs.existsSync(path.join(cursor, relativeDir))) return cursor;
+    const next = path.dirname(cursor);
+    if (next === cursor) break;
+    cursor = next;
+  }
+  return null;
+}
+
+function findAncestorFileRoot(start, fileName) {
+  let cursor = path.resolve(start);
+  for (let i = 0; i < 8; i += 1) {
+    if (fs.existsSync(path.join(cursor, fileName))) return cursor;
+    const next = path.dirname(cursor);
+    if (next === cursor) break;
+    cursor = next;
+  }
+  return null;
+}
+
+function safeReaddir(dir) {
+  try {
+    return fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
+function safeRead(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function yamlScalar(text, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = text.match(new RegExp(`^\\s*${escaped}:\\s*([^\\n#]+)`, 'm'));
+  return match ? stripYamlScalar(match[1]) : null;
+}
+
+function workflowEnvValue(text, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = text.match(new RegExp(`^\\s*${escaped}:\\s*([^\\n#]+)`, 'm'));
+  return match ? stripYamlScalar(match[1]) : null;
+}
+
+function stripYamlScalar(value) {
+  const trimmed = String(value).trim();
+  return trimmed.replace(/^['"]|['"]$/g, '');
+}
+
+function deployCenterTriggerSlug(text) {
+  const match = text.match(/\/ci\/trigger\/([A-Za-z0-9_.-]+)/);
+  return match?.[1] ?? null;
+}
+
+function workflowHasBuildSignal(text) {
+  return text.includes('./.github/workflows/reusable-deploy.yml')
+    || text.includes('docker build')
+    || text.includes('docker/build-push-action')
+    || text.includes('/ci/trigger/');
+}
+
+function findBalancedClose(text, open) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = open; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '(') depth += 1;
+    else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 function keywordValue(text, key) {

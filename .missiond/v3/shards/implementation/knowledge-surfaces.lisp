@@ -103,6 +103,7 @@
              "crates/missiond-daemon/src/handlers/knowledge/project.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project/deployment_channels.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/universe.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/reconcile.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
@@ -112,7 +113,7 @@
              "crates/missiond-mcp/src/tools/knowledge/project.rs"
              "scripts/check-v3-project-registry-isomorphism.mjs"
              "scripts/check-project-maturity.mjs"]
-      :note "project.rs is the mission_project facade. project/registry.rs owns list/get/resolve/set_active/sync/init/import_universe; resolve is the read-only project-context-resolver for id/alias/domain/URL/cwd plus compiled project-universe and service-runtime domains/URLs, returning unregistered_candidate proposals. project/universe.rs owns mission_project(action=universe). ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest path-component project lookup; inactive project aliases never participate in cwd resolution, and mission_project init archives inactive path aliases before upsert. resolve_target_project_root owns project-root spawn cwd policy. check-project-maturity.mjs is the project-universe maturity gate: --min-level M5 proves worker-operational SSOT closure; --min-level M6 proves Auth-grade depth. It resolves the MissionD blueprint from the checker script directory so external-project workers can run it from the target root."
+      :note "project.rs is the mission_project facade. project/registry.rs owns list/get/resolve/set_active/sync/init/import_universe plus deployment_channels/reconcile_deployment_channels read models; resolve is the read-only project-context-resolver for id/alias/domain/URL/cwd through compiled project/service universes. ProjectRegistryRuntimeConfig loads V3 project-registry-policy; ProjectRegistry::resolve owns longest path-component cwd lookup; inactive aliases never participate. Detailed resolver/channel/maturity behavior lives in blueprint-notes note-023."
       :evidence-sidecar ".missiond/v3/evidence/blueprint-notes.lisp#note-016")
 
 (surface data-residency-universe

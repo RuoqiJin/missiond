@@ -26,6 +26,9 @@ function main() {
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } else if (ok) {
     console.log(`V3 behavior closure OK (${result.observed.length} observed behaviors, ${fixtures.cases.length} fixtures)`);
+    if (result.projection_ok === false) {
+      console.error(`V3 behavior navigation projection has ${result.projectionDiagnostics.length} diagnostic(s)`);
+    }
   } else {
     for (const d of diagnostics) {
       console.error(`${d.file}:${d.line ?? 1}:${d.column ?? 1}: ${d.code}: ${d.message}`);
@@ -66,6 +69,10 @@ function publicResult(result, { ok = result.ok, diagnostics = result.diagnostics
     behavior_count: result.declared.behaviors.length,
     effect_count: result.declared.effects.length,
     tombstone_count: result.declared.tombstones.length,
+    scanner_profile_count: result.declared.scannerProfiles.length,
+    navigation_artifact: result.declared.navigationArtifact,
+    projection_ok: result.projection_ok,
+    projection_diagnostics: result.projectionDiagnostics,
     fixture_count: fixtures?.cases?.length ?? 0,
     diagnostics,
   };

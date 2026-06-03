@@ -2,11 +2,15 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import {
+  BEHAVIOR_UNIVERSE_SCANNER_VERSION,
+  COMPILED_BEHAVIOR_NAVIGATION_SCHEMA_VERSION,
+  behaviorNavigationRuntimeTarget,
+  behaviorNavigationSourceHash,
+  behaviorNavigationSourceUnits,
   loadDeclaredBehaviorUniverse,
   scanObservedUniverse,
 } from './lib/behavior_universe.mjs';
@@ -22,11 +26,12 @@ const NAVIGATION_RISK_KINDS = new Set([
 ]);
 
 const usage = `Usage:
-  node scripts/propose-behavior-navigation.mjs --project <id> [--json] [--write] [--root <path>] [--repo <path>]
+  node scripts/propose-behavior-navigation.mjs --project <id> [--json] [--write] [--root <path>] [--repo <path>] [--legacy-write-lisp]
 
-Generates deterministic navigation anchors from scanner output. For MissionD V3,
-the generated anchors are written as a compiled runtime artifact, not active
-authoring Lisp.
+Generates deterministic navigation anchors from scanner output. By default,
+--write stores a compiled runtime artifact. --legacy-write-lisp keeps the old
+compatibility path that writes generated anchors into project behavior-universe
+Lisp.
 `;
 
 function main() {
@@ -38,21 +43,26 @@ function main() {
   });
 
   if (opts.write) {
-    if (result.missiondV3) {
-      writeCompiledBehaviorNavigation(result.target, result.artifact);
-      stripMissiondV3NavigationBlock(result.root);
+    if (opts.legacyWriteLisp && !result.missiondV3) {
+      writeNavigationForms(result.legacyTarget, opts.project, result.root, result.forms);
+      result.legacy_written = true;
     } else {
-      writeNavigationForms(result.target, opts.project, result.root, result.forms);
+      writeCompiledBehaviorNavigation(result.target, result.artifact);
+      result.legacy_written = false;
+    }
+    if (result.missiondV3) {
+      stripMissiondV3NavigationBlock(result.root);
     }
     result.written = true;
   } else {
     result.written = false;
+    result.legacy_written = false;
   }
 
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else {
-    console.log(`${opts.project}: proposed ${result.anchor_count} navigation anchor(s) for ${target}`);
+    console.log(`${opts.project}: proposed ${result.anchor_count} navigation anchor(s) for ${result.target}`);
     if (opts.write) console.log(`${opts.project}: wrote navigation anchors`);
   }
 }
@@ -71,18 +81,18 @@ export function generateBehaviorNavigation({
   const observed = scanObservedUniverse(projectRoot, { projectId: project });
   const declared = loadDeclaredBehaviorUniverse(projectRoot, { projectId: project, missiondV3 });
   const riskItems = observed.filter(isNavigationRisk);
-  const navigationForms = generateNavigationForms(project, riskItems);
-  const outputTarget = target ?? behaviorUniverseTarget(projectRoot, { missiondV3 });
-  const artifact = missiondV3
-    ? compiledBehaviorNavigationArtifact({
-        projectId: project,
-        root: projectRoot,
-        target: outputTarget,
-        observed,
-        riskItems,
-        navigationForms,
-      })
-    : null;
+  const anchors = navigationAnchorsForItems(riskItems);
+  const navigationForms = generateNavigationForms(project, anchors);
+  const outputTarget = target ?? behaviorUniverseTarget(projectRoot, { projectId: project, missiondV3 });
+  const artifact = compiledBehaviorNavigationArtifact({
+    projectId: project,
+    root: projectRoot,
+    target: outputTarget,
+    observed,
+    riskItems,
+    anchors,
+    navigationForms,
+  });
   return {
     ok: true,
     projectId: project,
@@ -91,11 +101,12 @@ export function generateBehaviorNavigation({
     missiondV3,
     observed_count: observed.length,
     risk_count: riskItems.length,
-    anchor_count: riskItems.length,
+    anchor_count: anchors.length,
     effect_anchor_count: riskItems.filter((item) => item.kind === 'effect').length,
     declared_effect_count: declared.effects.length,
     forms: navigationForms.trimEnd(),
     artifact,
+    legacyTarget: path.join(projectRoot, '.missiond/behavior-universe.lisp'),
   };
 }
 
@@ -106,11 +117,13 @@ function parseArgs(argv) {
     repo: process.cwd(),
     root: null,
     project: null,
+    legacyWriteLisp: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--json') opts.json = true;
     else if (arg === '--write') opts.write = true;
+    else if (arg === '--legacy-write-lisp') opts.legacyWriteLisp = true;
     else if (arg === '--project') opts.project = argv[++i] ?? fail('--project requires a value');
     else if (arg.startsWith('--project=')) opts.project = arg.slice('--project='.length);
     else if (arg === '--root') opts.root = path.resolve(argv[++i] ?? fail('--root requires a value'));
@@ -143,11 +156,9 @@ function resolveProjectRoot(repo, projectId) {
   return project?.root ?? null;
 }
 
-function behaviorUniverseTarget(root, { missiondV3 }) {
-  if (missiondV3) {
-    const runtimeDir = process.env.MISSIOND_RUNTIME_DIR
-      || path.join(os.homedir(), '.missiond/runtime/missiond');
-    return path.join(runtimeDir, 'compiled/compiled-behavior-navigation.json');
+function behaviorUniverseTarget(root, { projectId, missiondV3 }) {
+  if (missiondV3 || projectId !== 'missiond') {
+    return behaviorNavigationRuntimeTarget(projectId);
   }
   return path.join(root, '.missiond/behavior-universe.lisp');
 }
@@ -158,10 +169,43 @@ function isNavigationRisk(item) {
     || (item.kind === 'effect' && Boolean(item.effectHint));
 }
 
-function generateNavigationForms(projectId, items) {
-  const groups = new Map();
+function navigationAnchorsForItems(items) {
+  const byKey = new Map();
   for (const item of items) {
-    const kind = behaviorKindFor(item);
+    const role = item.role ?? roleForKind(item.kind);
+    const semanticId = navigationObservedId(item);
+    const key = item.stability === 'line-bound'
+      ? `${behaviorKindFor(item)}\0${role}\0${item.file}\0${item.id}\0${item.effectHint ?? ''}`
+      : `${behaviorKindFor(item)}\0${role}\0${item.file}\0${item.symbol ?? ''}\0${item.effectHint ?? ''}`;
+    const current = byKey.get(key);
+    const legacyObservedIds = unique([
+      ...(current?.legacy_observed_ids ?? []),
+      item.legacy_id ?? item.id,
+    ]);
+    byKey.set(key, {
+      id: semanticId,
+      semantic_id: item.semantic_id ?? semanticId,
+      legacy_observed_id: legacyObservedIds[0] ?? item.id,
+      legacy_observed_ids: legacyObservedIds,
+      kind: behaviorKindFor(item),
+      observed_kind: item.kind,
+      role,
+      file: item.file,
+      line: Math.min(current?.line ?? item.line ?? 1, item.line ?? 1),
+      symbol: item.symbol ?? null,
+      effect: item.effectHint ?? null,
+      stability: item.stability ?? 'line-bound',
+    });
+  }
+  return [...byKey.values()].sort((a, b) => (
+    `${a.kind}\0${a.file}\0${a.symbol ?? ''}\0${a.id}`.localeCompare(`${b.kind}\0${b.file}\0${b.symbol ?? ''}\0${b.id}`)
+  ));
+}
+
+function generateNavigationForms(projectId, anchors) {
+  const groups = new Map();
+  for (const item of anchors) {
+    const kind = item.kind;
     if (!groups.has(kind)) groups.set(kind, []);
     groups.get(kind).push(item);
   }
@@ -169,9 +213,9 @@ function generateNavigationForms(projectId, items) {
   const forms = [];
   for (const [kind, group] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const id = `${projectId}-navigation-${kind}`;
-    const observed = unique(group.map((item) => navigationObservedId(item)));
+    const observed = unique(group.map((item) => item.id));
     const code = unique(group.map((item) => item.file));
-    const effects = unique(group.map((item) => item.effectHint).filter(Boolean));
+    const effects = unique(group.map((item) => item.effect).filter(Boolean));
     const anchors = group.map((item) => formatAnchor(item)).join('\n');
     forms.push(`  (behavior
     :id ${id}
@@ -196,19 +240,21 @@ function behaviorKindFor(item) {
 }
 
 function formatAnchor(item) {
-  const role = item.role ?? roleForKind(item.kind);
   const parts = [
-    `      :role ${role}`,
-    `      :observed ${quote(navigationObservedId(item))}`,
+    `      :role ${item.role}`,
+    `      :observed ${quote(item.id)}`,
+    `      :semantic-id ${quote(item.semantic_id)}`,
+    `      :legacy-observed-id ${quote(item.legacy_observed_id)}`,
     `      :file ${quote(item.file)}`,
   ];
   if (item.symbol) parts.push(`      :symbol ${quote(item.symbol)}`);
-  if (item.effectHint) parts.push(`      :effect ${item.effectHint}`);
+  if (item.effect) parts.push(`      :effect ${item.effect}`);
   return `    (anchor
 ${parts.join('\n')})`;
 }
 
 function navigationObservedId(item) {
+  if (item.semantic_id) return item.semantic_id;
   if (!item.symbol) return item.id;
   const suffix = `:${item.file}:${item.line}`;
   if (!item.id.endsWith(suffix)) return item.id;
@@ -273,34 +319,27 @@ function compiledBehaviorNavigationArtifact({
   target,
   observed,
   riskItems,
+  anchors,
   navigationForms,
 }) {
-  const anchors = riskItems.map((item) => ({
-    id: navigationObservedId(item),
-    observed_id: item.id,
-    kind: item.kind,
-    role: item.role ?? roleForKind(item.kind),
-    file: item.file,
-    line: item.line ?? 1,
-    symbol: item.symbol ?? null,
-    effect: item.effectHint ?? null,
-  }));
-  const payload = {
-    projectId,
+  const sourceUnits = behaviorNavigationSourceUnits(riskItems);
+  return {
+    schema_version: COMPILED_BEHAVIOR_NAVIGATION_SCHEMA_VERSION,
+    project_id: projectId,
     root,
     target,
+    scanner_version: BEHAVIOR_UNIVERSE_SCANNER_VERSION,
+    source_hash: behaviorNavigationSourceHash({ projectId, root, sourceUnits }),
+    generated_at: null,
     observed_count: observed.length,
     risk_count: riskItems.length,
     anchor_count: anchors.length,
+    source_units: sourceUnits,
     anchors,
-    forms: navigationForms.trimEnd(),
-  };
-  return {
-    schema_version: 'missiond.compiled-behavior-navigation.v1',
-    source_hash: crypto.createHash('md5').update(JSON.stringify(payload)).digest('hex'),
-    generated_at: null,
+    legacy: {
+      forms: navigationForms.trimEnd(),
+    },
     diagnostics: [],
-    payload,
   };
 }
 

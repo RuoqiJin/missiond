@@ -43,7 +43,7 @@ export function buildAgentSlices({ semanticJson, behaviorNavigationJson = null }
       .filter((fact) => fact?.kind === 'checker_registry')
       .flatMap((fact) => arrayOrEmpty(fact.checks)),
   );
-  const behaviorAnchors = arrayOrEmpty(behaviorNavigationJson?.payload?.anchors);
+  const behaviorAnchors = arrayOrEmpty(behaviorNavigationJson?.anchors ?? behaviorNavigationJson?.payload?.anchors);
   const policy = normalizeAgentNavigationPolicy(facts.find((fact) => fact?.kind === 'agent_navigation_policy'));
   const rawEntries = facts
     .filter((fact) => fact?.kind === 'agent_entry')
@@ -113,6 +113,7 @@ export function buildProjectAgentNavigation({ semanticJson, universeJson, agentS
     .filter((project) => typeof project?.id === 'string' && project.id.length > 0)
     .map((project) => projectNavigationCard(project, policy));
   const missiondEntries = arrayOrEmpty(agentSlicesJson?.payload?.entries);
+  const domainManagement = universeJson?.payload?.domain_management ?? null;
   return {
     schema_version: 'missiond.compiled-project-agent-navigation.v1',
     source_hash: semanticJson?.source_hash ?? universeJson?.source_hash ?? null,
@@ -122,6 +123,9 @@ export function buildProjectAgentNavigation({ semanticJson, universeJson, agentS
       policy,
       projects,
       missiondEntries,
+      domainQueryPrompt: stringOrNull(domainManagement?.agent_prompt),
+      domainManagementAuthority: stringOrNull(domainManagement?.authority),
+      domainManagementEntrypoint: stringOrNull(domainManagement?.entrypoint),
       source_units: arrayOrEmpty(universeJson?.payload?.source_units),
       source_domains: arrayOrEmpty(universeJson?.payload?.source_domains),
       coverage: {

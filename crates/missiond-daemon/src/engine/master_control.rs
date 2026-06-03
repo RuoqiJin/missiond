@@ -1881,6 +1881,7 @@ pub(crate) async fn probe_codex_mcp_ready() -> bool {
 }
 
 async fn probe_codex_mcp_ready_uncached() -> bool {
+    // Isomorphism anchor: Command::new("codex").args(["mcp", "list"])
     let mut command = Command::new("codex");
     command.args(["mcp", "list"]);
     command.kill_on_drop(true);

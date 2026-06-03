@@ -98,6 +98,26 @@
              (step s4 :logic "if an operator attempts rsync/scp source mirroring, classify it as break-glass diagnostic, require approval/provenance, and create a process-drift follow-up so the steady-state lane is repaired"))
       :egress [source-sync-provenance target-build-provenance deploy-center-workflow-run process-drift-diagnostic]
       :surfaces [".missiond/workflows/m6-deployment-rollout.lisp" "mission_infra_query(action=runtime_targets|skill_evidence)" "deploy-center.codebase_sync_operation" "deploy-center.workflow-run"])
+    (deploy-center-native-stage-adapter-policy
+      :entry [deploy-center.trigger deploy_project_stage_configs.build native_workflow codebase-runner]
+      :core ((step s1 :logic "build stage config deploy_type=native_workflow is first-class and must create xjp_workflow_runs/xjp_workflow_jobs through deploy-center codebase_runner_repo")
+             (step s2 :logic "normal trigger sessions must link to a build deploy_log carrying native workflow run/job ids so project management and deploy provenance can observe the lane")
+             (step s3 :logic "native workflow terminal status must sync back to deploy_log/trigger_session and then continue the normal build->deploy stage chain when a deploy stage exists")
+             (step s4 :logic "native workflow source checkout is fail-closed: branch refs must fetch remote HEAD and verify checked-out commit against FETCH_HEAD; failed fetch or mismatch must fail the job instead of using cached origin/*")
+             (step s5 :logic "legacy docker_build configs may carry source_strategy=xjp_native_codebase_runner only as a compatibility marker during migration, not as the steady-state deploy_type"))
+      :egress [native-workflow-run build-deploy-log trigger-session-provenance deploy-stage-task]
+      :surfaces ["deploy-center/src/api/trigger.rs" "deploy-center/src/db/codebase_runner.rs" "deploy-center/src/workers/lease_reaper.rs" "deploy-center/src/api/config_health.rs"]
+      :rule "Deploy Center trigger dispatch must understand native_workflow as a first-class build stage; product-service Rust backends must not keep docker_build solely to reach the native runner lane. Native workflow builds must never publish an artifact from a stale cached checkout when the requested branch or commit cannot be fetched and verified.")
+    (codebase-runner-capacity-priority-policy
+      :entry [deploy-center.workflow-job claim-next-workflow-job runner-labels build-capacity]
+      :priority_order [privatecloud-10900kf windows-12900kf-linux-vm rickyhq-macmini-m4]
+      :core ((step s1 :logic "default Linux product-service image builds stay on privatecloud-agent instances: privatecloud-10900kf first, windows-12900kf-linux-vm second")
+             (step s2 :logic "rickyhq-macmini-m4 is priority 3 and should claim only macmini-compatible native jobs such as MissionD local build/self-update or explicit Darwin/local Rust build lanes")
+             (step s3 :logic "Deploy Center matches native workflow runners by runner_labels containing executor_name and supports explicit metadata native_workflow.runner_agent_id to pin a job to a physical runner inside a shared executor label")
+             (step s4 :logic "do not rely on implicit priority inside a shared executor label; product-service Rust build stages that require privatecloud-10900kf must set runner_agent_id=privatecloud")
+             (step s5 :logic "do not add macmini to generic Linux docker build labels until Docker/buildx/platform and scheduler-priority support are present"))
+      :surfaces ["deploy-center/src/db/codebase_runner.rs#claim_next_workflow_job_for_runner" "deploy-center/migrations/0044_missiond_macmini_executor.sql" ".missiond/workflows/missiond-macmini-self-update.lisp"]
+      :rule "MissionD must not claim that runner priority fallback is automatic unless deploy-center scheduler code or explicit runner_agent_id/runner labels implement that ordering.")
     (agent-offline-response-policy
       :entry [deploy-center.agent_heartbeat deploy-center.agent_update_failed deployment-event-response mission_infra_query.skill_evidence mission_infra_query.diagnostic_profiles]
       :core ((step s1 :logic "when deploy-center emits agent_offline or repeated heartbeat/update failure, MissionD creates or updates one deploy-ops incident keyed by target_id/service_id/root_cause_key")
@@ -181,16 +201,24 @@
       :kind local-lan-builder
       :environment local-lan
       :owner_authority deploy-center
-      :deploy_center_executor privatecloud
-      :agent_url privatecloud
-      :capabilities [cn-build cache harbor github-runner deploy-agent domestic-jump]
+      :deploy_center_executor privatecloud-agent
+      :agent_url "http://192.168.1.20:9877"
+      :capabilities [cn-build cache harbor github-runner deploy-agent domestic-jump codebase-runner native-workflow-builder rustfs-release-store]
       :service_ids []
       :network_profile privatecloud-build-lan
       :lan_group xjp-zibo-lan
       :artifact_lanes [cn-oss-bundle-lane gitee-source-mirror-lane]
-      :freshness declared-2026-05-13-agent-offline
-      :credential_refs [secret-store://deploy-agent/DEPLOY_AGENT_API_KEY]
-      :evidence_refs [skill:private-cloud user-topology-20260513])
+      :freshness verified-runtime-smoke-2026-06-03
+      :runtime_facts (lan_ip "192.168.1.20"
+                      agent_version "10.7.6"
+                      agent_id "privatecloud"
+                      executor_name "privatecloud-agent"
+                      native_workflow_jobs_enabled true
+                      max_concurrent_builds 1
+                      release_store "http://192.168.1.20:19000/xiaojinpro/releases/xjp-deploy-agent"
+                      deploy_agent_tunnel_port 19877)
+      :credential_refs [secret-store://deploy-agent-privatecloud/DEPLOY_AGENT_API_KEY]
+      :evidence_refs [skill:private-cloud user-topology-20260513 privatecloud-health-20260603])
     (runtime-target :target_id privatecloud-hostvds
       :aliases [hostvds privatecloud]
       :kind vps-runtime
@@ -214,20 +242,78 @@
       :freshness skill-derived-unverified
       :credential_refs [secret-store://deploy-agent/windows-12900kf/agent-token]
       :evidence_refs [skill:windows-runner skill:missiond-model-routing])
+    (runtime-target :target_id windows-12900kf-linux-vm
+      :aliases [12900kf-vm github-runner linux-vm-12900kf]
+      :kind local-lan-builder-vm
+      :environment local-lan
+      :owner_authority deploy-center
+      :deploy_center_executor privatecloud-agent
+      :agent_url "http://192.168.1.21:9877"
+      :capabilities [codebase-runner native-workflow-builder github-runner deploy-agent docker-build lan-build-capacity]
+      :service_ids [xjp-deploy-agent-native github-actions-runner]
+      :network_profile privatecloud-build-lan
+      :lan_group xjp-zibo-lan
+      :artifact_lanes [cloud-registry-lane cn-oss-bundle-lane gitee-source-mirror-lane]
+      :freshness verified-runtime-smoke-2026-06-03
+      :runtime_facts (host_parent windows-12900kf
+                      hypervisor hyperv
+                      vm_name "github-runner"
+                      hostname "github-runner"
+                      lan_ip "192.168.1.21"
+                      agent_version "10.7.6"
+                      agent_id "12900kf-vm"
+                      executor_name "privatecloud-agent"
+                      native_workflow_jobs_enabled true
+                      max_concurrent_builds 2
+                      vcpu 12
+                      memory_assigned_gib 48
+                      root_disk_gib 193
+                      root_free_gib 151
+                      docker_server "29.3.0"
+                      github_runner_name "12900kf-runner"
+                      github_runner_labels [self-hosted Linux X64 xjp builder metal vm]
+                      bootstrap_workflow "xiaojinpro-backend/.github/workflows/deploy-workflow-validation.yml"
+                      bootstrap_branch "codex/runner-bootstrap-12900kf"
+                      health_probe "direct-lan-health-ok"
+                      exec_probe "agent-exec-docker-ok"
+                      deploy_center_claim_probe "claim-next-workflow-job-204")
+      :credential_refs [secret-store://deploy-agent-privatecloud/DEPLOY_AGENT_API_KEY secret-store://xjp-cli/GITHUB_PAT]
+      :evidence_refs [skill:windows-runner skill:private-cloud github-runner-bootstrap-20260603 deploy-center-claim-probe-20260603])
     (runtime-target :target_id rickyhq-macmini-m4
       :aliases [rickyhqmac-mini macmini-managed-node macmini-missiond-worker]
       :kind managed-mac-node
       :environment local-lan
       :owner_authority missiond
       :deploy_center_executor macmini
-      :agent_url rickyhqmac-mini
-      :capabilities [missiond-daemon mission-mcp claude-code codex-cli gemini-cli local-rust-build codebase-runner local-blue-green homebrew-managed-toolchain postgres-client]
-      :service_ids [missiond]
+      :agent_url "http://100.111.62.76:9876"
+      :capabilities [missiond-daemon mission-mcp claude-code codex-cli gemini-cli local-rust-build codebase-runner native-workflow-builder local-blue-green homebrew-managed-toolchain postgres-client]
+      :service_ids [missiond xjp-deploy-agent]
       :network_profile mac-managed-node
       :artifact_lanes [macmini-codebase-local-build-lane manual-break-glass-lane]
-      :freshness health-verified-2026-05-18
+      :freshness verified-native-runner-smoke-2026-06-03
       :runtime_facts (hostname "RickyHQdeMac-mini.local"
                       user "rickyhq"
+                      ssh_hosts [rickyhqmac-mini rickyhqmac-mini-lan]
+                      ssh_tailscale "100.111.62.76"
+                      ssh_lan_via_jump "192.168.4.100 via jin-qemu"
+                      macos_version "26.5"
+                      arch arm64
+                      cpu_cores 10
+                      memory_total_gib 16
+                      memory_usage_percent 69
+                      root_free_gib 53
+                      deploy_agent_version "10.7.10"
+                      deploy_agent_port 9876
+                      deploy_agent_process_owner root
+                      agent_id "rickyhqmac-mini"
+                      executor_name "macmini"
+                      native_workflow_jobs_enabled true
+                      runner_priority 3
+                      priority_order [privatecloud-10900kf windows-12900kf-linux-vm rickyhq-macmini-m4]
+                      max_concurrent_builds 1
+                      docker_cli_available false
+                      linux_image_build_eligible false
+                      runner_smoke "macmini-native-runner-smoke-20260603072916 succeeded"
                       project_root "/Users/rickyhq/Projects/missiond"
                       runtime_root "/Users/rickyhq/.xjp-mission"
                       health "http://127.0.0.1:9120/health"
@@ -288,4 +374,4 @@
     :authority-table deploy_agent_update_provenance
     :facts [agent_id current_version desired_version s3_latest update_status canary_status rollback_marker last_error]
     :events [agent_update_started agent_update_succeeded agent_update_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_offline]
-    :rule "deploy-agent self-update and reachability status are deploy-center runtime facts stored in deploy_agent_update_provenance and heartbeat/provenance tables; deploy-center relays update/offline events into MissionD EventBridge so deploy-ops BoardTasks can be triggered from durable events. A failed best-effort notify must not be hidden inside a globally successful release summary: per-agent failure remains actionable until the target reports the desired version or an approved break-glass runbook closes the incident.")
+    :rule "deploy-agent self-update and reachability status are deploy-center runtime facts stored in deploy_agent_update_provenance and heartbeat/provenance tables; deploy-center relays update/offline events into MissionD EventBridge so deploy-ops BoardTasks can be triggered from durable events. A failed best-effort notify must not be hidden inside a globally successful release summary: per-agent failure remains actionable until the target reports the desired version or an approved break-glass runbook closes the incident. Build/update lock contention may serialize duplicate runs, but timeout MUST fail visibly with a non-zero exit code by default; CI must not report a successful release when no build or publication happened.")

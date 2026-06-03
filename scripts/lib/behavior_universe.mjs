@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -58,6 +59,8 @@ const NAVIGATION_RISK_KINDS = new Set([
   'cli',
   'subprocess',
 ]);
+export const COMPILED_BEHAVIOR_NAVIGATION_SCHEMA_VERSION = 'missiond.compiled-behavior-navigation.v2';
+export const BEHAVIOR_UNIVERSE_SCANNER_VERSION = 'missiond.behavior-universe.scanner.v2';
 
 export function scanObservedUniverse(root, {
   projectId = path.basename(root),
@@ -72,7 +75,7 @@ export function scanObservedUniverse(root, {
     else if (/\.(js|mjs|cjs|ts|tsx)$/.test(rel)) scanJsTsFile({ observed, source, rel, projectId });
     else if (rel.endsWith('.py')) scanPythonFile({ observed, source, rel, projectId });
   }
-  return observed.sort((a, b) => a.id.localeCompare(b.id));
+  return observed.sort((a, b) => effectiveObservedId(a).localeCompare(effectiveObservedId(b)));
 }
 
 export function loadDeclaredBehaviorUniverse(root, {
@@ -100,16 +103,16 @@ export function loadDeclaredBehaviorUniverse(root, {
       universes.push(parseBehaviorUniverse(root, file, form));
     }
   }
-  if (missiondV3) {
-    const navigation = loadCompiledBehaviorNavigation(root, projectId);
-    diagnostics.push(...navigation.diagnostics);
-    universes.push(...navigation.universes);
-  }
+  const navigation = loadCompiledBehaviorNavigation(root, projectId, { missiondV3 });
 
   const behaviors = universes.flatMap((u) => u.behaviors);
   const effects = universes.flatMap((u) => u.effects);
   const tombstones = universes.flatMap((u) => u.tombstones);
-  const anchors = behaviors.flatMap((behavior) => behavior.anchors);
+  const scannerProfiles = universes.flatMap((u) => u.scannerProfiles);
+  const anchors = [
+    ...behaviors.flatMap((behavior) => behavior.anchors),
+    ...navigation.anchors,
+  ];
   const triggers = behaviors.flatMap((behavior) => behavior.triggers);
 
   return {
@@ -119,9 +122,12 @@ export function loadDeclaredBehaviorUniverse(root, {
     behaviors,
     effects,
     tombstones,
+    scannerProfiles,
     anchors,
     triggers,
     diagnostics,
+    projectionDiagnostics: navigation.diagnostics,
+    navigationArtifact: navigation.artifact,
   };
 }
 
@@ -134,6 +140,7 @@ export function validateBehaviorClosure(root, {
   const declared = loadDeclaredBehaviorUniverse(root, { projectId, missiondV3 });
   const observed = scanObservedUniverse(root, { projectId, includeTests });
   const diagnostics = [...declared.diagnostics];
+  const projectionDiagnostics = [...(declared.projectionDiagnostics ?? [])];
 
   if (declared.universes.length === 0) {
     diagnostics.push({
@@ -148,7 +155,6 @@ export function validateBehaviorClosure(root, {
   const behaviorPatterns = declared.behaviors.flatMap((behavior) => behavior.observed);
   const tombstonePatterns = declared.tombstones.map((t) => t.observedId).filter(Boolean);
   const effectsById = new Map(declared.effects.map((effect) => [effect.id, effect]));
-  const observedIds = new Set(observed.map((item) => item.id));
 
   for (const behavior of declared.behaviors) {
     if (!behavior.id) {
@@ -173,7 +179,7 @@ export function validateBehaviorClosure(root, {
     }
     for (const observedId of behavior.observed) {
       if (observedId.includes('*')) continue;
-      if (observedIds.has(observedId)) continue;
+      if (observed.some((item) => observedMatchesPattern(item, observedId))) continue;
       diagnostics.push(diag(behavior, 'DECLARED_OBSERVED_ID_MISSING', `behavior ${behavior.id} declares ${observedId}, but scanner did not observe it in active code`));
     }
   }
@@ -190,7 +196,7 @@ export function validateBehaviorClosure(root, {
 
   for (const item of observed) {
     if (item.kind !== 'effect') continue;
-    if (matchesAny(item.id, tombstonePatterns)) continue;
+    if (matchesAnyObserved(item, tombstonePatterns)) continue;
     if (declared.effects.some((effect) => declaredEffectCoversObserved(effect, item))) continue;
     diagnostics.push({
       file: path.join(root, item.file),
@@ -202,7 +208,7 @@ export function validateBehaviorClosure(root, {
   }
 
   for (const item of observed) {
-    if (matchesAny(item.id, behaviorPatterns) || matchesAny(item.id, tombstonePatterns)) continue;
+    if (matchesAnyObserved(item, behaviorPatterns) || matchesAnyObserved(item, tombstonePatterns)) continue;
     diagnostics.push({
       file: path.join(root, item.file),
       line: item.line,
@@ -234,50 +240,70 @@ export function validateBehaviorClosure(root, {
       tombstonePatterns,
       navigationLevel,
       diagnostics,
+      projectionDiagnostics,
     });
   }
 
   return {
     ok: diagnostics.length === 0,
+    projection_ok: projectionDiagnostics.length === 0,
     projectId,
     observed,
     declared,
     diagnostics,
+    projectionDiagnostics,
   };
 }
 
-function missiondRuntimeCompiledDir() {
+function missiondRuntimeDir() {
   const runtimeDir = process.env.MISSIOND_RUNTIME_DIR
     || path.join(os.homedir(), '.missiond/runtime/missiond');
-  return path.join(runtimeDir, 'compiled');
+  return runtimeDir;
 }
 
-function behaviorNavigationCandidates(root) {
-  return [
-    path.join(missiondRuntimeCompiledDir(), 'compiled-behavior-navigation.json'),
-    path.join(root, '.missiond/v3/runtime/compiled/compiled-behavior-navigation.json'),
-  ];
+function missiondRuntimeCompiledDir() {
+  return path.join(missiondRuntimeDir(), 'compiled');
 }
 
-function loadCompiledBehaviorNavigation(root, projectId) {
-  const candidates = behaviorNavigationCandidates(root);
+export function behaviorNavigationRuntimeTarget(projectId) {
+  if (projectId === 'missiond') {
+    return path.join(missiondRuntimeCompiledDir(), 'compiled-behavior-navigation.json');
+  }
+  return path.join(missiondRuntimeDir(), 'projects', projectId, 'compiled', 'compiled-behavior-navigation.json');
+}
+
+function behaviorNavigationCandidates(root, projectId, { missiondV3 = false } = {}) {
+  const candidates = [behaviorNavigationRuntimeTarget(projectId)];
+  if (projectId !== 'missiond') {
+    candidates.push(path.join(root, '.missiond/runtime/compiled/compiled-behavior-navigation.json'));
+  }
+  if (missiondV3 || projectId === 'missiond') {
+    candidates.push(path.join(root, '.missiond/v3/runtime/compiled/compiled-behavior-navigation.json'));
+  }
+  return uniqueStrings(candidates);
+}
+
+function loadCompiledBehaviorNavigation(root, projectId, { missiondV3 = false } = {}) {
+  const candidates = behaviorNavigationCandidates(root, projectId, { missiondV3 });
   const file = candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0];
   if (!fs.existsSync(file)) {
     return {
-      universes: [],
-      diagnostics: [{
+      anchors: [],
+      artifact: {
         file,
-        line: 1,
-        column: 1,
-        code: 'BEHAVIOR_NAVIGATION_ARTIFACT_MISSING',
-        message: 'MissionD V3 behavior navigation anchors must come from compiled-behavior-navigation.json under MISSIOND_RUNTIME_DIR/compiled; run node scripts/propose-behavior-navigation.mjs --project missiond --write',
-      }],
+        schema_version: null,
+        loaded: false,
+        missing: true,
+        candidates,
+      },
+      diagnostics: [],
     };
   }
   try {
     const compiled = JSON.parse(fs.readFileSync(file, 'utf8'));
     const diagnostics = [];
-    if (compiled?.schema_version !== 'missiond.compiled-behavior-navigation.v1') {
+    const schema = compiled?.schema_version;
+    if (schema !== COMPILED_BEHAVIOR_NAVIGATION_SCHEMA_VERSION && schema !== 'missiond.compiled-behavior-navigation.v1') {
       diagnostics.push({
         file,
         line: 1,
@@ -295,31 +321,60 @@ function loadCompiledBehaviorNavigation(root, projectId) {
         message: diagnostic?.message ?? JSON.stringify(diagnostic),
       })));
     }
-    const forms = typeof compiled?.payload?.forms === 'string' ? compiled.payload.forms : '';
-    if (!forms.trim()) {
-      diagnostics.push({
-        file,
-        line: 1,
-        column: 1,
-        code: 'BEHAVIOR_NAVIGATION_FORMS_MISSING',
-        message: 'compiled behavior navigation artifact missing payload.forms',
-      });
-      return { universes: [], diagnostics };
+    const artifact = {
+      file,
+      schema_version: schema ?? null,
+      loaded: true,
+      missing: false,
+      candidates,
+      source_hash: compiled?.source_hash ?? null,
+      scanner_version: compiled?.scanner_version ?? compiled?.payload?.scanner_version ?? null,
+      project_id: compiled?.project_id ?? compiled?.payload?.projectId ?? compiled?.payload?.project_id ?? null,
+    };
+    if (schema === COMPILED_BEHAVIOR_NAVIGATION_SCHEMA_VERSION) {
+      return {
+        anchors: arrayOrEmpty(compiled?.anchors ?? compiled?.payload?.anchors)
+          .map((anchor, index) => compiledAnchorToDeclaredAnchor({ root, file, anchor, index })),
+        artifact,
+        diagnostics,
+      };
     }
-    const source = `(behavior-universe ${projectId}
+    const forms = typeof compiled?.payload?.forms === 'string' ? compiled.payload.forms : '';
+    if (forms.trim()) {
+      const source = `(behavior-universe ${projectId}
   :schema "missiond.behavior-universe.navigation.v1"
   :project ${projectId}
   :status generated-runtime-navigation
   :owner navigation-gate
 ${forms}
 )`;
-    const parsed = parseLisp(source, file);
-    const universes = collectForms(parsed, 'behavior-universe')
-      .map((form) => parseBehaviorUniverse(root, file, form));
-    return { universes, diagnostics };
+      const parsed = parseLisp(source, file);
+      const universes = collectForms(parsed, 'behavior-universe')
+        .map((form) => parseBehaviorUniverse(root, file, form));
+      return {
+        anchors: universes.flatMap((universe) => universe.behaviors.flatMap((behavior) => behavior.anchors)),
+        artifact,
+        diagnostics,
+      };
+    }
+    diagnostics.push({
+      file,
+      line: 1,
+      column: 1,
+      code: 'BEHAVIOR_NAVIGATION_FORMS_MISSING',
+      message: 'legacy compiled behavior navigation artifact missing payload.forms',
+    });
+    return { anchors: [], artifact, diagnostics };
   } catch (err) {
     return {
-      universes: [],
+      anchors: [],
+      artifact: {
+        file,
+        schema_version: null,
+        loaded: false,
+        missing: false,
+        candidates,
+      },
       diagnostics: [{
         file,
         line: err.line ?? 1,
@@ -361,6 +416,7 @@ function parseBehaviorUniverse(root, file, form) {
     behaviors: collectForms([form], 'behavior').map((node) => parseBehavior(root, file, node)),
     effects: collectForms([form], 'effect').map((node) => parseEffect(root, file, node)),
     tombstones: collectForms([form], 'tombstone').map((node) => parseTombstone(root, file, node)),
+    scannerProfiles: collectForms([form], 'scanner-profile').map((node) => parseScannerProfile(root, file, node)),
   };
 }
 
@@ -391,9 +447,12 @@ function parseAnchor(root, file, node, behaviorId) {
     behaviorId,
     role: textProp(props, ':role'),
     observed: textProp(props, ':observed'),
+    semanticId: textProp(props, ':semantic-id'),
+    legacyObservedId: textProp(props, ':legacy-observed-id'),
     targetFile: textProp(props, ':file'),
     symbol: textProp(props, ':symbol'),
     effect: textProp(props, ':effect'),
+    source: 'lisp',
   };
 }
 
@@ -436,6 +495,21 @@ function parseTombstone(root, file, node) {
     line: node.loc?.line ?? 1,
     observedId: textProp(props, ':observed-id'),
     reason: textProp(props, ':reason'),
+  };
+}
+
+function parseScannerProfile(root, file, node) {
+  const props = readKeywordProps(node, { start: 1 });
+  return {
+    file,
+    relFile: normalizeRel(root, file),
+    line: node.loc?.line ?? 1,
+    id: textProp(props, ':id') ?? nodeText(node.children[1]) ?? null,
+    language: textProp(props, ':language'),
+    mode: textProp(props, ':mode'),
+    coverage: arrayProp(props, ':coverage'),
+    manualContracts: arrayProp(props, ':manual-contracts'),
+    rule: textProp(props, ':rule'),
   };
 }
 
@@ -662,15 +736,44 @@ function rustFsOperation(line) {
 }
 
 function pushObserved(observed, kind, id, file, line, detector, projectId, extra = {}) {
+  const legacyId = normalizeObservedId(id);
+  const semantic = semanticObservedIdentity({
+    kind,
+    file,
+    line,
+    role: extra.role,
+    symbol: extra.symbol,
+    effectHint: extra.effectHint,
+    operation: extra.operation,
+    legacyId,
+  });
   observed.push({
     projectId,
-    id: normalizeObservedId(id),
+    id: legacyId,
+    legacy_id: legacyId,
+    semantic_id: semantic.id,
+    stability: semantic.stability,
     kind,
     file,
     line,
     detector,
     ...extra,
   });
+}
+
+function semanticObservedIdentity({ kind, file, line, role, symbol, effectHint, operation, legacyId }) {
+  if (!symbol) {
+    return {
+      id: legacyId,
+      stability: 'line-bound',
+    };
+  }
+  const effectiveRole = role ?? roleForObservedKind(kind);
+  const effectOrRole = effectHint ?? operation ?? effectiveRole ?? kind;
+  return {
+    id: normalizeObservedId(`${kind}:${file}#${symbol}:${effectOrRole}`),
+    stability: 'symbol',
+  };
 }
 
 function listSourceFiles(root, { includeTests }) {
@@ -748,13 +851,43 @@ function validateNavigationClosure({
   tombstonePatterns,
   navigationLevel,
   diagnostics,
+  projectionDiagnostics,
 }) {
   const validAnchorsByObservedId = new Map();
+  const riskItems = observed.filter((item) => (
+    !matchesAnyObserved(item, tombstonePatterns)
+    && isNavigationRisk(item, navigationLevel)
+  ));
+  if (riskItems.length > 0 && declared.navigationArtifact?.missing) {
+    projectionDiagnostics.push({
+      file: declared.navigationArtifact.file,
+      line: 1,
+      column: 1,
+      code: 'BEHAVIOR_NAVIGATION_ARTIFACT_MISSING',
+      message: `${declared.projectId} has ${riskItems.length} navigation-risk behavior(s) but no compiled navigation artifact; run node scripts/propose-behavior-navigation.mjs --project ${declared.projectId} --write`,
+    });
+  }
+  if (declared.navigationArtifact?.loaded && declared.navigationArtifact?.source_hash) {
+    const expectedHash = behaviorNavigationSourceHash({
+      projectId: declared.projectId,
+      root,
+      sourceUnits: behaviorNavigationSourceUnits(riskItems),
+    });
+    if (expectedHash !== declared.navigationArtifact.source_hash) {
+      projectionDiagnostics.push({
+        file: declared.navigationArtifact.file,
+        line: 1,
+        column: 1,
+        code: 'BEHAVIOR_NAVIGATION_ARTIFACT_STALE',
+        message: `${declared.projectId} compiled navigation artifact is stale; run node scripts/propose-behavior-navigation.mjs --project ${declared.projectId} --write`,
+      });
+    }
+  }
 
   for (const anchor of declared.anchors) {
     let anchorValid = true;
     if (!anchor.role || !anchor.observed || !anchor.targetFile) {
-      diagnostics.push(diag(
+      projectionDiagnostics.push(diag(
         anchor,
         'NAVIGATION_ANCHOR_MISSING',
         `behavior ${anchor.behaviorId ?? '<missing>'} has an anchor missing :role, :observed, or :file`,
@@ -763,7 +896,7 @@ function validateNavigationClosure({
     }
 
     if (anchor.targetFile && !fileExists(root, anchor.targetFile)) {
-      diagnostics.push(diag(
+      projectionDiagnostics.push(diag(
         anchor,
         'NAVIGATION_ANCHOR_FILE_MISSING',
         `anchor for ${anchor.observed ?? '<missing>'} points at missing file ${anchor.targetFile}`,
@@ -772,7 +905,7 @@ function validateNavigationClosure({
     }
 
     if (anchor.effect && !effectsById.has(anchor.effect)) {
-      diagnostics.push(diag(
+      projectionDiagnostics.push(diag(
         anchor,
         'NAVIGATION_EFFECT_CONTRACT_MISSING',
         `anchor for ${anchor.observed ?? '<missing>'} references unknown effect ${anchor.effect}`,
@@ -781,10 +914,10 @@ function validateNavigationClosure({
     }
 
     const matchedObserved = anchor.observed
-      ? observed.filter((item) => matchPattern(item.id, anchor.observed))
+      ? observed.filter((item) => anchorObservedMatchesItem(anchor, item))
       : [];
     if (anchor.observed && matchedObserved.length === 0) {
-      diagnostics.push(diag(
+      projectionDiagnostics.push(diag(
         anchor,
         'NAVIGATION_ANCHOR_STALE',
         `anchor observes ${anchor.observed}, but scanner did not observe a matching active behavior`,
@@ -794,7 +927,7 @@ function validateNavigationClosure({
 
     const matchingObserved = matchedObserved.filter((item) => anchorMatchesObserved(root, anchor, item));
     if (matchedObserved.length > 0 && matchingObserved.length === 0) {
-      diagnostics.push(diag(
+      projectionDiagnostics.push(diag(
         anchor,
         'NAVIGATION_ANCHOR_STALE',
         `anchor for ${anchor.observed} no longer matches any observed behavior after role/symbol/effect checks`,
@@ -803,16 +936,18 @@ function validateNavigationClosure({
 
     for (const item of matchingObserved) {
       if (anchorValid) {
-        const anchors = validAnchorsByObservedId.get(item.id) ?? [];
-        anchors.push(anchor);
-        validAnchorsByObservedId.set(item.id, anchors);
+        for (const key of observedIdentityKeys(item)) {
+          const anchors = validAnchorsByObservedId.get(key) ?? [];
+          anchors.push(anchor);
+          validAnchorsByObservedId.set(key, anchors);
+        }
       }
     }
   }
 
   for (const trigger of declared.triggers) {
     if (trigger.fromFile && !fileExists(root, trigger.fromFile)) {
-      diagnostics.push(diag(
+      projectionDiagnostics.push(diag(
         trigger,
         'NAVIGATION_ANCHOR_FILE_MISSING',
         `trigger for behavior ${trigger.behaviorId ?? '<missing>'} points at missing file ${trigger.fromFile}`,
@@ -820,15 +955,13 @@ function validateNavigationClosure({
     }
   }
 
-  for (const item of observed) {
-    if (matchesAny(item.id, tombstonePatterns)) continue;
-    if (!isNavigationRisk(item, navigationLevel)) continue;
-    const anchors = validAnchorsByObservedId.get(item.id) ?? [];
+  for (const item of riskItems) {
+    const anchors = anchorsForObservedItem(validAnchorsByObservedId, item);
     if (anchors.length > 0) continue;
 
-    const claimedPatterns = behaviorPatterns.filter((pattern) => matchPattern(item.id, pattern));
+    const claimedPatterns = behaviorPatterns.filter((pattern) => observedMatchesPattern(item, pattern));
     if (claimedPatterns.some((pattern) => pattern.includes('*'))) {
-      diagnostics.push({
+      projectionDiagnostics.push({
         file: path.join(root, item.file),
         line: item.line,
         column: 1,
@@ -836,7 +969,7 @@ function validateNavigationClosure({
         message: `${item.id} (${item.kind}) is high-risk behavior claimed by wildcard without a matching navigation anchor`,
       });
     }
-    diagnostics.push({
+    projectionDiagnostics.push({
       file: path.join(root, item.file),
       line: item.line,
       column: 1,
@@ -852,7 +985,7 @@ function validateNavigationClosure({
       && [...validAnchorsByObservedId.values()].some((anchors) => anchors.includes(anchor))
     ));
     if (!hasReferencedAnchor) {
-      diagnostics.push(diag(
+      projectionDiagnostics.push(diag(
         effect,
         'NAVIGATION_EFFECT_CONTRACT_MISSING',
         `external-home effect ${effect.id ?? '<missing>'} must have a matching navigation anchor`,
@@ -872,9 +1005,9 @@ function validateNavigationClosure({
       });
       continue;
     }
-    const anchors = validAnchorsByObservedId.get(item.id) ?? [];
+    const anchors = anchorsForObservedItem(validAnchorsByObservedId, item);
     if (!anchors.some((anchor) => anchor.effect === item.effectHint)) {
-      diagnostics.push({
+      projectionDiagnostics.push({
         file: path.join(root, item.file),
         line: item.line,
         column: 1,
@@ -886,10 +1019,88 @@ function validateNavigationClosure({
 
 }
 
+export function behaviorNavigationSourceUnits(items) {
+  return items
+    .map((item) => ({
+      semantic_id: item.semantic_id ?? item.id,
+      legacy_id: (item.stability ?? 'line-bound') === 'line-bound' ? (item.legacy_id ?? item.id) : null,
+      kind: item.kind,
+      role: item.role ?? roleForObservedKind(item.kind),
+      file: item.file,
+      symbol: item.symbol ?? null,
+      effect: item.effectHint ?? null,
+      stability: item.stability ?? 'line-bound',
+    }))
+    .sort((a, b) => (
+      `${a.semantic_id}\0${a.legacy_id}\0${a.kind}\0${a.file}`
+        .localeCompare(`${b.semantic_id}\0${b.legacy_id}\0${b.kind}\0${b.file}`)
+    ));
+}
+
+export function behaviorNavigationSourceHash({ projectId, root, sourceUnits }) {
+  const payload = {
+    project_id: projectId,
+    root: path.resolve(root),
+    scanner_version: BEHAVIOR_UNIVERSE_SCANNER_VERSION,
+    source_units: sourceUnits,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+function compiledAnchorToDeclaredAnchor({ root, file, anchor, index }) {
+  return {
+    file,
+    relFile: normalizeRel(root, file),
+    line: Number(anchor?.line) || 1,
+    behaviorId: anchor?.behavior_id ?? anchor?.behaviorId ?? `compiled-navigation-${index + 1}`,
+    role: anchor?.role ?? null,
+    observed: anchor?.semantic_id ?? anchor?.id ?? anchor?.observed_id ?? null,
+    semanticId: anchor?.semantic_id ?? null,
+    legacyObservedId: anchor?.legacy_observed_id ?? anchor?.observed_id ?? null,
+    targetFile: anchor?.file ?? null,
+    symbol: anchor?.symbol ?? null,
+    effect: anchor?.effect ?? null,
+    source: 'compiled',
+  };
+}
+
+function anchorObservedMatchesItem(anchor, item) {
+  const patterns = uniqueStrings([
+    anchor.semanticId,
+    anchor.observed,
+    anchor.legacyObservedId,
+  ].filter(Boolean));
+  return patterns.some((pattern) => observedMatchesPattern(item, pattern));
+}
+
+function observedMatchesPattern(item, pattern) {
+  return observedIdentityKeys(item).some((id) => matchPattern(id, pattern));
+}
+
+function matchesAnyObserved(item, patterns) {
+  return patterns.some((pattern) => observedMatchesPattern(item, pattern));
+}
+
+function observedIdentityKeys(item) {
+  return uniqueStrings([
+    item.semantic_id,
+    item.id,
+    item.legacy_id,
+  ].filter(Boolean));
+}
+
+function anchorsForObservedItem(validAnchorsByObservedId, item) {
+  return uniqueObjects(observedIdentityKeys(item).flatMap((key) => validAnchorsByObservedId.get(key) ?? []));
+}
+
+function effectiveObservedId(item) {
+  return item.semantic_id ?? item.id;
+}
+
 function anchorMatchesObserved(root, anchor, item) {
   const expectedRole = navigationRoleFor(item);
   if (expectedRole && !navigationRoleCompatible(anchor.role, expectedRole, item)) return false;
-  if (anchor.targetFile && anchor.targetFile !== item.file && !fileExists(root, anchor.targetFile)) return false;
+  if (anchor.targetFile && anchor.targetFile !== item.file) return false;
   if (item.symbol && anchor.symbol !== item.symbol) return false;
   if (item.kind === 'effect' && item.effectHint && anchor.effect !== item.effectHint) return false;
   return true;
@@ -909,11 +1120,15 @@ function isNavigationRisk(item, navigationLevel = 'risk') {
 
 function navigationRoleFor(item) {
   if (item.role) return item.role;
-  if (item.kind === 'mcp-tool') return 'tool';
-  if (item.kind === 'background-task') return 'scheduler';
-  if (item.kind === 'effect') return 'effect-site';
-  if (item.kind === 'cli') return 'entry';
-  if (NAVIGATION_RISK_KINDS.has(item.kind)) return item.kind;
+  return roleForObservedKind(item.kind);
+}
+
+function roleForObservedKind(kind) {
+  if (kind === 'mcp-tool') return 'tool';
+  if (kind === 'background-task') return 'scheduler';
+  if (kind === 'effect') return 'effect-site';
+  if (kind === 'cli') return 'entry';
+  if (NAVIGATION_RISK_KINDS.has(kind)) return kind;
   return null;
 }
 
@@ -931,6 +1146,18 @@ function slug(value) {
     .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
     .replace(/_/g, '-')
     .toLowerCase();
+}
+
+function arrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values)].sort();
+}
+
+function uniqueObjects(values) {
+  return [...new Set(values)];
 }
 
 function matchesAny(id, patterns) {

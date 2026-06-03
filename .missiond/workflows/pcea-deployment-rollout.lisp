@@ -46,7 +46,7 @@
      (step s6 :name dispatch-deploy-ops-shard
        :logic "Create a deploy-ops worker shard with exact component, repo, branch, target commit, deploy slug, previous provenance, smoke list, rollback evidence, and no DNS/secret mutation permission.")
      (step s7 :name wait-deploy-center-events
-       :logic "Wait through EventBridge for deploy-center closure_verdict using project_id=pcea, service_id=deploy-center, deploy slug, and correlation_id; deploy_started, deploy_succeeded, smoke_succeeded, deploy_failed, or smoke_failed are intermediate diagnostics and must not close the rollout.")
+       :logic "Wait through EventBridge for deploy_started, deploy_succeeded, smoke_succeeded, deploy_failed, or smoke_failed as scoped intermediate diagnostics, and wait for deploy-center closure_verdict using project_id=pcea, service_id=deploy-center, deploy slug, and correlation_id before closing the rollout.")
      (step s8 :name smoke-components
        :logic "For successful deploys verify frontend / on port 3001 and backend /api/health on port 3002; deeper pcea-api smoke may read service.manifest.toml probes when deploy-center exposes them.")
      (step s9 :name write-rollout-report

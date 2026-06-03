@@ -24,6 +24,7 @@ pub(crate) struct ProviderDriverCapabilities {
     pub(crate) status: bool,
     pub(crate) mcp_status: bool,
     pub(crate) mcp_reconnect: bool,
+    pub(crate) prompt_authorization: bool,
 }
 
 #[async_trait]

@@ -7,7 +7,6 @@
 //! - No /clear (relies on Claude Code's own compaction)
 //! - Result from DB (authoritative JSONL), TextComplete as trigger only
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -186,12 +185,12 @@ impl EngineController for ClaudeCodeController {
                 sandbox: None,
                 approval_policy: None,
                 tool_policy_path: None,
-                extra_env: HashMap::new(),
+                extra_env: req.env.clone(),
                 initial_prompt: None,
                 command_override: None,
                 ..Default::default()
             },
-            None, // Pass the custom environment from the request if it had one
+            Some(&req.env),
         )
         .await?;
 

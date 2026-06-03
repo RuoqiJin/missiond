@@ -26,6 +26,8 @@ Default backend: `Rust axum + sqlx + PostgreSQL`.
 
 Rust production builds are not Vercel or target-VM builds by default. Product-service Rust backends use the deploy-center approved privatecloud/codebase build lane, then deploy built artifacts to the runtime target.
 
+Deploy Center build stages for Rust product-service backends use `deploy_type=native_workflow`. The older `docker_build` plus `source_strategy=xjp_native_codebase_runner` shape is migration compatibility only, not the scaffold default.
+
 Use Next.js route handlers only for thin CRUD/BFF APIs. Keep Vite only for existing Vite apps or browser-heavy editor/exporter surfaces.
 
 ## Layout
@@ -154,9 +156,21 @@ release commit
 
 The builder is the deploy-center approved privatecloud/codebase lane, currently represented in MissionD as `privatecloud-10900kf`. This applies even when the runtime target is a GCP VM.
 
+The Deploy Center `stage-configs/build` entry must use `deploy_type=native_workflow`; normal trigger dispatch creates `xjp_workflow_runs` / `xjp_workflow_jobs`, waits for terminal workflow status, then continues to the runtime deploy stage.
+
 Do not run `cargo build`, `docker build`, or `docker compose up --build` on GCP production VMs for product-service Rust backends. A GCP VM deploy stage should only pull or receive an already-built artifact, recreate the service, and report smoke/provenance.
 
 GitHub Actions or Vercel may trigger control-plane events, but they are not the release evidence for Rust backend compilation unless MissionD/deploy-center records an explicit exception. Operator laptop builds are break-glass bootstrap only and need follow-up lane repair.
+
+MissionD project management must show each product-service project's deployment channels from `service-runtime-universe`: privatecloud build lane, runtime target/deploy-center or VM lane, and frontend hosting lane when present.
+
+The canonical deployment-channel shape is build/runtime/frontend:
+
+- Build: `native_workflow` through the privatecloud/codebase builder for Rust product-service backends.
+- Runtime: deploy-center/GCP VM/ECS target that consumes an already-built artifact.
+- Frontend: Vercel project/domain when a frontend exists.
+
+MissionD may infer legacy XJP monorepo services from `services.yaml` and GitHub workflows, but new product-service projects must declare these channels explicitly in their MissionD/service-runtime facts.
 
 ## Deployment Closure Bundle
 

@@ -55,6 +55,39 @@ interface ProjectInfo {
   lispFiles?: string[];
   lispCount?: number;
   runtimeServices?: RuntimeService[];
+  deploymentChannels?: DeploymentChannel[];
+}
+
+interface DeploymentChannel {
+  id: string;
+  serviceId: string;
+  projectId?: string;
+  surface: string;
+  substrate?: string;
+  channelKind?: string;
+  authority?: string;
+  deployCenterSlug?: string;
+  runtimeTarget?: string;
+  executor?: string;
+  container?: string;
+  hostBind?: string;
+  proxy?: string;
+  artifactLane?: string;
+  buildLane?: string;
+  builder?: string;
+  sourceSync?: string;
+  workflow?: string;
+  image?: string;
+  imageEnv?: string;
+  project?: string;
+  rootDirectory?: string;
+  productionDomain?: string;
+  fallbackDomain?: string;
+  sourceRef?: string;
+  declaredStatus?: string;
+  observedStatus?: string;
+  driftStatus?: string;
+  targetSideBuildProhibited?: boolean;
 }
 
 interface RuntimeService {
@@ -242,6 +275,9 @@ function ProjectsPanel() {
                 </div>
               </div>
             )}
+            {p.deploymentChannels?.length ? (
+              <DeploymentChannelSummary channels={p.deploymentChannels} />
+            ) : null}
             {p.runtimeServices?.length ? (
               <div className="mt-3 space-y-2 border-t border-neutral-800/70 pt-2">
                 {p.runtimeServices.map((svc) => (
@@ -254,6 +290,105 @@ function ProjectsPanel() {
       </div>
     </div>
   );
+}
+
+function DeploymentChannelSummary({ channels }: { channels: DeploymentChannel[] }) {
+  const ordered = [...channels].sort((a, b) => channelOrder(a.surface) - channelOrder(b.surface));
+  return (
+    <div className="mt-3 border-t border-neutral-800/70 pt-2">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-neutral-600">
+        <ServerCog className="h-3 w-3" />
+        deployment channels
+      </div>
+      <div className="space-y-1.5">
+        {ordered.map((channel) => (
+          <DeploymentChannelRow key={channel.id} channel={channel} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DeploymentChannelRow({ channel }: { channel: DeploymentChannel }) {
+  const primary = channelPrimaryValue(channel);
+  const secondary = [
+    channelLabel(channel.channelKind),
+    channel.authority && `auth ${channel.authority}`,
+    channel.observedStatus && `obs ${channel.observedStatus}`,
+    channel.driftStatus && `drift ${channel.driftStatus}`,
+  ].filter(Boolean).join(' · ');
+  const detail = [
+    channel.executor,
+    channel.runtimeTarget,
+    channel.deployCenterSlug,
+    channel.artifactLane,
+    channel.sourceRef && `src ${sourceLabel(channel.sourceRef)}`,
+  ].filter(Boolean).join(' · ');
+  return (
+    <div className="rounded border border-neutral-800 bg-neutral-950/40 px-2 py-1.5">
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium', channelTone(channel.surface))}>
+          {channelSurfaceLabel(channel.surface)}
+        </span>
+        <span className="truncate text-[10px] text-neutral-300" title={primary}>
+          {primary || channel.substrate || '-'}
+        </span>
+      </div>
+      {secondary ? (
+        <div className="mt-1 truncate text-[9px] text-neutral-600" title={secondary}>
+          {secondary}
+        </div>
+      ) : null}
+      {detail ? (
+        <div className="mt-0.5 truncate text-[9px] text-neutral-700" title={detail}>
+          {detail}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function channelOrder(surface: string) {
+  if (surface === 'build') return 0;
+  if (surface === 'runtime') return 1;
+  if (surface === 'frontend') return 2;
+  return 3;
+}
+
+function channelTone(surface: string) {
+  if (surface === 'build') return 'border border-violet-500/20 bg-violet-500/10 text-violet-300';
+  if (surface === 'runtime') return 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-300';
+  if (surface === 'frontend') return 'border border-blue-500/20 bg-blue-500/10 text-blue-300';
+  return 'border border-neutral-700 bg-neutral-800 text-neutral-400';
+}
+
+function channelPrimaryValue(channel: DeploymentChannel) {
+  if (channel.surface === 'build') return [channel.substrate, channel.workflow || channel.builder || channel.executor].filter(Boolean).join(' / ');
+  if (channel.surface === 'runtime') return [channel.substrate, channel.container || channel.deployCenterSlug || channel.hostBind].filter(Boolean).join(' / ');
+  if (channel.surface === 'frontend') return [channel.substrate, channel.productionDomain || channel.project].filter(Boolean).join(' / ');
+  return [channel.substrate, channel.serviceId].filter(Boolean).join(' / ');
+}
+
+function channelSurfaceLabel(surface: string) {
+  if (surface === 'build') return 'Build';
+  if (surface === 'runtime') return 'Runtime';
+  if (surface === 'frontend') return 'Frontend';
+  return surface;
+}
+
+function channelLabel(kind?: string) {
+  if (!kind) return '';
+  if (kind === 'github_actions') return 'GitHub Actions';
+  if (kind === 'native_workflow') return 'Native Runner';
+  if (kind === 'privatecloud_docker_build') return 'PrivateCloud build';
+  if (kind === 'deploy_center_runtime') return 'Deploy Center runtime';
+  if (kind === 'gcp_vm') return 'GCP VM';
+  return kind.replaceAll('_', ' ');
+}
+
+function sourceLabel(source: string) {
+  const parts = source.split('/');
+  return parts.slice(-2).join('/');
 }
 
 function InfraPanel() {

@@ -41,6 +41,10 @@ const OBSERVE_STABLE_POLL_MS: u64 = 120;
 const OBSERVE_STABLE_MAX_MS: u64 = 1_000;
 const DURABLE_FINAL_IDLE_GRACE_SECS: u64 = 4;
 const PROMPT_SUBMISSION_IDLE_GRACE_SECS: u64 = 30;
+const OUTPUT_CONTRACT_FILE_MIN_BYTES: u64 = 40;
+const OUTPUT_CONTRACT_FILE_STABLE_SECS: u64 = 2;
+const OUTPUT_CONTRACT_FILE_IDLE_CONTINUE_GRACE_SECS: u64 = 4;
+const OUTPUT_CONTRACT_FILE_MAX_CONTINUE_ATTEMPTS: usize = 1;
 
 #[derive(Clone)]
 pub(crate) struct ClaudeCodeProviderDriver {
@@ -122,6 +126,17 @@ struct ClaudeCodeMcpServerEntry {
     connected: bool,
     auth: Option<String>,
     tools_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeCodePromptAuthorization {
+    kind: String,
+    target: Option<String>,
+    selected_option_index: Option<usize>,
+    selected_option: Option<String>,
+    allow_option_index: Option<usize>,
+    allow_option: Option<String>,
+    visible_options: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -979,23 +994,20 @@ impl ClaudeCodeProviderDriver {
             result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
             return None;
         }
-        if let Some(text) = claude_code_composer_text(&observation) {
-            if !text.trim().is_empty() {
-                result.status = ProviderBoxStatus::Blocked;
-                result.add_diagnostic(ProviderBoxDiagnostic::error(
-                    DIAG_MODEL_SWITCH_UNVERIFIED,
-                    "ClaudeCode composer is not empty; refusing to append /model command",
-                    json!({
-                        "slot_id": slot_id,
-                        "composer_text_preview": text.chars().take(120).collect::<String>(),
-                        "safe_alternative": "clear the composer through a taught provider-box control before switching models",
-                    }),
-                ));
-                let status = self.pty.get_status(slot_id).await;
-                result.slot_status =
-                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
-                return None;
-            }
+        if let Some(text) = claude_code_composer_blocking_text(&observation) {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_MODEL_SWITCH_UNVERIFIED,
+                "ClaudeCode composer is not empty; refusing to append /model command",
+                json!({
+                    "slot_id": slot_id,
+                    "composer_text_preview": text.chars().take(120).collect::<String>(),
+                    "safe_alternative": "clear the composer through a taught provider-box control before switching models",
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return None;
         }
         Some(observation)
     }
@@ -1035,23 +1047,20 @@ impl ClaudeCodeProviderDriver {
             result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
             return None;
         }
-        if let Some(text) = claude_code_composer_text(&observation) {
-            if !text.trim().is_empty() {
-                result.status = ProviderBoxStatus::Blocked;
-                result.add_diagnostic(ProviderBoxDiagnostic::error(
-                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
-                    "ClaudeCode composer is not empty; refusing to cycle permission mode",
-                    json!({
-                        "slot_id": slot_id,
-                        "composer_text_preview": text.chars().take(120).collect::<String>(),
-                        "safe_alternative": "clear the composer through a taught provider-box control before switching permission modes",
-                    }),
-                ));
-                let status = self.pty.get_status(slot_id).await;
-                result.slot_status =
-                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
-                return None;
-            }
+        if let Some(text) = claude_code_composer_blocking_text(&observation) {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "ClaudeCode composer is not empty; refusing to cycle permission mode",
+                json!({
+                    "slot_id": slot_id,
+                    "composer_text_preview": text.chars().take(120).collect::<String>(),
+                    "safe_alternative": "clear the composer through a taught provider-box control before switching permission modes",
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return None;
         }
         Some(observation)
     }
@@ -1062,6 +1071,11 @@ impl ClaudeCodeProviderDriver {
         slot_id: &str,
     ) -> Option<ClaudeCodeObservation> {
         let mut observation = self.observe(slot_id).await;
+        if is_claude_code_prompt_authorization_prompt(&observation) {
+            observation = self
+                .accept_prompt_authorization_locked(result, slot_id, observation)
+                .await?;
+        }
         for _ in 0..2 {
             if !is_claude_code_mcp_surface(&observation) {
                 break;
@@ -1088,6 +1102,11 @@ impl ClaudeCodeProviderDriver {
                 )
                 .await;
         }
+        if is_claude_code_prompt_authorization_prompt(&observation) {
+            observation = self
+                .accept_prompt_authorization_locked(result, slot_id, observation)
+                .await?;
+        }
         if !is_ready_for_claude_code_text(&observation) {
             result.status = ProviderBoxStatus::Blocked;
             result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -1104,23 +1123,20 @@ impl ClaudeCodeProviderDriver {
             result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
             return None;
         }
-        if let Some(text) = claude_code_composer_text(&observation) {
-            if !text.trim().is_empty() {
-                result.status = ProviderBoxStatus::Blocked;
-                result.add_diagnostic(ProviderBoxDiagnostic::error(
-                    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
-                    "ClaudeCode composer is not empty; refusing to append /mcp command",
-                    json!({
-                        "slot_id": slot_id,
-                        "composer_text_preview": text.chars().take(120).collect::<String>(),
-                        "safe_alternative": "clear the composer before probing MCP status",
-                    }),
-                ));
-                let status = self.pty.get_status(slot_id).await;
-                result.slot_status =
-                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
-                return None;
-            }
+        if let Some(text) = claude_code_composer_blocking_text(&observation) {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                "ClaudeCode composer is not empty; refusing to append /mcp command",
+                json!({
+                    "slot_id": slot_id,
+                    "composer_text_preview": text.chars().take(120).collect::<String>(),
+                    "safe_alternative": "clear the composer before probing MCP status",
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return None;
         }
         Some(observation)
     }
@@ -1745,23 +1761,20 @@ impl ClaudeCodeProviderDriver {
             result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
             return;
         }
-        if let Some(text) = claude_code_composer_text(&observation) {
-            if !text.trim().is_empty() {
-                result.status = ProviderBoxStatus::Blocked;
-                result.add_diagnostic(ProviderBoxDiagnostic::error(
-                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
-                    "ClaudeCode composer is not empty; refusing to append /logout command",
-                    json!({
-                        "slot_id": slot_id,
-                        "composer_text_preview": text.chars().take(120).collect::<String>(),
-                        "safe_alternative": "clear the composer before logging out",
-                    }),
-                ));
-                let status = self.pty.get_status(slot_id).await;
-                result.slot_status =
-                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
-                return;
-            }
+        if let Some(text) = claude_code_composer_blocking_text(&observation) {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "ClaudeCode composer is not empty; refusing to append /logout command",
+                json!({
+                    "slot_id": slot_id,
+                    "composer_text_preview": text.chars().take(120).collect::<String>(),
+                    "safe_alternative": "clear the composer before logging out",
+                }),
+            ));
+            let status = self.pty.get_status(slot_id).await;
+            result.slot_status = Some(slot_status_value(slot_id, status.as_ref(), &observation));
+            return;
         }
 
         let command = "/logout";
@@ -1965,6 +1978,174 @@ impl ClaudeCodeProviderDriver {
         Some(observation)
     }
 
+    async fn accept_prompt_authorization_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        mut observation: ClaudeCodeObservation,
+    ) -> Option<ClaudeCodeObservation> {
+        let allowlist = claude_code_prompt_authorization_allowlist();
+        let mut surface = claude_code_prompt_authorization_surface(&observation)?;
+        if !claude_code_prompt_authorization_allowed(&surface, &allowlist) {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "ClaudeCode provider authorization prompt is not allowlisted",
+                json!({
+                    "slot_id": slot_id,
+                    "kind": surface.kind,
+                    "target": surface.target,
+                    "selected_option": surface.selected_option,
+                    "visible_options": surface.visible_options,
+                    "rule": "provider-box only confirms provider authorization prompts when the normalized target is in the prompt authorization allowlist"
+                }),
+            ));
+            return None;
+        }
+
+        let Some(target_index) = surface.allow_option_index else {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "ClaudeCode provider authorization prompt has no recognizable allow option",
+                json!({
+                    "slot_id": slot_id,
+                    "kind": surface.kind,
+                    "target": surface.target,
+                    "visible_options": surface.visible_options,
+                }),
+            ));
+            return None;
+        };
+
+        let Some(mut selected_index) = surface.selected_option_index else {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "ClaudeCode provider authorization prompt selection was not recognizable",
+                json!({
+                    "slot_id": slot_id,
+                    "kind": surface.kind,
+                    "target": surface.target,
+                    "rule": "provider-box must observe the selected option before sending Enter"
+                }),
+            ));
+            return None;
+        };
+
+        while selected_index != target_index {
+            let (key, bytes, expected) = if selected_index < target_index {
+                (
+                    "down",
+                    "\x1b[B",
+                    "move ClaudeCode provider authorization selection down",
+                )
+            } else {
+                (
+                    "up",
+                    "\x1b[A",
+                    "move ClaudeCode provider authorization selection up",
+                )
+            };
+            observation = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key(key),
+                    bytes,
+                    Some(expected.to_string()),
+                )
+                .await;
+            surface = match claude_code_prompt_authorization_surface(&observation) {
+                Some(surface) => surface,
+                None => break,
+            };
+            selected_index = match surface.selected_option_index {
+                Some(index) => index,
+                None => {
+                    result.status = ProviderBoxStatus::Blocked;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                        "ClaudeCode provider authorization selection disappeared before confirmation",
+                        json!({
+                            "slot_id": slot_id,
+                            "kind": surface.kind,
+                            "target": surface.target,
+                        }),
+                    ));
+                    return None;
+                }
+            };
+        }
+
+        surface = match claude_code_prompt_authorization_surface(&observation) {
+            Some(surface) => surface,
+            None => {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                    "ClaudeCode provider authorization prompt disappeared before Enter verification",
+                    json!({
+                        "slot_id": slot_id,
+                    }),
+                ));
+                return None;
+            }
+        };
+        if surface.selected_option_index != surface.allow_option_index {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "ClaudeCode provider authorization allow option could not be selected",
+                json!({
+                    "slot_id": slot_id,
+                    "kind": surface.kind,
+                    "target": surface.target,
+                    "selected_option": surface.selected_option,
+                    "allow_option": surface.allow_option,
+                }),
+            ));
+            return None;
+        }
+
+        let authorized_target = surface.target.clone();
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("confirm allowlisted ClaudeCode provider authorization".to_string()),
+            )
+            .await;
+        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+            "PROVIDER_PROMPT_AUTHORIZATION_CONFIRMED",
+            "ClaudeCode provider authorization prompt was confirmed from allowlist",
+            json!({
+                "slot_id": slot_id,
+                "kind": surface.kind,
+                "target": authorized_target,
+                "selected_option": surface.selected_option,
+                "rule": "observe-act-observe verified the allow option before Enter"
+            }),
+        ));
+
+        if is_claude_code_prompt_authorization_prompt(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(8),
+                    Some(
+                        "wait for ClaudeCode provider authorization prompt to advance".to_string(),
+                    ),
+                    |obs| !is_claude_code_prompt_authorization_prompt(obs),
+                )
+                .await;
+        }
+        Some(observation)
+    }
+
     async fn ensure_ready_for_text_only_prompt(
         &self,
         result: &mut ProviderBoxResult,
@@ -1982,6 +2163,17 @@ impl ClaudeCodeProviderDriver {
                     Some(observation) => observation,
                     None => return false,
                 };
+            }
+            if is_claude_code_prompt_authorization_prompt(&observation) {
+                let accepted = self
+                    .accept_prompt_authorization_locked(result, slot_id, observation)
+                    .await;
+                match accepted {
+                    Some(next) => {
+                        observation = next;
+                    }
+                    None => return false,
+                }
             }
 
             if is_ready_for_claude_code_text(&observation) {
@@ -2098,25 +2290,34 @@ impl ClaudeCodeProviderDriver {
                     None => return false,
                 };
             }
+            if is_claude_code_prompt_authorization_prompt(&observation) {
+                let accepted = self
+                    .accept_prompt_authorization_locked(result, slot_id, observation)
+                    .await;
+                match accepted {
+                    Some(next) => {
+                        observation = next;
+                    }
+                    None => return false,
+                }
+            }
 
             if is_ready_for_claude_code_text(&observation) {
-                if let Some(text) = claude_code_composer_text(&observation) {
-                    if !text.trim().is_empty() {
-                        result.status = ProviderBoxStatus::Blocked;
-                        result.add_diagnostic(ProviderBoxDiagnostic::error(
-                            DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-                            "ClaudeCode composer is not empty; refusing to append a provider-box prompt turn",
-                            json!({
-                                "slot_id": slot_id,
-                                "composer_text_preview": text.chars().take(120).collect::<String>(),
-                                "safe_alternative": "clear the composer through a taught provider-box control before submitting a prompt turn"
-                            }),
-                        ));
-                        let status = self.pty.get_status(slot_id).await;
-                        result.slot_status =
-                            Some(slot_status_value(slot_id, status.as_ref(), &observation));
-                        return false;
-                    }
+                if let Some(text) = claude_code_composer_blocking_text(&observation) {
+                    result.status = ProviderBoxStatus::Blocked;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                        "ClaudeCode composer is not empty; refusing to append a provider-box prompt turn",
+                        json!({
+                            "slot_id": slot_id,
+                            "composer_text_preview": text.chars().take(120).collect::<String>(),
+                            "safe_alternative": "clear the composer through a taught provider-box control before submitting a prompt turn"
+                        }),
+                    ));
+                    let status = self.pty.get_status(slot_id).await;
+                    result.slot_status =
+                        Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                    return false;
                 }
                 return true;
             }
@@ -2264,6 +2465,10 @@ impl ClaudeCodeProviderDriver {
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         let monitor_started_at = Instant::now();
         let mut idle_seen_at: Option<Instant> = None;
+        let output_contract_file = output_contract_must_write_file(request);
+        let mut output_contract_file_seen: Option<(u64, Instant)> = None;
+        let mut output_contract_file_idle_seen_at: Option<Instant> = None;
+        let mut output_contract_file_continue_attempts: usize = 0;
 
         loop {
             let analysis =
@@ -2333,8 +2538,76 @@ impl ClaudeCodeProviderDriver {
                 return result.clone();
             }
 
+            if let Some(path) = output_contract_file.as_ref() {
+                match output_contract_file_completion_state(
+                    path,
+                    output_contract_file_seen.as_ref(),
+                ) {
+                    OutputContractFileState::Pending { len } => {
+                        output_contract_file_seen = Some((len, Instant::now()));
+                    }
+                    OutputContractFileState::Stable { len } => {
+                        let _ = self.pty.write(slot_id, "\x1b").await;
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        let status = self.pty.get_status(slot_id).await;
+                        let observation = self.observe(slot_id).await;
+                        let durable_source = path.display().to_string();
+                        result.status = ProviderBoxStatus::Completed;
+                        result.provider = request
+                            .provider
+                            .clone()
+                            .or_else(|| Some("claude_code".to_string()));
+                        result.model = request.model.clone();
+                        result.model_profile = request.model_profile.clone();
+                        result.provider_conversation_id = Some(session_id.to_string());
+                        result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                            result.provider.clone(),
+                            CliEngine::ClaudeCode,
+                            Some(slot_id.to_string()),
+                            session_id.to_string(),
+                            "output_contract_file",
+                            Some(durable_source.clone()),
+                            request.cwd.clone().or_else(|| request.project_root.clone()),
+                            "must_write_file_stable",
+                        ));
+                        result.durable_source = Some(durable_source.clone());
+                        result.slot_status =
+                            Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                        result.final_text =
+                            Some(format!("Output contract file written: {}", path.display()));
+                        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                            "PROVIDER_OUTPUT_CONTRACT_FILE_COMPLETED",
+                            "ClaudeCode worker-turn completed from stable output_contract.must_write_file",
+                            json!({
+                                "slot_id": slot_id,
+                                "session_id": session_id,
+                                "must_write_file": path.display().to_string(),
+                                "bytes": len,
+                                "line_count": analysis.line_count,
+                                "rule": "The requested artifact file is the canonical output; PTY screen text was not used as a semantic final"
+                            }),
+                        ));
+                        return result.clone();
+                    }
+                    OutputContractFileState::MissingOrTooSmall => {
+                        output_contract_file_seen = None;
+                    }
+                }
+            }
+
             let observation = self.observe(slot_id).await;
             if observation.snapshot.state == PtyCanonicalState::Blocked {
+                if is_claude_code_prompt_authorization_prompt(&observation) {
+                    if self
+                        .accept_prompt_authorization_locked(result, slot_id, observation)
+                        .await
+                        .is_some()
+                    {
+                        idle_seen_at = None;
+                        continue;
+                    }
+                    return result.clone();
+                }
                 result.status = ProviderBoxStatus::Blocked;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
                     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
@@ -2356,11 +2629,12 @@ impl ClaudeCodeProviderDriver {
                 observation.snapshot.state,
                 PtyCanonicalState::Idle | PtyCanonicalState::Complete
             ) {
-                if let Some(seen_at) = idle_seen_at {
-                    if durable_final_missing_idle_grace_elapsed(
-                        seen_at.elapsed(),
-                        monitor_started_at.elapsed(),
-                    ) {
+                if should_fail_missing_durable_final_on_idle(
+                    output_contract_file.is_some(),
+                    idle_seen_at.as_ref().map(Instant::elapsed),
+                    monitor_started_at.elapsed(),
+                ) {
+                    if idle_seen_at.is_some() {
                         result.status = ProviderBoxStatus::Failed;
                         result.add_diagnostic(ProviderBoxDiagnostic::error(
                             DIAG_PROVIDER_DURABLE_FINAL_MISSING,
@@ -2374,11 +2648,65 @@ impl ClaudeCodeProviderDriver {
                         ));
                         return result.clone();
                     }
-                } else {
+                } else if output_contract_file.is_some() {
+                    if let Some(path) = output_contract_file.as_ref() {
+                        if output_contract_file_idle_seen_at.is_none() {
+                            output_contract_file_idle_seen_at = Some(Instant::now());
+                        } else if should_continue_file_contract_worker_on_idle(
+                            output_contract_file_idle_seen_at
+                                .as_ref()
+                                .map(Instant::elapsed),
+                            monitor_started_at.elapsed(),
+                            output_contract_file_continue_attempts,
+                        ) {
+                            output_contract_file_continue_attempts += 1;
+                            output_contract_file_idle_seen_at = None;
+                            idle_seen_at = None;
+                            output_contract_file_seen = None;
+                            if !self
+                                .submit_redacted_prompt(
+                                    result,
+                                    slot_id,
+                                    &file_contract_continue_prompt(path),
+                                    "<claude-code output-contract continue prompt>",
+                                )
+                                .await
+                            {
+                                result.status = ProviderBoxStatus::Failed;
+                                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                                    DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                                    "ClaudeCode file-contract worker was idle without the required artifact, and provider-box could not submit a continuation prompt",
+                                    json!({
+                                        "slot_id": slot_id,
+                                        "session_id": session_id,
+                                        "must_write_file": path.display().to_string(),
+                                        "continue_attempts": output_contract_file_continue_attempts,
+                                    }),
+                                ));
+                                return result.clone();
+                            }
+                            result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                                "PROVIDER_OUTPUT_CONTRACT_FILE_CONTINUED",
+                                "ClaudeCode file-contract worker returned to input before writing output_contract.must_write_file; provider-box submitted a bounded continuation prompt",
+                                json!({
+                                    "slot_id": slot_id,
+                                    "session_id": session_id,
+                                    "must_write_file": path.display().to_string(),
+                                    "continue_attempts": output_contract_file_continue_attempts,
+                                    "max_continue_attempts": OUTPUT_CONTRACT_FILE_MAX_CONTINUE_ATTEMPTS,
+                                    "rule": "For file-writing workers, the requested file is canonical completion; idle without the file triggers bounded continuation before a typed failure"
+                                }),
+                            ));
+                            continue;
+                        }
+                    }
+                    idle_seen_at = None;
+                } else if idle_seen_at.is_none() {
                     idle_seen_at = Some(Instant::now());
                 }
             } else {
                 idle_seen_at = None;
+                output_contract_file_idle_seen_at = None;
             }
 
             if Instant::now() >= deadline {
@@ -2558,6 +2886,17 @@ impl ClaudeCodeProviderDriver {
 
             let observation = self.observe(slot_id).await;
             if observation.snapshot.state == PtyCanonicalState::Blocked {
+                if is_claude_code_prompt_authorization_prompt(&observation) {
+                    if self
+                        .accept_prompt_authorization_locked(result, slot_id, observation)
+                        .await
+                        .is_some()
+                    {
+                        idle_seen_at = None;
+                        continue;
+                    }
+                    return false;
+                }
                 result.status = ProviderBoxStatus::Blocked;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
                     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
@@ -3032,6 +3371,16 @@ impl ClaudeCodeProviderDriver {
 
             let observation = self.observe(slot_id).await;
             if observation.snapshot.state == PtyCanonicalState::Blocked {
+                if is_claude_code_prompt_authorization_prompt(&observation) {
+                    if self
+                        .accept_prompt_authorization_locked(result, slot_id, observation)
+                        .await
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    return false;
+                }
                 result.status = ProviderBoxStatus::Blocked;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
                     DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
@@ -3424,6 +3773,7 @@ fn claude_code_provider_capabilities() -> ProviderDriverCapabilities {
         status: true,
         mcp_status: true,
         mcp_reconnect: true,
+        prompt_authorization: true,
     }
 }
 
@@ -3788,13 +4138,70 @@ fn claude_code_composer_text(observation: &ClaudeCodeObservation) -> Option<Stri
         let trimmed = line.trim_start();
         let rest = trimmed
             .strip_prefix('❯')
+            .or_else(|| trimmed.strip_prefix('›'))
             .or_else(|| trimmed.strip_prefix('>'))?;
         Some(rest.trim().to_string())
     })
 }
 
+fn claude_code_composer_blocking_text(observation: &ClaudeCodeObservation) -> Option<String> {
+    let text = claude_code_composer_text(observation)?;
+    if text.trim().is_empty() || claude_code_composer_text_is_placeholder(observation, &text) {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn claude_code_composer_text_is_placeholder(
+    observation: &ClaudeCodeObservation,
+    text: &str,
+) -> bool {
+    let normalized = normalize_claude_code_placeholder_text(text);
+    if normalized.is_empty() {
+        return false;
+    }
+    if observation
+        .snapshot
+        .screen_signals
+        .as_ref()
+        .is_some_and(|signals| {
+            signals.placeholder_visible
+                && signals
+                    .placeholder_text
+                    .as_deref()
+                    .is_some_and(|placeholder| {
+                        normalize_claude_code_placeholder_text(placeholder) == normalized
+                    })
+        })
+    {
+        return true;
+    }
+    is_known_claude_code_placeholder_text(&normalized)
+        && is_ready_for_claude_code_text(observation)
+        && observation
+            .snapshot
+            .screen_identity
+            .as_ref()
+            .and_then(|identity| identity.permission_mode.as_deref())
+            .is_some()
+}
+
+fn normalize_claude_code_placeholder_text(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn is_known_claude_code_placeholder_text(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "try \"fix lint errors\"" | "try \"how does <filepath> work?\""
+    )
+}
+
 fn claude_code_staged_command_matches(observation: &ClaudeCodeObservation, command: &str) -> bool {
-    claude_code_composer_text(observation).is_some_and(|text| text == command)
+    claude_code_composer_text(observation).is_some_and(|text| {
+        text == command && !claude_code_composer_text_is_placeholder(observation, &text)
+    })
 }
 
 fn claude_code_current_model_from_result(result: &ProviderBoxResult) -> Option<String> {
@@ -3923,6 +4330,161 @@ fn default_claude_home() -> PathBuf {
         .join(".claude")
 }
 
+fn claude_code_prompt_authorization_allowlist() -> HashSet<String> {
+    let mut allowlist = HashSet::from(["mcp:missiond".to_string(), "mcp:supabase".to_string()]);
+    add_claude_code_authorization_allowlist_from_runtime(&mut allowlist);
+    for key in [
+        "MISSIOND_PROVIDER_BOX_CLAUDE_CODE_AUTH_ALLOWLIST",
+        "MISSIOND_PROVIDER_BOX_CLAUDE_CODE_MCP_AUTH_ALLOWLIST",
+    ] {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        for item in value.split([',', ';', '\n']) {
+            let normalized = normalize_claude_code_authorization_token(item);
+            if !normalized.is_empty() {
+                allowlist.insert(normalized);
+            }
+        }
+    }
+    allowlist
+}
+
+fn add_claude_code_authorization_allowlist_from_runtime(allowlist: &mut HashSet<String>) {
+    for path in [
+        Path::new(".missiond/v3/runtime/compiled/compiled-runtime-workstation.json"),
+        Path::new(".missiond/v3/runtime/compiled/compiled-runtime-config.json"),
+    ] {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        let pools = [
+            value.pointer("/payload/config/workstation_pool"),
+            value.pointer("/payload/workstation/workstation_pool"),
+        ];
+        for pool in pools.into_iter().flatten() {
+            let Some(workers) = pool.as_array() else {
+                continue;
+            };
+            for worker in workers {
+                if !worker
+                    .get("engine")
+                    .and_then(Value::as_str)
+                    .is_some_and(|engine| engine.eq_ignore_ascii_case("claude-code"))
+                {
+                    continue;
+                }
+                let Some(items) = worker
+                    .get("provider_authorization_allowlist")
+                    .and_then(Value::as_array)
+                else {
+                    continue;
+                };
+                for item in items {
+                    let Some(item) = item.as_str() else {
+                        continue;
+                    };
+                    let normalized = normalize_claude_code_authorization_token(item);
+                    if !normalized.is_empty() {
+                        allowlist.insert(normalized);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn normalize_claude_code_authorization_token(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|ch: char| {
+            ch.is_ascii_whitespace()
+                || matches!(ch, '"' | '\'' | '`' | ':' | ',' | ';' | '.' | '，' | '。')
+        })
+        .to_ascii_lowercase()
+        .replace('_', "-")
+}
+
+fn extract_claude_code_new_mcp_server_target(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        let Some(pos) = lower.find("new mcp server found in this project") else {
+            continue;
+        };
+        let rest = &line[pos + "new mcp server found in this project".len()..];
+        let target = rest.trim().strip_prefix(':').unwrap_or(rest.trim()).trim();
+        let normalized = normalize_claude_code_authorization_token(target);
+        if !normalized.is_empty() {
+            return Some(normalized);
+        }
+    }
+    None
+}
+
+fn claude_code_prompt_authorization_surface(
+    observation: &ClaudeCodeObservation,
+) -> Option<ClaudeCodePromptAuthorization> {
+    let signals = observation.snapshot.screen_signals.as_ref()?;
+    let kind = signals.startup_prompt_kind.as_deref()?;
+    if kind != "mcp_server_authorization" {
+        return None;
+    }
+    let visible_options = signals.visible_startup_options.clone();
+    let allow_option_index = visible_options
+        .iter()
+        .position(|option| claude_code_authorization_option_is_allow(option))
+        .map(|index| index + 1);
+    let allow_option =
+        allow_option_index.and_then(|index| visible_options.get(index.saturating_sub(1)).cloned());
+
+    Some(ClaudeCodePromptAuthorization {
+        kind: kind.to_string(),
+        target: extract_claude_code_new_mcp_server_target(&observation.text),
+        selected_option_index: signals.selected_startup_option_index.map(usize::from),
+        selected_option: signals.selected_startup_option.clone(),
+        allow_option_index,
+        allow_option,
+        visible_options,
+    })
+}
+
+fn claude_code_authorization_option_is_allow(option: &str) -> bool {
+    let lower = option.to_ascii_lowercase();
+    let denyish = lower.contains("without")
+        || lower.contains("don't")
+        || lower.contains("do not")
+        || lower.contains("deny")
+        || lower.contains("reject")
+        || lower.contains("no ");
+    !denyish
+        && (lower.contains("use this mcp server")
+            || lower.contains("allow")
+            || lower.contains("approve")
+            || lower.contains("yes")
+            || lower.contains("trust"))
+}
+
+fn claude_code_prompt_authorization_allowed(
+    surface: &ClaudeCodePromptAuthorization,
+    allowlist: &HashSet<String>,
+) -> bool {
+    let Some(target) = surface.target.as_deref() else {
+        return false;
+    };
+    let scoped = format!("mcp:{target}");
+    allowlist.contains("*")
+        || allowlist.contains("mcp:*")
+        || allowlist.contains(target)
+        || allowlist.contains(&scoped)
+}
+
+fn is_claude_code_prompt_authorization_prompt(observation: &ClaudeCodeObservation) -> bool {
+    claude_code_prompt_authorization_surface(observation).is_some()
+}
+
 fn is_claude_code_workspace_trust_prompt(observation: &ClaudeCodeObservation) -> bool {
     observation
         .text
@@ -4028,6 +4590,44 @@ fn analyze_claude_code_jsonl_after_cursor(
         }
     }
     analysis
+}
+
+enum OutputContractFileState {
+    MissingOrTooSmall,
+    Pending { len: u64 },
+    Stable { len: u64 },
+}
+
+fn output_contract_must_write_file(request: &ProviderInteractionRequest) -> Option<PathBuf> {
+    request
+        .output_contract
+        .as_ref()
+        .and_then(|contract| contract.get("must_write_file"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn output_contract_file_completion_state(
+    path: &Path,
+    previous: Option<&(u64, Instant)>,
+) -> OutputContractFileState {
+    let Ok(metadata) = fs::metadata(path) else {
+        return OutputContractFileState::MissingOrTooSmall;
+    };
+    if !metadata.is_file() || metadata.len() < OUTPUT_CONTRACT_FILE_MIN_BYTES {
+        return OutputContractFileState::MissingOrTooSmall;
+    }
+    let len = metadata.len();
+    if let Some((previous_len, seen_at)) = previous {
+        if *previous_len == len
+            && seen_at.elapsed() >= Duration::from_secs(OUTPUT_CONTRACT_FILE_STABLE_SECS)
+        {
+            return OutputContractFileState::Stable { len };
+        }
+    }
+    OutputContractFileState::Pending { len }
 }
 
 fn analyze_claude_code_deep_research_after_cursor(
@@ -4441,6 +5041,44 @@ fn durable_final_missing_idle_grace_elapsed(
         && monitor_elapsed >= Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS)
 }
 
+fn should_fail_missing_durable_final_on_idle(
+    output_contract_file_required: bool,
+    idle_elapsed: Option<Duration>,
+    monitor_elapsed: Duration,
+) -> bool {
+    !output_contract_file_required
+        && idle_elapsed.is_some_and(|elapsed| {
+            durable_final_missing_idle_grace_elapsed(elapsed, monitor_elapsed)
+        })
+}
+
+fn output_contract_file_idle_grace_elapsed(
+    idle_elapsed: Option<Duration>,
+    monitor_elapsed: Duration,
+) -> bool {
+    idle_elapsed.is_some_and(|elapsed| {
+        elapsed >= Duration::from_secs(OUTPUT_CONTRACT_FILE_IDLE_CONTINUE_GRACE_SECS)
+            && monitor_elapsed >= Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS)
+    })
+}
+
+fn should_continue_file_contract_worker_on_idle(
+    idle_elapsed: Option<Duration>,
+    monitor_elapsed: Duration,
+    continue_attempts: usize,
+) -> bool {
+    continue_attempts < OUTPUT_CONTRACT_FILE_MAX_CONTINUE_ATTEMPTS
+        && output_contract_file_idle_grace_elapsed(idle_elapsed, monitor_elapsed)
+}
+
+fn file_contract_continue_prompt(path: &Path) -> String {
+    format!(
+        "你还没有完成 output_contract.must_write_file。请不要等待用户确认，继续完成当前任务，并把结果写入这个同一个 Markdown 文件：{}\n\
+只收集和用户问题直接相关的证据；一旦证据足以回答，就立即写文件。文件至少包含：结论、关键证据、来源/路径、仍不确定的点。不要只在对话里总结，不要写到其他文件。",
+        path.display()
+    )
+}
+
 fn claude_code_assistant_end_turn_text(event: &Value) -> Option<String> {
     let message = event.get("message")?;
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -4475,30 +5113,39 @@ fn claude_code_message_content_text(content: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::fs;
     use std::io::Write;
-    use std::time::Duration;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use missiond_core::pty::recognize_screen;
     use missiond_core::types::CliEngine;
     use missiond_core::SessionState;
+    use serde_json::json;
 
     use crate::provider_box::types::{BoxCommand, ProviderInteractionRequest};
 
     use super::{
-        analyze_claude_code_jsonl_after_cursor, claude_code_deep_research_report_to_markdown,
-        claude_code_jsonl_cursor_for_session, claude_code_jsonl_event_is_text_only_violation,
-        claude_code_mcp_detail_action_positions, claude_code_mcp_reconnect_action_selected,
-        claude_code_mcp_reconnect_action_visible, claude_code_mcp_reconnect_line,
-        claude_code_mcp_reconnect_outcome, claude_code_mcp_status_value,
-        claude_code_permission_cycle_steps, claude_code_provider_capabilities,
-        claude_code_staged_command_matches, claude_code_workflow_launch_from_event,
-        durable_final_missing_idle_grace_elapsed,
-        extract_claude_code_mcp_server_entries_from_screen, find_claude_code_session_jsonl,
-        is_claude_code_logout_success, normalize_claude_code_model_target,
-        normalize_claude_code_permission_mode, read_claude_code_workflow_journal_report,
-        ClaudeCodeJsonlCursor, ClaudeCodeModelTarget, ClaudeCodeObservation,
-        ClaudeCodePermissionMode, DURABLE_FINAL_IDLE_GRACE_SECS, PROMPT_SUBMISSION_IDLE_GRACE_SECS,
+        analyze_claude_code_jsonl_after_cursor, claude_code_composer_blocking_text,
+        claude_code_deep_research_report_to_markdown, claude_code_jsonl_cursor_for_session,
+        claude_code_jsonl_event_is_text_only_violation, claude_code_mcp_detail_action_positions,
+        claude_code_mcp_reconnect_action_selected, claude_code_mcp_reconnect_action_visible,
+        claude_code_mcp_reconnect_line, claude_code_mcp_reconnect_outcome,
+        claude_code_mcp_status_value, claude_code_permission_cycle_steps,
+        claude_code_prompt_authorization_allowed, claude_code_prompt_authorization_surface,
+        claude_code_provider_capabilities, claude_code_staged_command_matches,
+        claude_code_workflow_launch_from_event, durable_final_missing_idle_grace_elapsed,
+        extract_claude_code_mcp_server_entries_from_screen, file_contract_continue_prompt,
+        find_claude_code_session_jsonl, is_claude_code_logout_success,
+        normalize_claude_code_model_target, normalize_claude_code_permission_mode,
+        output_contract_file_completion_state, output_contract_must_write_file,
+        read_claude_code_workflow_journal_report, should_continue_file_contract_worker_on_idle,
+        should_fail_missing_durable_final_on_idle, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,
+        ClaudeCodeObservation, ClaudeCodePermissionMode, OutputContractFileState,
+        DURABLE_FINAL_IDLE_GRACE_SECS, OUTPUT_CONTRACT_FILE_IDLE_CONTINUE_GRACE_SECS,
+        OUTPUT_CONTRACT_FILE_MAX_CONTINUE_ATTEMPTS, OUTPUT_CONTRACT_FILE_STABLE_SECS,
+        PROMPT_SUBMISSION_IDLE_GRACE_SECS,
     };
 
     fn observation(lines: &[&str]) -> ClaudeCodeObservation {
@@ -4523,6 +5170,73 @@ mod tests {
         assert!(caps.status);
         assert!(caps.switch_model);
         assert!(caps.control_action);
+    }
+
+    #[test]
+    fn must_write_file_output_contract_resolves_path() {
+        let mut request =
+            ProviderInteractionRequest::new(BoxCommand::WorkerTurn, CliEngine::ClaudeCode);
+        request.output_contract = Some(json!({
+            "media_type": "text/markdown",
+            "must_write_file": "/tmp/missiond-grounding-report.md"
+        }));
+
+        assert_eq!(
+            output_contract_must_write_file(&request),
+            Some(PathBuf::from("/tmp/missiond-grounding-report.md"))
+        );
+    }
+
+    #[test]
+    fn output_contract_file_completion_requires_stable_size() {
+        let path = std::env::temp_dir().join(format!(
+            "missiond-output-contract-{}.md",
+            uuid::Uuid::new_v4()
+        ));
+        assert!(matches!(
+            output_contract_file_completion_state(&path, None),
+            OutputContractFileState::MissingOrTooSmall
+        ));
+
+        std::fs::write(&path, "short").expect("write short output contract file");
+        assert!(matches!(
+            output_contract_file_completion_state(&path, None),
+            OutputContractFileState::MissingOrTooSmall
+        ));
+
+        std::fs::write(
+            &path,
+            "## Evidence\nThis grounding report has enough bytes to satisfy the contract.\n",
+        )
+        .expect("write output contract file");
+        let pending = output_contract_file_completion_state(&path, None);
+        let len = match pending {
+            OutputContractFileState::Pending { len } => len,
+            _ => panic!("expected pending file state"),
+        };
+        assert!(matches!(
+            output_contract_file_completion_state(
+                &path,
+                Some(&(len, Instant::now() - Duration::from_secs(OUTPUT_CONTRACT_FILE_STABLE_SECS + 1)))
+            ),
+            OutputContractFileState::Stable { len: stable_len } if stable_len == len
+        ));
+        std::fs::write(
+            &path,
+            "## Evidence\nThis grounding report changed size and must be observed again before completion.\n",
+        )
+        .expect("rewrite output contract file");
+        assert!(matches!(
+            output_contract_file_completion_state(
+                &path,
+                Some(&(
+                    len,
+                    Instant::now() - Duration::from_secs(OUTPUT_CONTRACT_FILE_STABLE_SECS + 1)
+                ))
+            ),
+            OutputContractFileState::Pending { .. }
+        ));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -4599,6 +5313,64 @@ mod tests {
             &obs,
             "/model claude-opus-4-6"
         ));
+    }
+
+    #[test]
+    fn claude_code_placeholder_composer_does_not_block_provider_controls() {
+        let obs = observation(&[
+            " ▐▛███▜▌   Claude Code v2.1.160",
+            "▝▜█████▛▘  Sonnet 4.6 with high effort · Claude Max",
+            "  ▘▘ ▝▝    ~/Projects/missiond",
+            "────────────────────────────────────────────────────────────────",
+            "❯ Try \"fix lint errors\"",
+            "────────────────────────────────────────────────────────────────",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ]);
+
+        assert_eq!(obs.snapshot.reason, "claude_code:prompt_idle");
+        assert!(claude_code_composer_blocking_text(&obs).is_none());
+        assert!(!claude_code_staged_command_matches(
+            &obs,
+            "Try \"fix lint errors\""
+        ));
+    }
+
+    #[test]
+    fn claude_code_filepath_placeholder_composer_does_not_block_provider_controls() {
+        let obs = observation(&[
+            " ▐▛███▜▌   Claude Code v2.1.161",
+            "▝▜█████▛▘  Opus 4.8 with xhigh effort · Claude Max",
+            "  ▘▘ ▝▝    ~/Projects/missiond",
+            "────────────────────────────────────────────────────────────────",
+            "❯ Try \"how does <filepath> work?\"",
+            "────────────────────────────────────────────────────────────────",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ]);
+
+        assert_eq!(obs.snapshot.reason, "claude_code:prompt_idle");
+        assert!(claude_code_composer_blocking_text(&obs).is_none());
+        assert!(!claude_code_staged_command_matches(
+            &obs,
+            "Try \"how does <filepath> work?\""
+        ));
+    }
+
+    #[test]
+    fn claude_code_real_composer_text_still_blocks_provider_controls() {
+        let obs = observation(&[
+            " ▐▛███▜▌   Claude Code v2.1.160",
+            "▝▜█████▛▘  Sonnet 4.6 with high effort · Claude Max",
+            "  ▘▘ ▝▝    ~/Projects/missiond",
+            "────────────────────────────────────────────────────────────────",
+            "❯ please keep this draft",
+            "────────────────────────────────────────────────────────────────",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ]);
+
+        assert_eq!(
+            claude_code_composer_blocking_text(&obs).as_deref(),
+            Some("please keep this draft")
+        );
     }
 
     #[test]
@@ -4735,6 +5507,50 @@ mod tests {
             value.pointer("/target_connected").and_then(|v| v.as_bool()),
             Some(false)
         );
+    }
+
+    #[test]
+    fn claude_code_prompt_authorization_extracts_allowlisted_mcp_target() {
+        let obs = observation(&[
+            "New MCP server found in this project: supabase",
+            "MCP servers may execute code or access system resources.",
+            "❯ 1. Use this MCP server",
+            "  2. Continue without using this MCP server",
+        ]);
+        let surface =
+            claude_code_prompt_authorization_surface(&obs).expect("provider authorization surface");
+
+        assert_eq!(surface.kind, "mcp_server_authorization");
+        assert_eq!(surface.target.as_deref(), Some("supabase"));
+        assert_eq!(surface.selected_option_index, Some(1));
+        assert_eq!(surface.allow_option_index, Some(1));
+        assert_eq!(surface.allow_option.as_deref(), Some("Use this MCP server"));
+
+        let allowlist = HashSet::from(["mcp:supabase".to_string()]);
+        assert!(claude_code_prompt_authorization_allowed(
+            &surface, &allowlist
+        ));
+    }
+
+    #[test]
+    fn claude_code_prompt_authorization_rejects_unknown_mcp_target() {
+        let obs = observation(&[
+            "New MCP server found in this project: unknown-prod",
+            "MCP servers may execute code or access system resources.",
+            "  1. Use this MCP server",
+            "❯ 2. Continue without using this MCP server",
+        ]);
+        let surface =
+            claude_code_prompt_authorization_surface(&obs).expect("provider authorization surface");
+
+        assert_eq!(surface.target.as_deref(), Some("unknown-prod"));
+        assert_eq!(surface.selected_option_index, Some(2));
+        assert_eq!(surface.allow_option_index, Some(1));
+
+        let allowlist = HashSet::from(["mcp:supabase".to_string()]);
+        assert!(!claude_code_prompt_authorization_allowed(
+            &surface, &allowlist
+        ));
     }
 
     #[test]
@@ -4991,6 +5807,57 @@ mod tests {
             Duration::from_secs(DURABLE_FINAL_IDLE_GRACE_SECS),
             Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS),
         ));
+    }
+
+    #[test]
+    fn durable_final_missing_idle_grace_does_not_fail_file_contract_workers() {
+        let idle_elapsed = Some(Duration::from_secs(DURABLE_FINAL_IDLE_GRACE_SECS + 10));
+        let monitor_elapsed = Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS + 10);
+
+        assert!(!should_fail_missing_durable_final_on_idle(
+            true,
+            idle_elapsed,
+            monitor_elapsed,
+        ));
+        assert!(should_fail_missing_durable_final_on_idle(
+            false,
+            idle_elapsed,
+            monitor_elapsed,
+        ));
+    }
+
+    #[test]
+    fn file_contract_idle_grace_uses_bounded_continue_budget() {
+        let idle_elapsed = Some(Duration::from_secs(
+            OUTPUT_CONTRACT_FILE_IDLE_CONTINUE_GRACE_SECS,
+        ));
+        let monitor_elapsed = Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS);
+
+        assert!(should_continue_file_contract_worker_on_idle(
+            idle_elapsed,
+            monitor_elapsed,
+            0,
+        ));
+        assert!(should_continue_file_contract_worker_on_idle(
+            idle_elapsed,
+            monitor_elapsed,
+            OUTPUT_CONTRACT_FILE_MAX_CONTINUE_ATTEMPTS - 1,
+        ));
+        assert!(!should_continue_file_contract_worker_on_idle(
+            idle_elapsed,
+            monitor_elapsed,
+            OUTPUT_CONTRACT_FILE_MAX_CONTINUE_ATTEMPTS,
+        ));
+    }
+
+    #[test]
+    fn file_contract_continue_prompt_preserves_target_path() {
+        let target = PathBuf::from("/tmp/missiond-grounding-report.md");
+        let prompt = file_contract_continue_prompt(&target);
+
+        assert!(prompt.contains("/tmp/missiond-grounding-report.md"));
+        assert!(prompt.contains("output_contract.must_write_file"));
+        assert!(prompt.contains("不要只在对话里总结"));
     }
 
     #[test]

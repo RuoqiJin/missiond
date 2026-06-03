@@ -1682,6 +1682,10 @@ fn compiled_service_to_value(service: &CompiledServiceRuntimeEntry) -> Value {
         "dependencies": service.dependencies.clone(),
         "ops_capability": service.ops_capability.clone(),
         "surface": service.surface.clone(),
+        "deployment": service.deployment.clone(),
+        "frontend_deployment": service.frontend_deployment.clone(),
+        "build_lane": service.build_lane.clone(),
+        "deployment_channels": service.deployment_channels.clone(),
         "supportCatalog": service.support_catalog.clone(),
     })
 }
@@ -2173,6 +2177,10 @@ mod tests {
             dependencies: Vec::new(),
             ops_capability: None,
             surface: None,
+            deployment: None,
+            frontend_deployment: None,
+            build_lane: None,
+            deployment_channels: Vec::new(),
             support_catalog: None,
         }
     }

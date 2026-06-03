@@ -1504,6 +1504,17 @@ impl AgyProviderDriver {
                 "scan_directions": scan_directions,
             }),
         ));
+        if is_model_picker(&observation) {
+            let _ = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key("escape"),
+                    "\x1b",
+                    Some("close AGY model picker after unverified model switch".to_string()),
+                )
+                .await;
+        }
         false
     }
 
@@ -1647,6 +1658,20 @@ impl AgyProviderDriver {
                     "reason": verified.snapshot.reason,
                 }),
             ));
+            if is_model_picker(&verified) {
+                let _ = self
+                    .write_step(
+                        result,
+                        slot_id,
+                        PtyStepAction::key("escape"),
+                        "\x1b",
+                        Some(
+                            "close AGY model picker after model selection verification failure"
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+            }
         }
         Some(ok)
     }
@@ -2797,6 +2822,7 @@ impl ProviderDriver for AgyProviderDriver {
             status: true,
             mcp_status: true,
             mcp_reconnect: true,
+            prompt_authorization: false,
         }
     }
 

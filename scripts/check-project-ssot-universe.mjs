@@ -41,6 +41,7 @@ const RUNTIME_LAYERS = new Set([
   'devtool',
   'platform-monorepo',
   'support-backend',
+  'support-agent',
   'ops-service',
   'ops-agent',
   'ops-tool',
@@ -123,7 +124,9 @@ function main() {
 	    '(project-blueprint-registry',
     '(project-management-taxonomy',
     ':schema "missiond.project-management-taxonomy.v1"',
-    ':fields [management-domain runtime-layer]',
+    ':fields [management-domain runtime-layer deployment-channels deployment-channel-drift]',
+    '(deployment-channel-plane',
+    ':schema "missiond.deployment-channel-plane.v1"',
     '(service-layer-template',
     ':schema "missiond.service-layer-template.v1"',
     ':id product-service-layer-standard',
@@ -144,6 +147,8 @@ function main() {
     'Next.js 16 + React 19 + TypeScript + Tailwind 4',
     '(decision :id backend-stack',
     'Rust axum + sqlx + PostgreSQL',
+    'deploy_project_stage_configs.build.config.deploy_type=native_workflow',
+    'deployment-channel-plane',
     '(auth-standard',
     ':default-provider xjp-auth',
     ':public-client-flow pkce',
@@ -206,8 +211,18 @@ function main() {
     ':domains ["jarvis.xiaojinpro.top"]',
     ':dns-record (:type A :name "jarvis.xiaojinpro.top" :content "34.104.147.118" :proxied false :ttl 60 :authority cloudflare)',
     ':deployment (:substrate gcp-caddy-edge :runtime-target gcp-runtime :origin "104.194.81.38:9876"',
+    ':tunnel-client "rickyhqmac-mini-jarvis"',
     ':proxy (:kind caddy :domain "jarvis.xiaojinpro.top"',
     ':routes ["/health" "/v1/*" "/api/monitor/jarvis" "/api/readiness" "/jarvis/*"]',
+    ':sse-no-buffer true',
+    ':flush-interval "-1"',
+    ':read-timeout "75s"',
+    ':write-timeout "75s"',
+    ':stream-timeout "0"',
+    ':jarvis-runtime-topology (:schema "missiond.jarvis-runtime-topology.v1"',
+    ':tunnel-server-url "ws://104.194.81.38:9876/tunnel/ws"',
+    ':expected-deploy-agent-version "10.7.15"',
+    ':launchd-unit "com.xiaojinpro.jarvis-tunnel"',
     ':health ["/health" "/api/readiness" "/api/monitor/jarvis" "/jarvis/api/monitor/jarvis"]',
     '(service :id good-things-daily',
     ':build-lane (:id privatecloud-rust-build-lane',
@@ -296,7 +311,11 @@ function main() {
     'Supabase Postgres through session pooler port `5432`',
     'Rust Build Lane',
     'deploy-center approved privatecloud/codebase build lane',
+    '`deploy_type=native_workflow`',
+    '`source_strategy=xjp_native_codebase_runner`',
     'Do not run `cargo build`, `docker build`, or `docker compose up --build` on GCP production VMs',
+    'MissionD project management must show each product-service project',
+    'The canonical deployment-channel shape is build/runtime/frontend',
     'Default Vercel deployment is frontend-only.',
     'projects/<project-id>/<environment>/<SECRET_NAME>',
     'experimentalServices',
@@ -314,6 +333,7 @@ function main() {
 
   const checkerResults = [];
   const behaviorClosureResults = [];
+  const projectionDiagnostics = [];
   for (const project of projects) {
     if (!project.root) continue;
     if (!fs.existsSync(project.root)) {
@@ -355,10 +375,23 @@ function main() {
       observed_count: behaviorJson?.observed_count ?? null,
       behavior_count: behaviorJson?.behavior_count ?? null,
       effect_count: behaviorJson?.effect_count ?? null,
+      projection_ok: behaviorJson?.projection_ok ?? null,
+      projection_diagnostics: behaviorJson?.projection_diagnostics ?? [],
+      navigation_artifact: behaviorJson?.navigation_artifact ?? null,
       diagnostics: behaviorJson?.diagnostics ?? [],
       stderr_tail: tail(behaviorProc.stderr ?? ''),
       error: behaviorProc.error?.message ?? null,
     });
+    for (const diagnostic of behaviorJson?.projection_diagnostics ?? []) {
+      projectionDiagnostics.push({
+        project: project.id,
+        file: diagnostic.file,
+        line: diagnostic.line,
+        column: diagnostic.column,
+        code: diagnostic.code,
+        message: diagnostic.message,
+      });
+    }
     if (!behaviorOk) {
       diagnostics.push({ file: project.root, message: `project behavior closure failed for ${project.id}` });
     }
@@ -380,12 +413,16 @@ function main() {
     }])),
     checkerResults,
     behaviorClosureResults,
+    projectionDiagnostics,
     diagnostics,
   };
   if (opts.json) {
     fs.writeSync(1, `${JSON.stringify(result, null, 2)}\n`);
   } else if (result.ok) {
     console.log(`project SSOT universe check OK (${projects.filter((project) => project.root).length} rooted projects/services from ${typedUniverse.source})`);
+    if (projectionDiagnostics.length > 0) {
+      console.error(`project behavior navigation projection has ${projectionDiagnostics.length} diagnostic(s); run node scripts/propose-behavior-navigation.mjs --project <id> --write for affected projects`);
+    }
   } else {
     for (const d of diagnostics) console.error(`${d.file}: ${d.message}`);
     console.error(`project SSOT universe check FAILED -- ${diagnostics.length} diagnostic(s)`);

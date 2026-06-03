@@ -123,6 +123,8 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-memory-kb-isomorphism.mjs',
   'scripts/check-v3-project-registry-isomorphism.mjs',
   'scripts/check-project-ssot-universe.mjs',
+  'scripts/check-jarvis-runtime-topology.mjs',
+  'scripts/check-runtime-evidence-redaction.mjs',
   'scripts/check-v3-data-residency-universe-isomorphism.mjs',
   'scripts/check-v3-conversation-ingestion-isomorphism.mjs',
   'scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',

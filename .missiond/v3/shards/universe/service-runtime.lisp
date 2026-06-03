@@ -107,6 +107,44 @@
     :schema "missiond.service-runtime-universe.v1"
     :rule "Production service runtime facts are Lisp-owned Universe data: project/service roots, domains, deployments, health, DNS capability, and ops owner are visible to resident master and workers through mission_project(action=universe). Secrets stay outside Lisp."
     :compiled-support-catalog-fields [support_catalog deploy_center_slug service_manifest_refs health smoke runtime_target db_migration_namespace credential_refs]
+    (deployment-channel-plane
+      :schema "missiond.deployment-channel-plane.v1"
+      :authority-model (:declared missiond-v3-ssot :inferred repo-config-workflows :observed deploy-center-vercel-gcp :secret-values secret-store-only)
+      :fields [project_id service_id surface channel_kind authority source_ref workflow deploy_center_slug executor builder source_sync dockerfile manifest artifact_lane image target_side_build_prohibited declared_status observed_status drift_status]
+      :channel-surfaces [build runtime frontend]
+      :channel-kinds [native_workflow privatecloud_docker_build github_actions deploy_center_runtime gcp_vm vercel kubernetes local_runtime manual_break_glass unknown]
+      :canonical-form ":deployment-channels ((channel :surface build ...))"
+      :compat-forms [:build-lane :deployment :frontend-deployment]
+      :merge-precedence [explicit-v3-deployment-channels project-local-deploy-center-config repo-workflow-inference live-observed-annotation]
+      :invariants
+        ["MissionD V3 SSOT owns declared deployment-channel intent; deploy-center, GitHub Actions, Vercel, and GCP facts annotate observed state and drift but must not silently overwrite declared channels."
+         "Every backend or runtime service must expose exactly one build channel unless explicitly classified frontend-only, local-runtime-only, or manual-break-glass."
+         "A runtime deploy-center channel is not evidence that build also runs in deploy-center; build and runtime surfaces must be shown separately."
+         "Deploy Center slugs such as xjp-payments/xjp-asr/xjp-deploy-center, container names, and service domains are first-class resolver aliases for service runtime and deployment-channel queries; agents must not rely on conversation search or grep to translate them back to canonical service ids."
+         "Native workflow build channels require deploy_project_stage_configs.build.config.deploy_type=native_workflow and target-side build must be prohibited for production Rust product-service backends."
+         "Deploy-center may actively manage frontend channels when deploy_project_stage_configs.frontend.config.deploy_type=vercel_frontend; Vercel webhook facts then reconcile deploy-center's managed deployment ledger instead of being only observed external state."
+         "GitHub Actions build channels must name the workflow and deploy-center trigger slug when present, so project management can answer which services still build through GA without grep."]
+      :implementation-surfaces ["scripts/compile-v3-runtime.mjs" "mission_project(action=deployment_channels)" "mission_project(action=reconcile_deployment_channels)" "packages/board/src/app/api/projects/route.ts" "packages/board/src/components/SystemDashboard.tsx"])
+    (domain-control-plane
+      :schema "missiond.domain-control-plane.v1"
+      :authority xjp-domain-service
+      :entrypoint "https://domains.xiaojins.com/v1/domains"
+      :source-kinds [service-runtime-domains project-registry-aliases project-registry-role-text dns-records frontend-deployment production-domain domain-control-required-binding]
+      :providers [cloudflare aliyun]
+      :managed-zones ["xiaojins.com" "xiaojinpro.top" "xiaojinpro.com" "speechscribe.top" "wepub.top" "jinstudio.com" "ruoqijin.com" "cuthub.ai" "problemwise.top" "missiond.com" "changtu.pro" "pcea.top"]
+      :provider-zones ((cloudflare ["xiaojins.com" "xiaojinpro.top" "speechscribe.top" "wepub.top" "ruoqijin.com" "cuthub.ai" "problemwise.top" "longimage.top" "tiermate.top" "xiaojin.pro"])
+                       (aliyun ["xiaojinpro.com" "changtu.pro" "pcea.top"]))
+      :required-domains ["files.xiaojins.com"]
+      :excluded-domains ["xjp-asr-web.vercel.app" "cname.vercel-dns.com"]
+      :mutation-policy approval-required
+      :default-mode read-only-inventory
+      :agent-prompt "When an agent inspects MissionD project management and the question involves domains, DNS records, Cloudflare, Aliyun DNS, public URLs, certificates, Caddy hostnames, or subdomain ownership, resolve the project in MissionD first, then consult compiled domain_management and xjp-domain-service. Do not infer DNS authority from project aliases or hand-run Cloudflare/Aliyun curl; DNS mutation requires xjp-domain-service apply with explicit approval."
+      :invariants
+        ["xjp-domain-service is the single authority for owned-zone DNS inventory across Cloudflare and Aliyun, desired-state diff, approval-gated apply, and domain binding audit."
+         "MissionD project management may identify project/domain relationships, but it MUST delegate DNS truth and mutation to xjp-domain-service."
+         "Owned domains discovered from service-runtime domains, project aliases, project role text, frontend production domains, and DNS records MUST be projected into compiled domain_management unless explicitly excluded."
+         "External fallback domains such as xjp-asr-web.vercel.app remain visible as project runtime facts but MUST NOT be treated as owned DNS to manage."
+         "files.xiaojins.com is a required XJP media/file binding even while the file service runtime projection is catching up from the XJP backend registry."])
     (service :id auth
       :project xiaojinpro-backend
       :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth"
@@ -119,6 +157,7 @@
       :dns-provider cloudflare
       :dns-capability (:read-inventory true :mutate requires-board-approval :secret-source env)
       :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center" :service "xjp-auth-center" :replicas 3 :hpa-min 3 :hpa-max 10 :image "xjp-auth-center:latest" :service-account "xjp-auth-center")
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/auth/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-auth" :artifact-lane cloud-registry-lane :manifest "services/auth/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
       :proxy (:kind caddy :domain "auth.xiaojinpro.com" :file "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/auth/caddy/Caddyfile" :sse-no-buffer "/auth/login-stream")
       :ports (:http 8081 :metrics 9090 :service 80)
       :health ["/health/live" "/health/ready" "/.well-known/openid-configuration" "/.well-known/jwks.json"]
@@ -137,8 +176,9 @@
       :deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json" :status-api "/api/deploy/status" :rollout-workflow ".missiond/workflows/m6-deployment-rollout.lisp")
       :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent :source deploy_events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN :authority deploy-center.deploy_events :rule "deploy-center relays durable deploy_events rows into MissionD EventBridge with stable event_id and MissionD idempotency; MissionD must not infer production release state by stitching GitHub/curl/git when deploy-center has provenance.")
       :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed workflow_run_created workflow_job_started workflow_job_succeeded workflow_job_failed workflow_job_cancelled workflow_job_lease_expired artifact_recorded smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed closure_verdict]
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "docker/Dockerfile.deploy-center" :image "ghcr.io/xiaojinpro-team/xjp-deploy-center" :artifact-lane cloud-registry-lane :manifest "services/deploy-center/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
       :health ["/api/deploy/health" "/api/deploy/healthz/db"]
-      :dependencies [xjp-pg-prod secret-store deploy-agent github-actions ghcr]
+      :dependencies [xjp-pg-prod secret-store deploy-agent privatecloud-10900kf ghcr]
       :ops-capability deploy-ops
       :source-evidence [services/deploy-center/service.manifest.toml services.yaml deploy/gcp-vm/xjp-postgres-stack/docker-compose.yml]
       :surface service-runtime-universe)
@@ -150,8 +190,32 @@
       :domains ["jarvis.xiaojinpro.top"]
       :dns-provider cloudflare
       :dns-record (:type A :name "jarvis.xiaojinpro.top" :content "34.104.147.118" :proxied false :ttl 60 :authority cloudflare)
-      :deployment (:substrate gcp-caddy-edge :runtime-target gcp-runtime :origin "104.194.81.38:9876" :tunnel-client "rickyhqmac-mini" :target-service missiond :authority verified-smoke)
-      :proxy (:kind caddy :domain "jarvis.xiaojinpro.top" :routes ["/health" "/v1/*" "/api/monitor/jarvis" "/api/readiness" "/jarvis/*"] :upstream "104.194.81.38:9876" :sse-no-buffer true)
+      :deployment (:substrate gcp-caddy-edge :runtime-target gcp-runtime :origin "104.194.81.38:9876" :tunnel-client "rickyhqmac-mini-jarvis" :target-service missiond :authority verified-smoke)
+      :proxy (:kind caddy :domain "jarvis.xiaojinpro.top" :routes ["/health" "/v1/*" "/api/monitor/jarvis" "/api/readiness" "/jarvis/*"] :upstream "104.194.81.38:9876" :sse-no-buffer true :flush-interval "-1" :read-timeout "75s" :write-timeout "75s" :stream-timeout "0" :route-generation "jarvis-gcp-bwg-macmini-20260603")
+      :jarvis-runtime-topology (:schema "missiond.jarvis-runtime-topology.v1"
+        :edge-node gcp-caddy-edge
+        :edge-domain "jarvis.xiaojinpro.top"
+        :edge-public-ip "34.104.147.118"
+        :edge-proxy caddy
+        :origin-node bwg-tunnel
+        :origin "104.194.81.38:9876"
+        :tunnel-server-url "ws://104.194.81.38:9876/tunnel/ws"
+        :tunnel-client-id "rickyhqmac-mini-jarvis"
+        :target-node rickyhq-macmini-m4
+        :target-service missiond
+        :target-local-url "http://127.0.0.1:9120"
+        :expected-deploy-agent-version "10.7.15"
+        :launchd-unit "com.xiaojinpro.jarvis-tunnel"
+        :launchd-plist "~/Library/LaunchAgents/com.xiaojinpro.jarvis-tunnel.plist"
+        :local-health-url "http://127.0.0.1:9880/health"
+        :route-generation "jarvis-gcp-bwg-macmini-20260603"
+        :proxy-no-buffer true
+        :proxy-flush-interval "-1"
+        :proxy-read-timeout "75s"
+        :proxy-write-timeout "75s"
+        :proxy-stream-timeout "0"
+        :streaming-policy "sse-no-buffer bounded-upstream-idle typed-terminal-diagnostic"
+        :authority verified-smoke)
       :ports (:https 443)
       :health ["/health" "/api/readiness" "/api/monitor/jarvis" "/jarvis/api/monitor/jarvis"]
       :dependencies [gcp-runtime caddy cloudflare-dns bwg-tunnel rickyhq-macmini-m4 missiond-daemon]
@@ -172,6 +236,11 @@
       :dns-records [(:type CNAME :name "search.xiaojinpro.top" :content "cname.vercel-dns.com" :proxied false :ttl 60 :authority cloudflare)
                     (:type A :name "search-center.xiaojinpro.top" :content "34.104.147.118" :proxied false :ttl 60 :authority cloudflare)]
       :deployment (:substrate deploy-center :dc_slug "xjp-search-center" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-search-center" :default-port 3120 :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/search-center/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-search-center" :artifact-lane cloud-registry-lane :manifest "services/search-center/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
+      :frontend-deployment (:substrate deploy-center :channel_kind vercel :deploy_type vercel_frontend :dc_slug "xjp-search-center" :stage frontend :stage_project_slug "xjp-search-center-web" :executor macmini :vercel_project "xjp-search-center-web" :root "apps/xjp-search-center-web" :production-domain "https://search.xiaojinpro.top" :manual-break-glass "apps/xjp-search-center-web/scripts/deploy-vercel.sh" :authority deploy-center)
+      :deployment-channels ((channel :surface build :channel_kind native_workflow :authority deploy-center :deploy_center_slug "xjp-search-center" :executor privatecloud-agent :builder privatecloud-10900kf :source_sync deploy-center-codebase :dockerfile "services/search-center/Dockerfile" :manifest "services/search-center/service.manifest.toml" :artifact_lane cloud-registry-lane :image "ghcr.io/xiaojinpro-team/xjp-search-center" :target_side_build_prohibited true :declared_status active)
+                            (channel :surface runtime :channel_kind deploy_center_runtime :authority deploy-center :deploy_center_slug "xjp-search-center" :executor gcp-agent :runtime_target gcp-runtime :manifest "services/search-center/service.manifest.toml" :target_side_build_prohibited true :declared_status active)
+                            (channel :surface frontend :channel_kind vercel :authority deploy-center :deploy_center_slug "xjp-search-center" :executor macmini :workflow deploy-center-native-vercel :deploy_type vercel_frontend :stage frontend :stage_project_slug "xjp-search-center-web" :vercel_project "xjp-search-center-web" :root_directory "apps/xjp-search-center-web" :production_domain "https://search.xiaojinpro.top" :manifest "apps/xjp-search-center-web/service.manifest.toml" :source_ref "apps/xjp-search-center-web/deploy/deploy-center/project.json" :declared_status active))
       :proxy (:kind caddy :domain "search-center.xiaojinpro.top" :routes ["/health/live" "/health/ready" "/v1/health" "/v1/me" "/v1/search" "/v1/search/*" "/v1/research" "/v1/research/*" "/v1/history" "/v1/history/*"])
       :ports (:http 3120)
       :health ["/v1/health"]
@@ -191,6 +260,7 @@
       :api-base-url "https://auth.xiaojinpro.com/payments"
       :domains ["auth.xiaojinpro.com"]
       :deployment (:substrate deploy-center :dc_slug "xjp-payments" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-payments" :default-port 8080 :host-bind "127.0.0.1:3109" :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/payments/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-payments" :artifact-lane cloud-registry-lane :manifest "services/payments/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
       :proxy (:kind caddy :domain "auth.xiaojinpro.com" :routes ["/payments" "/payments/*"] :upstream "localhost:3109")
       :ports (:host 3109 :container 8080)
       :health ["/payments/health" "/payments/health/ready" "/payments/health/runtime"]
@@ -231,7 +301,8 @@
       :dns-records [(:type A :name "speechscribe.top" :content "76.76.21.21" :proxied false :authority cloudflare)
                     (:type CNAME :name "www.speechscribe.top" :content "cname.vercel-dns.com" :proxied false :authority cloudflare)
                     (:type A :name "asr.xiaojinpro.top" :content "76.76.21.21" :proxied false :authority cloudflare)]
-      :deployment (:substrate deploy-center :dc_slug "xjp-asr" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-asr" :default-port 8090 :host-bind "127.0.0.1:8089" :authority release-provenance)
+      :deployment (:substrate deploy-center :dc_slug "xjp-asr" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-asr" :default-port 8090 :host-bind "127.0.0.1:8089" :artifact-delivery-lane cloud-registry-lane :target-side-build-prohibited true :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :runner_agent_id privatecloud :source-sync deploy-center-codebase :dockerfile "services/asr/Dockerfile" :image "ghcr.io/ruoqijin/xjp-asr" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
       :frontend-deployment (:substrate vercel :project "rickyjim626s-projects/xjp-asr-web" :production-domain "speechscribe.top" :fallback-domain "xjp-asr-web.vercel.app")
       :proxy (:kind caddy :domain "auth.xiaojinpro.com" :routes ["/asr" "/asr/*"] :upstream "localhost:8089")
       :ports (:host 8089 :container 8090)
@@ -253,6 +324,7 @@
       :dns-provider cloudflare
       :dns-record (:type A :name "images.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
       :deployment (:substrate deploy-center :dc_slug "xjp-image-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-image-service" :default-port 8095 :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/image/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-image-service" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
       :proxy (:kind caddy :domain "images.xiaojins.com" :routes ["/health" "/health/*" "/v1/images" "/v1/images/*"])
       :ports (:http 8095)
       :health ["/health/live" "/health/ready" "/v1/images/uploads/presign"]
@@ -272,6 +344,7 @@
       :dns-provider cloudflare
       :dns-record (:type A :name "videos.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
       :deployment (:substrate deploy-center :dc_slug "xjp-video-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-video-service" :default-port 8096 :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/video/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-video-service" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
       :runner (:kind deploy-agent-hosted-service :project xjp-video-transcode-runner :binary "xjp-video-transcode-runner" :runtime-target windows-12900kf :agent_url windows :transport self-built-proxy-deploy-program :queue video_jobs :ffmpeg cpu-required :profiles [poster_jpeg mp4_passthrough hls_720p])
       :proxy (:kind caddy :domain "videos.xiaojins.com" :routes ["/health" "/health/*" "/v1/videos" "/v1/videos/*"])
       :ports (:http 8096)
@@ -292,6 +365,7 @@
       :dns-provider cloudflare
       :dns-record (:type A :name "domains.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
       :deployment (:substrate deploy-center :dc_slug "xjp-domain-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-domain-service" :default-port 8097 :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/domain/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-domain-service" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
       :proxy (:kind caddy :domain "domains.xiaojins.com" :routes ["/health" "/health/*" "/v1/domains" "/v1/domains/*"])
       :ports (:http 8097)
       :health ["/health/live" "/health/ready"]
@@ -311,6 +385,7 @@
       :dns-provider cloudflare
       :dns-record (:type A :name "mail.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
       :deployment (:substrate deploy-center :dc_slug "xjp-mail-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-mail-service" :default-port 8098 :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/mail/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-mail-service" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
       :proxy (:kind caddy :domain "mail.xiaojins.com" :routes ["/health" "/health/*" "/v1/mail" "/v1/mail/*"])
       :ports (:http 8098)
       :health ["/health/live" "/health/ready"]
@@ -330,6 +405,7 @@
       :domains ["wepub.top" "www.wepub.top" "api.wepub.top"]
       :dns-provider cloudflare
       :deployment (:substrate deploy-center :dc_slug "wepub" :runtime-target gcp-runtime :executor gcp-agent :container "wepub" :default-port 8094 :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "backend/Dockerfile" :image "ghcr.io/xiaojinpro-team/wepub" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
       :proxy (:kind caddy :domain "api.wepub.top" :upstream "localhost:8094")
       :ports (:http 8094)
       :health ["/api/health"]
@@ -362,6 +438,7 @@
       :public-base-url "https://ss.xiaojinpro.top"
       :domains ["ss.xiaojinpro.top"]
       :deployment (:substrate gcp-vm :runtime-target gcp-runtime :container "secret-store" :local-bind "127.0.0.1:8091" :proxy caddy :authority deploy-center-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "docker/Dockerfile" :image "ghcr.io/rickyjim626/secret-store-rs" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
       :health ["/livez" "/readyz"]
       :dependencies [xjp-postgres secret-store-kek admin-key]
       :ops-capability deploy-ops
@@ -375,6 +452,7 @@
       :public-base-url "https://ss-cn.xiaojinpro.com"
       :domains ["ss-cn.xiaojinpro.com"]
       :deployment (:substrate aliyun-ecs :dc_slug "secret-store-cn" :runtime-target ecs-pcea :network-profile ecs-cn-restricted :executor ecs-agent :work_dir "/opt/secret-store-cn" :compose_file "/opt/secret-store-cn/docker-compose.cn.yml" :local-bind "127.0.0.1:8091" :proxy nginx :artifact-delivery-lane cn-oss-bundle-lane :authority verified-smoke :deploy-center-status stale-runtime-shell :provenance partial)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "docker/Dockerfile" :image "ghcr.io/rickyjim626/secret-store-rs" :artifact-lane cn-oss-bundle-lane :authority deploy-center :target-side-build-prohibited true)
       :health ["/livez" "/readyz"]
       :dependencies [cn-postgres secret-store-cn-kek secret-store-cn-admin-key]
       :ops-capability deploy-ops
@@ -447,4 +525,10 @@
       :default-mode read-only-inventory
       :mutating-policy "Cloudflare DNS mutation requires xjp-domain-service, Secret Store / Deploy Center secret binding, deploy-ops capability, and explicit Board approval; workers must report unavailable rather than pretend they can operate DNS when credentials or approval are absent."
       :secrets [CLOUDFLARE_API_TOKEN_REF CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID DOMAIN_APPROVAL_TOKEN_REF DOMAIN_APPROVAL_TOKEN]
+      :surface service-runtime-universe)
+    (capability :id aliyun-dns
+      :provider aliyun
+      :default-mode read-only-inventory
+      :mutating-policy "Aliyun DNS mutation requires xjp-domain-service, Secret Store / Deploy Center secret binding, deploy-ops capability, and explicit Board approval; workers must report unavailable rather than operate Aliyun DNS directly when credentials or approval are absent."
+      :secrets [ALIYUN_ACCESS_KEY_ID_REF ALIYUN_ACCESS_KEY_SECRET_REF ALIYUN_ACCESS_KEY_ID ALIYUN_ACCESS_KEY_SECRET DOMAIN_APPROVAL_TOKEN_REF DOMAIN_APPROVAL_TOKEN]
       :surface service-runtime-universe))

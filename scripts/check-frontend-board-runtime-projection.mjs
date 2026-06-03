@@ -18,6 +18,7 @@ const FILES = {
   boardClient: 'packages/board/src/lib/missiondBoardClient.ts',
   slotsRoute: 'packages/board/src/app/api/slots/route.ts',
   masterStatusRoute: 'packages/board/src/app/api/master/status/route.ts',
+  projectsRoute: 'packages/board/src/app/api/projects/route.ts',
   taskDialog: 'packages/board/src/components/TaskDialog.tsx',
   terminal: 'packages/board/src/components/Terminal.tsx',
   systemDashboard: 'packages/board/src/components/SystemDashboard.tsx',
@@ -96,8 +97,8 @@ function checkRepo(repo) {
     '(projection next-api-runtime-boundary',
     'Runtime-only MissionD proxy API routes must export nodejs runtime, force-dynamic, and revalidate=0',
     '(projection service-runtime-universe',
-    ':source [mission_project.universe service-runtime-universe]',
-    'SystemDashboard must show production service domain/deployment/DNS capability',
+    ':source [mission_project.universe mission_project.deployment_channels service-runtime-universe deployment-channel-plane]',
+    'SystemDashboard must show production service domain/deployment/DNS capability and per-project deploymentChannels',
     '(projection decision-inbox',
     ':source [mission_question DecisionDashboard JarvisChat]',
     'User-facing decisions live as durable mission_question records',
@@ -218,10 +219,22 @@ function checkRepo(repo) {
   requireText(diagnostics, 'packages/board/src/components/SystemDashboard.tsx', src.systemDashboard ?? fs.readFileSync(path.join(repo, 'packages/board/src/components/SystemDashboard.tsx'), 'utf8'), [
     'DecisionDashboard',
     'runtimeServices',
+    'deploymentChannels',
+    'DeploymentChannelSummary',
+    'GitHub Actions',
+    'Native Runner',
     'ServiceRuntimeCard',
     'publicBaseUrl',
     'dnsProvider',
     'opsCapability',
+  ]);
+
+  requireText(diagnostics, FILES.projectsRoute, src.projectsRoute, [
+    "action: 'universe'",
+    "action: 'deployment_channels'",
+    "kind: 'compiled'",
+    'deploymentChannels: explicitChannels.length',
+    'deploymentChannelDiagnostics',
   ]);
 
   requireText(diagnostics, FILES.taskDialog, src.taskDialog, [
@@ -306,6 +319,7 @@ function buildFixture() {
   for (const rel of Object.values(FILES)) fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
   fs.writeFileSync(path.join(root, FILES.blueprint), `(missiond-frontend-blueprint
   (runtime-projection
+    (projection service-runtime-universe :source [mission_project.universe mission_project.deployment_channels service-runtime-universe deployment-channel-plane] :rule "SystemDashboard must show production service domain/deployment/DNS capability and per-project deploymentChannels")
     (projection workstation-slots :source [mission_slots mission_pty_status workstation-pool] :fields [id label role running state provider engine modelProfile taskClass acceptsBoardTask confidence reason activeTool blockedKind latestConversation] :forbid [SLOT_OPTIONS hardcoded-sonnet-label])
     (projection pty-recognition :rule "Terminal labels must describe the selected provider/session generically")
     (projection terminal-slot-selector :source [mission_slots mission_pty_status localStorage] :rule "Terminal slot selection lives inside the Terminal panel"))
@@ -319,8 +333,10 @@ function buildFixture() {
   fs.writeFileSync(path.join(root, FILES.tasksRoute), "BOARD_TASK_FIELD_MAP; mapToFrontend; mapToBackend; callTool('mission_board_create'); callTool('mission_board_update');\n");
   fs.writeFileSync(path.join(root, FILES.slotsRoute), "callTool('mission_slots'); callTool('mission_pty_status'); provider; engine; modelProfile; latestConversation; acceptsBoardTask; confidence;\n");
   fs.writeFileSync(path.join(root, FILES.masterStatusRoute), "export const runtime = 'nodejs'; export const dynamic = 'force-dynamic'; export const revalidate = 0; callTool('mission_master_status');\n");
+  fs.writeFileSync(path.join(root, FILES.projectsRoute), "callTool('mission_project', { action: 'universe' }); callTool('mission_project', { action: 'deployment_channels' }); kind: 'compiled'; deploymentChannels: explicitChannels.length; deploymentChannelDiagnostics;\n");
   fs.writeFileSync(path.join(root, FILES.taskDialog), "import type { SlotDef } from '../types'; fetch('/api/slots'); availableSlots; setAvailableSlots;\n");
   fs.writeFileSync(path.join(root, FILES.terminal), 'providerLabel; Starting session; No active session;\n');
+  fs.writeFileSync(path.join(root, FILES.systemDashboard), 'DecisionDashboard; runtimeServices; deploymentChannels; DeploymentChannelSummary; GitHub Actions; Native Runner; ServiceRuntimeCard; publicBaseUrl; dnsProvider; opsCapability;\n');
   fs.writeFileSync(path.join(root, FILES.app), "import type { SlotDef } from './types'; BOARD_TABS; DEFAULT_TAB; TAB_MIGRATION; fetchSlots; /api/slots; slotStateLabel; overflow-x-auto overflow-y-hidden whitespace-nowrap; min-w-[160px] max-w-[280px]; truncate;\n");
   fs.writeFileSync(path.join(root, FILES.eventStream), 'EVENT_ROUTE_TABLE; EVENT_PREFIX_ROUTES; EVENT_CUSTOM_EVENTS; RESYNC_VERSION_KEYS; dispatchConfiguredCustomEvent; bumpKeys; missiond.eventbus-live-lag-diagnostic.v1; lastLagDiagnostic; cursorLag;\n');
   fs.writeFileSync(path.join(root, FILES.autopilotMonitor), "import { FLOW_PHASE_LABELS, FLOW_PHASES } from '../constants';\n");

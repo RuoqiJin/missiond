@@ -10,6 +10,7 @@ import {
   runtimeDomainFiles,
   runtimeDomainSourceHashes,
 } from './lib/v3_runtime_domains.mjs';
+import { augmentWorkstationProviderLaunchPolicy } from './lib/v3_workstation_provider_launch_policy.mjs';
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const RUST_OUTPUT = 'crates/missiond-daemon/src/context/v3_contracts/generated.rs';
@@ -185,6 +186,7 @@ function loadRuntimeDefaults({ repo, blueprint }) {
     fail(`missiond-lispc emit-runtime-config failed${detail ? `: ${detail}` : ''}`);
   }
   const payload = result.compiled.payload ?? {};
+  augmentWorkstationProviderLaunchPolicy(payload, { repo });
   const sourceDomains = normalizeSourceDomains(payload.source_domains);
   return {
     schemaVersion: result.compiled.schema_version,

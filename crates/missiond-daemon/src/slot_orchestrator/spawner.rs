@@ -111,6 +111,15 @@ pub async fn spawn_tracked_slot(
         }
     }
     let pty_slot = &pty_slot_owned;
+    if original_slot_env
+        .and_then(|env| env.get("MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS"))
+        .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
+    {
+        options.extra_env.insert(
+            "MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS".to_string(),
+            "true".to_string(),
+        );
+    }
     enforce_spawn_sandbox_policy(pty_slot, &mut options)?;
 
     // 0b. Inject learned permissions into <project_root>/.claude/settings.local.json

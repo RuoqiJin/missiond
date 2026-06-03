@@ -36,6 +36,8 @@ const FILES = {
   providerBoxRuntime: 'crates/missiond-daemon/src/provider_box/runtime.rs',
   providerBoxArtifact: 'crates/missiond-daemon/src/provider_box/artifact.rs',
   providerBoxCodexDriver: 'crates/missiond-daemon/src/provider_box/codex_driver.rs',
+  providerBoxClaudeCodeDriver: 'crates/missiond-daemon/src/provider_box/claude_code_driver.rs',
+  providerBoxHttpAdapter: 'crates/missiond-daemon/src/provider_box/http_adapter.rs',
   jarvisServer: 'crates/missiond-core/src/ws/server.rs',
   runner: 'crates/missiond-runner/src/runner.rs',
   runnerLib: 'crates/missiond-runner/src/lib.rs',
@@ -171,6 +173,10 @@ function main() {
       'timeout_cancel_policy',
       ':driver-capabilities',
       'stepwise-operator',
+      'provider-prompt-authorization',
+      'provider_authorization_allowlist',
+      'MISSIOND_PROVIDER_BOX_CLAUDE_CODE_MCP_AUTH_ALLOWLIST',
+      'DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED',
       'screen-state-recognition',
       'screen_identity',
       'screen_usage',
@@ -365,9 +371,14 @@ function main() {
       'agy_generating_spinner_is_running_even_when_prompt_visible',
       'agy_stale_spinner_with_ready_footer_is_idle',
       'agy_interrupted_prompt_is_idle_ready_for_retry',
+      'mcp_server_authorization',
+      'provider_authorization',
+      'startup_provider_authorization',
+      'claude_code_mcp_server_authorization_is_provider_authorization_blocked',
     ]);
     requireAll(diagnostics, FILES.providerBoxDriver, sources.providerBoxDriver, [
       'trait ProviderDriver',
+      'prompt_authorization',
       'submit_turn',
       'switch_model',
       'probe_usage',
@@ -391,6 +402,21 @@ function main() {
       'ProviderBoxArtifactWriter',
       'put_json_artifact',
       'provider-interaction-turn',
+    ]);
+    requireAll(diagnostics, FILES.providerBoxClaudeCodeDriver, sources.providerBoxClaudeCodeDriver, [
+      'accept_prompt_authorization_locked',
+      'claude_code_prompt_authorization_allowlist',
+      'MISSIOND_PROVIDER_BOX_CLAUDE_CODE_MCP_AUTH_ALLOWLIST',
+      'MISSIOND_PROVIDER_BOX_CLAUDE_CODE_AUTH_ALLOWLIST',
+      'PROVIDER_PROMPT_AUTHORIZATION_CONFIRMED',
+      'DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED',
+      'claude_code_prompt_authorization_extracts_allowlisted_mcp_target',
+      'claude_code_prompt_authorization_rejects_unknown_mcp_target',
+    ]);
+    requireAll(diagnostics, FILES.providerBoxHttpAdapter, sources.providerBoxHttpAdapter, [
+      '"prompt_authorization"',
+      '"allowlist"',
+      '"observe-act-observe selected option before Enter"',
     ]);
     requireAll(diagnostics, FILES.aggregate, sources.aggregate, [
       'scripts/check-v3-interactive-provider-box.mjs',

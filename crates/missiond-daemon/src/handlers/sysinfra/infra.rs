@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use missiond_core::evidence_redactor;
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1546,25 +1547,7 @@ fn redact_skill_evidence_line(line: &str) -> (String, bool) {
     if !risk {
         return (line.trim().to_string(), false);
     }
-
-    let mut redacted = line.trim().to_string();
-    for marker in [
-        "sshpass -p",
-        "password",
-        "Password",
-        "密码",
-        "token",
-        "TOKEN",
-        "api_key",
-        "API_KEY",
-    ] {
-        if let Some(idx) = redacted.find(marker) {
-            redacted.truncate(idx + marker.len());
-            redacted.push_str(" <redacted>");
-            break;
-        }
-    }
-    (redacted, true)
+    (evidence_redactor::redact_text(line.trim()).text, true)
 }
 
 fn diagnostic_profiles(

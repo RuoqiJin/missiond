@@ -121,7 +121,7 @@
                 (step s3 :logic "keep original evidence available with include_archived=true or state_filter"))
          :egress [review-overlay-state])
        (function memory-evidence-search-contract
-         :entry [mission_memory.evidence_search mission_context_gather]
+         :entry [mission_memory.evidence_search mission_context_gather mission_repo_search]
          :core ((step s1 :logic "resolve scope and profile before retrieval")
                 (step s2 :logic "filter allowed evidence lanes before FTS/vector/rerank")
                 (step s3 :logic "return compact EvidenceItem projections with provenance and raw_policy")
@@ -285,6 +285,7 @@
        "conversation_message_raw and cold_archive data MUST NOT enter intent_default or deploy_ops retrieval. conversation_audit may use bounded episode/fact extracts; raw messages require explicit opt-in."
        "skill_evidence is evidence-only unless a review/promotion workflow promotes an item into reviewed_kb with TTL or version bounds for deploy/config/dependency facts."
        "support_refs MUST expose secret_ref namespace/key/provenance/availability only; secret values are never indexed, embedded, or injected."
+       "mission_repo_search MUST normalize repository text hits into lane-tagged compact evidence references and MUST NOT return cold_archive/conversation_audit hits unless the source_profile allows those lanes."
        "mission_context_gather persist_read_model defaults true so compact context_gather_runs/evidence_items projections are available to the next search without requiring worker artifact creation."
        "context_gather_runs MUST persist lane counts, raw source inclusion, conversation cross-project drops when available, filtered semantic hit counts, credential opt-in, low-confidence skill evidence drops when available, resolver source, and runtime/root consistency."]
     :checker "node scripts/check-v3-memory-kb-isomorphism.mjs")
@@ -627,13 +628,14 @@
        :interaction-id-path "raw_data.interaction_id"
        :future-normalized-tables [interaction_runs interaction_events])
 
-    :events [received authenticated permission_resolved grounding intent_draft plan_draft confirm_required board_task_created worker_dispatched worker_status dispatch_accepted result_pending result_artifact diagnostic final]
+    :events [received authenticated permission_resolved grounding intent_draft intent_archived key_judgment_draft plan_draft plan_archived confirm_required communicator_status communicator_final board_task_created worker_dispatched worker_status dispatch_accepted result_pending result_artifact diagnostic final]
 
     :invariants
       ["Every Jarvis/Web/iOS/WeChat interaction milestone visible to a client MUST be persisted into interaction-ledger with the same interaction_id."
        "GET /interactions/v1/{interaction_id}/events MUST replay durable conversation_events rows and MUST NOT return a static placeholder."
        "Final means terminal task-result-artifact or terminal typed diagnostic; non-terminal dispatch/result_pending events MUST NOT be projected as final."
-       "confirm_required and confirmation progress events MUST be ledgered so clients can resume after network loss."
+       "Jarvis default iOS/openai flow MUST ledger intent_archived and plan_archived for replay without emitting user-blocking confirmation cards; confirm_required remains ledgered only for explicit manual-review/legacy confirmation mode so clients can resume after network loss."
+       "communicator_status and communicator_final events MUST be ledgered for any AGY/Gemini communication-officer user-facing status or final result summary."
        "BoardTask runtime_metadata and interaction raw_data MUST preserve grounding_context_id, intent_artifact_id, plan_artifact_id, worker_conversation_id, and task_result_artifact_hash when available."
        "Topic labels MUST be derived from the user request/topic, not from conservative confirmation text."
        "PTY output, provider screen state, and Board notes are evidence/projection only and are never the interaction completion authority."

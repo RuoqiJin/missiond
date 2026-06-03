@@ -124,6 +124,27 @@ pub enum MessageRole {
     Assistant,
 }
 
+fn last_prompt_line(screen: &str) -> String {
+    screen
+        .lines()
+        .rev()
+        .find(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with('❯') || trimmed.starts_with('›') || trimmed.starts_with('>')
+        })
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn paste_confirmation_marker(message: &str) -> Option<String> {
+    message
+        .lines()
+        .map(str::trim)
+        .find(|line| line.chars().count() >= 16)
+        .map(|line| line.chars().take(80).collect())
+}
+
 /// Source of screen text
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1763,11 +1784,43 @@ impl PTYSession {
     /// Claude Code shows "[Pasted text #N +M lines]" for multi-line pastes.
     /// Gemini CLI (Ink TUI) handles bracketed paste natively — short settle only.
     /// Falls back after 10s timeout.
-    async fn wait_for_paste_confirmation(&self, pre_paste_prompt: &str) {
+    async fn wait_for_paste_confirmation(&self, pre_paste_prompt: &str, message: &str) {
         let slot_id = &self.slot_id;
 
-        // Gemini/Codex: Ink TUI handles bracketed paste natively, no polling needed.
-        // Just a brief settle for the TUI to process the input.
+        if self.engine == missiond_shared::CliEngine::Codex {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let marker = paste_confirmation_marker(message);
+            for attempt in 0..38 {
+                let screen = self.get_screen_text().await;
+                let current_prompt = last_prompt_line(&screen);
+                let marker_visible = marker
+                    .as_ref()
+                    .is_some_and(|marker| !marker.is_empty() && screen.contains(marker));
+                if marker_visible
+                    || (!current_prompt.is_empty() && current_prompt != pre_paste_prompt)
+                {
+                    tracing::debug!(
+                        slot = %slot_id,
+                        attempt,
+                        before = %pre_paste_prompt,
+                        after = %current_prompt,
+                        marker_visible,
+                        "Paste confirmed for Codex"
+                    );
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            tracing::warn!(
+                slot = %slot_id,
+                before = %pre_paste_prompt,
+                "Codex paste confirmation timed out; sending Enter anyway"
+            );
+            return;
+        }
+
+        // Gemini CLI handles bracketed paste natively; a brief settle is enough.
         if self.engine != missiond_shared::CliEngine::ClaudeCode {
             tokio::time::sleep(Duration::from_millis(300)).await;
             tracing::debug!(slot = %slot_id, engine = %self.engine, "Paste settle (non-Claude CLI)");
@@ -1790,15 +1843,7 @@ impl PTYSession {
 
             // Check 2: the prompt line changed from pre-paste snapshot (single-line paste)
             // Find the last prompt line (starts with ❯ or >)
-            let current_prompt = screen
-                .lines()
-                .rev()
-                .find(|l| {
-                    let trimmed = l.trim();
-                    trimmed.starts_with('❯') || trimmed.starts_with('>')
-                })
-                .unwrap_or("")
-                .trim();
+            let current_prompt = last_prompt_line(&screen);
             if !current_prompt.is_empty() && current_prompt != pre_paste_prompt {
                 tracing::debug!(
                     slot = %slot_id, attempt,
@@ -1818,16 +1863,7 @@ impl PTYSession {
     /// Capture the current prompt line content (for pre-paste snapshot).
     async fn capture_prompt_line(&self) -> String {
         let screen = self.get_screen_text().await;
-        screen
-            .lines()
-            .rev()
-            .find(|l| {
-                let trimmed = l.trim();
-                trimmed.starts_with('❯') || trimmed.starts_with('>')
-            })
-            .unwrap_or("")
-            .trim()
-            .to_string()
+        last_prompt_line(&screen)
     }
 
     /// Send message (fire-and-forget): paste + enter, return immediately
@@ -1882,7 +1918,8 @@ impl PTYSession {
         let paste_payload = format!("\x1b[200~{}\x1b[201~", message);
         self.write(&paste_payload).await?;
         // Poll screen to confirm paste was received before sending Enter.
-        self.wait_for_paste_confirmation(&pre_paste_prompt).await;
+        self.wait_for_paste_confirmation(&pre_paste_prompt, message)
+            .await;
         self.write("\r").await?;
 
         Ok(())
@@ -1923,7 +1960,8 @@ impl PTYSession {
         let paste_payload = format!("\x1b[200~{}\x1b[201~", message);
         self.write(&paste_payload).await?;
         // Poll screen to confirm paste was received before sending Enter.
-        self.wait_for_paste_confirmation(&pre_paste_prompt).await;
+        self.wait_for_paste_confirmation(&pre_paste_prompt, message)
+            .await;
         self.write("\r").await?;
 
         // Wait for TextOutputEvent::Complete — emitted by state_check_loop when
@@ -2943,6 +2981,29 @@ mod tests {
         assert!(SessionState::Confirming.is_processing());
         assert!(!SessionState::Idle.is_processing());
         assert!(!SessionState::Exited.is_processing());
+    }
+
+    #[test]
+    fn prompt_line_detection_supports_codex_marker() {
+        let screen = "\
+╭────────────────────────╮
+│ >_ OpenAI Codex        │
+╰────────────────────────╯
+› Explain this codebase";
+
+        assert_eq!(last_prompt_line(screen), "› Explain this codebase");
+    }
+
+    #[test]
+    fn paste_marker_prefers_stable_non_empty_line() {
+        let marker = paste_confirmation_marker(
+            "\nMissionD provider-box correlation_id: jarvis-intent-abc123\n\nshort\n",
+        );
+
+        assert_eq!(
+            marker.as_deref(),
+            Some("MissionD provider-box correlation_id: jarvis-intent-abc123")
+        );
     }
 
     /// Live shape from BoardTask 42b2385e: the streamed `TextOutput::Complete`
