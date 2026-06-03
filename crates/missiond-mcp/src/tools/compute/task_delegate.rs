@@ -55,13 +55,36 @@ fn mechanic_lane_properties() -> Value {
     })
 }
 
+fn deploy_ops_properties() -> Value {
+    json!({
+        "mutation_action": {"type": "string", "description": "deploy-ops explicit action. Read-only artifacts such as rollback-plan are proposal-only; production_deploy/redeploy/rollback/dns_mutation/secret_mutation/ssh/break_glass require an approval ref."},
+        "mutationAction": {"type": "string", "description": "mutation_action camelCase alias"},
+        "deployment_action": {"type": "string", "description": "mutation_action alias for deploy/redeploy/rollback requests"},
+        "deploymentAction": {"type": "string", "description": "deployment_action camelCase alias"},
+        "deploy_action": {"type": "string", "description": "mutation_action alias"},
+        "deployAction": {"type": "string", "description": "deploy_action camelCase alias"},
+        "deploy_center_policy_approval_id": {"type": "string", "description": "Deploy Center policy approval reference required for production mutation deploy-ops tasks"},
+        "deployCenterPolicyApprovalId": {"type": "string", "description": "deploy_center_policy_approval_id camelCase alias"},
+        "board_approval_id": {"type": "string", "description": "Explicit Board approval reference required for production mutation deploy-ops tasks"},
+        "boardApprovalId": {"type": "string", "description": "board_approval_id camelCase alias"},
+        "user_approval_id": {"type": "string", "description": "Explicit user approval reference required for production mutation deploy-ops tasks"},
+        "userApprovalId": {"type": "string", "description": "user_approval_id camelCase alias"},
+        "approval_ref": {"type": "string", "description": "Generic approval reference alias"},
+        "approvalRef": {"type": "string", "description": "approval_ref camelCase alias"},
+        "approval_id": {"type": "string", "description": "approval_ref alias"},
+        "approvalId": {"type": "string", "description": "approval_id camelCase alias"},
+        "approval_source": {"type": "string", "description": "Optional explicit approval source label"},
+        "approvalSource": {"type": "string", "description": "approval_source camelCase alias"}
+    })
+}
+
 fn task_delegate_schema() -> Value {
     let mut schema = json!({
         "type": "object",
         "required": ["objective"],
         "properties": {
             "objective": {"type": "string", "description": "任务目标(自然语言)"},
-            "intent": {"type": "string", "description": "意图类型决定 slot 模板", "enum": ["code", "ops", "research", "general"], "default": "general"},
+            "intent": {"type": "string", "description": "意图类型决定 slot 模板", "enum": ["code", "ops", "deploy-ops", "research", "general"], "default": "general"},
             "cwd": {"type": "string", "description": "工作目录", "default": "~/Projects"},
             "timeout_secs": {"type": "integer", "description": "超时秒数(上限 7200)", "default": 1800},
             "priority": {"type": "string", "enum": ["high", "medium", "low"], "default": "medium"},
@@ -95,6 +118,7 @@ fn task_delegate_schema() -> Value {
     });
     merge_properties(&mut schema, dedup_linkage_properties());
     merge_properties(&mut schema, mechanic_lane_properties());
+    merge_properties(&mut schema, deploy_ops_properties());
     schema
 }
 

@@ -27,6 +27,29 @@ const EXCLUDED_ROLES: &[&str] = &["jarvis", "memory", "supervisor", "decision"];
 const VALID_INTENTS: &[&str] = &["code", "ops", "deploy-ops", "research", "general"];
 
 const DEPLOY_OPS_OUTPUT_CONTRACT: &str = "return exactly one deploy-ops artifact type: preflight-report | release-evidence-review | closure-verdict-review | rollback-plan | postmortem";
+const DEPLOY_OPS_READ_ONLY_ACTIONS: &[&str] = &[
+    "audit",
+    "observe",
+    "preflight",
+    "preflight_report",
+    "release_evidence_review",
+    "closure_verdict_review",
+    "rollback_plan",
+    "postmortem",
+    "proposal",
+    "plan",
+];
+const DEPLOY_OPS_MUTATIONS_REQUIRING_APPROVAL: &[&str] = &[
+    "production_deploy",
+    "deploy",
+    "redeploy",
+    "rollback",
+    "dns_mutation",
+    "cloudflare",
+    "secret_mutation",
+    "ssh",
+    "break_glass",
+];
 
 /// Phase 6.3: Context injection size limits.
 const MAX_ENTRY_CHARS: usize = 500; // Per KB/Skill entry
@@ -148,6 +171,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             .unwrap_or(0) as usize,
         shared_claim_ids: Vec::new(),
         source_id: source_id.clone(),
+        mutation_action: deploy_ops_mutation_action(&args),
         mutation_approval_ref: deploy_ops_mutation_approval_ref(&args),
         mutation_approval_source: deploy_ops_mutation_approval_source(&args),
     };
@@ -164,14 +188,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         delegation_metadata
             .output_contract
             .get_or_insert_with(|| DEPLOY_OPS_OUTPUT_CONTRACT.to_string());
-        if deploy_ops_write_scope_without_approval(intent, &delegation_metadata) {
+        if deploy_ops_mutation_without_approval(intent, &delegation_metadata) {
             return Ok(ToolResult::structured_error(
                 ToolError::new(
                     "DEPLOY_OPS_APPROVAL_REQUIRED",
-                    "mission_task_delegate refused write-scoped deploy-ops work without a deploy-center policy, explicit Board approval, or explicit user approval reference",
+                    "mission_task_delegate refused production-mutation deploy-ops work without a deploy-center policy, explicit Board approval, or explicit user approval reference",
                 )
                 .with_suggestion(
-                    "rerun as read-only, or pass deploy_center_policy_approval_id, board_approval_id, user_approval_id, approval_id, or approval_ref",
+                    "rerun as read-only/proposal action, or pass deploy_center_policy_approval_id, board_approval_id, user_approval_id, approval_id, or approval_ref",
                 ),
             ));
         }
@@ -2067,6 +2091,7 @@ struct DelegationMetadata {
     /// original anchor visible so dedup can refuse a second concurrent code
     /// worker even when the immediate parent shifts.
     source_id: Option<String>,
+    mutation_action: Option<String>,
     mutation_approval_ref: Option<String>,
     mutation_approval_source: Option<String>,
 }
@@ -2099,6 +2124,7 @@ fn delegation_runtime_metadata(
             "parent_board_task_id": parent_id,
             "project_id": project_id,
             "project_root": project_root,
+            "mutation_action": metadata.mutation_action,
             "mutation_approval_ref": metadata.mutation_approval_ref,
             "mutation_approval_source": metadata.mutation_approval_source,
             "authority": {
@@ -2786,9 +2812,13 @@ fn exact_shard_ready(metadata: &DelegationMetadata) -> bool {
         && !metadata.write_scope.is_empty()
 }
 
-fn deploy_ops_write_scope_without_approval(intent: &str, metadata: &DelegationMetadata) -> bool {
+fn deploy_ops_mutation_without_approval(intent: &str, metadata: &DelegationMetadata) -> bool {
     intent == "deploy-ops"
-        && !metadata.write_scope.is_empty()
+        && (!metadata.write_scope.is_empty()
+            || metadata
+                .mutation_action
+                .as_deref()
+                .is_some_and(deploy_ops_action_requires_approval))
         && metadata.mutation_approval_ref.is_none()
 }
 
@@ -3462,6 +3492,42 @@ fn deploy_ops_mutation_approval_ref(args: &Value) -> Option<String> {
     .map(str::to_string)
 }
 
+fn deploy_ops_mutation_action(args: &Value) -> Option<String> {
+    string_arg(
+        args,
+        &[
+            "mutation_action",
+            "mutationAction",
+            "deployment_action",
+            "deploymentAction",
+            "deploy_action",
+            "deployAction",
+        ],
+    )
+    .map(str::to_string)
+}
+
+fn normalize_deploy_ops_action(action: &str) -> String {
+    action
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' ', ':'], "_")
+}
+
+fn deploy_ops_action_requires_approval(action: &str) -> bool {
+    let normalized = normalize_deploy_ops_action(action);
+    if DEPLOY_OPS_READ_ONLY_ACTIONS.contains(&normalized.as_str()) {
+        return false;
+    }
+    DEPLOY_OPS_MUTATIONS_REQUIRING_APPROVAL.contains(&normalized.as_str())
+        || normalized.contains("rollback")
+        || normalized.contains("redeploy")
+        || normalized.contains("production_deploy")
+        || normalized.contains("secret_mutation")
+        || normalized.contains("dns_mutation")
+        || normalized.contains("break_glass")
+}
+
 fn deploy_ops_mutation_approval_source(args: &Value) -> Option<String> {
     if string_arg(
         args,
@@ -3620,6 +3686,9 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     }
     if let Some(value) = &metadata.source_id {
         lines.push(format!("- source_board_task_id: {}", value));
+    }
+    if let Some(value) = &metadata.mutation_action {
+        lines.push(format!("- mutation_action: {}", value));
     }
     if let Some(value) = &metadata.mutation_approval_ref {
         lines.push(format!("- mutation_approval_ref: {}", value));
@@ -4607,6 +4676,7 @@ data: {"type":"final","task_id":"t1","status":"done","at":"now"}
             grounding_sources: vec!["project_registry".to_string()],
             grounding_evidence_refs_count: 1,
             source_id: None,
+            mutation_action: None,
             mutation_approval_ref: None,
             mutation_approval_source: None,
         };
@@ -4696,15 +4766,58 @@ data: {"type":"final","task_id":"t1","status":"done","at":"now"}
             write_scope: vec!["prod://payments".to_string()],
             ..DelegationMetadata::default()
         };
-        assert!(deploy_ops_write_scope_without_approval(
+        assert!(deploy_ops_mutation_without_approval(
             "deploy-ops",
             &metadata
         ));
         metadata.mutation_approval_ref = Some("board-approval-123".to_string());
-        assert!(!deploy_ops_write_scope_without_approval(
+        assert!(!deploy_ops_mutation_without_approval(
             "deploy-ops",
             &metadata
         ));
+    }
+
+    #[test]
+    fn deploy_ops_mutation_action_requires_approval_even_without_write_scope() {
+        let mut metadata = DelegationMetadata {
+            task_class: Some("deploy-ops".to_string()),
+            mutation_action: Some("redeploy".to_string()),
+            write_scope: Vec::new(),
+            ..DelegationMetadata::default()
+        };
+
+        assert!(deploy_ops_mutation_without_approval(
+            "deploy-ops",
+            &metadata
+        ));
+
+        metadata.mutation_approval_ref = Some("deploy-center-policy-42".to_string());
+        assert!(!deploy_ops_mutation_without_approval(
+            "deploy-ops",
+            &metadata
+        ));
+    }
+
+    #[test]
+    fn deploy_ops_read_only_actions_do_not_require_approval() {
+        for action in [
+            "preflight-report",
+            "release_evidence_review",
+            "closure-verdict-review",
+            "rollback-plan",
+            "postmortem",
+        ] {
+            let metadata = DelegationMetadata {
+                task_class: Some("deploy-ops".to_string()),
+                mutation_action: Some(action.to_string()),
+                ..DelegationMetadata::default()
+            };
+
+            assert!(
+                !deploy_ops_mutation_without_approval("deploy-ops", &metadata),
+                "{action} must remain read-only/proposal safe"
+            );
+        }
     }
 
     #[test]
