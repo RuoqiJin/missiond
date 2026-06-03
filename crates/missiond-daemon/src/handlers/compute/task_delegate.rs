@@ -3705,10 +3705,12 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
                 .to_string(),
         );
     }
-    if matches!(
-        metadata.task_class.as_deref(),
-        Some("review") | Some("context-pack") | Some("research")
-    ) {
+    if metadata.output_contract.is_none()
+        && matches!(
+            metadata.task_class.as_deref(),
+            Some("review") | Some("context-pack") | Some("research")
+        )
+    {
         lines.push(
             "- output_contract: return a structured artifact with Findings / Evidence / Recommendations / Verification; do not paste raw KB JSON or full logs as the final answer"
                 .to_string(),

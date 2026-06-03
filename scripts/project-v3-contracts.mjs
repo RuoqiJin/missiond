@@ -27,7 +27,7 @@ function main() {
   const contract = loadContract({ repo, blueprint });
   const runtimeDefaults = loadRuntimeDefaults({ repo, blueprint });
   const projectUniverse = loadProjectUniverse({ repo, blueprint });
-  const generated = renderAll(contract, {
+  const labels = {
     blueprint,
     rustOutput: RUST_OUTPUT,
     rustCoreOutput: RUST_CORE_OUTPUT,
@@ -39,6 +39,11 @@ function main() {
     projectUniverseSourceHash: projectUniverse.sourceDomainHash,
     runtimeDomainFiles: runtimeDomainFiles(),
     runtimeDomainSourceHashes: runtimeDomainSourceHashes(runtimeDefaults.sourceDomainHash),
+  };
+  const generated = renderAll(contract, labels);
+  const generatedCoreRust = renderCoreRust(contract, {
+    ...labels,
+    rustOutput: opts.coreRustOutput,
   });
   const generatedRuntimeDefaults = renderRuntimeDefaults(runtimeDefaults, {
     blueprint,
