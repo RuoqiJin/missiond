@@ -819,6 +819,10 @@ assert_active_project_root_can_mutate() {
   log "ownership: project-root mutation guard verified phase=$phase owner_root=$expected_root"
 }
 
+assert_active_release_owned() {
+  assert_active_project_root_can_mutate "$1"
+}
+
 capture_launchd_runtime_state() {
   PREVIOUS_LAUNCHD_PROJECT_ROOT="$(plist_read_string "$LAUNCHD_PLIST" "WorkingDirectory" || true)"
   PREVIOUS_RUNTIME_DIR="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_RUNTIME_DIR" || true)"
