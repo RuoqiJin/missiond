@@ -44,6 +44,9 @@ const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
 const CODEX_STARTUP_READY_WAIT_SECS: u64 = 60;
 const CODEX_TRUST_READY_WAIT_SECS: u64 = 12;
 const CODEX_PROMPT_SEND_READY_WAIT_SECS: u64 = 12;
+const CODEX_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS: u64 = 45;
+const CODEX_DURABLE_FINAL_IDLE_GRACE_MIN_SECS: u64 = 10;
+const CODEX_DURABLE_FINAL_IDLE_GRACE_MAX_SECS: u64 = 300;
 const CODEX_MANUAL_TEXT_LIMIT: usize = 4096;
 const CODEX_MANUAL_KEY_NAMES: &[&str] = &[
     "enter",
@@ -1364,6 +1367,7 @@ impl CodexProviderDriver {
     ) -> ProviderBoxResult {
         let timeout_secs = request.timeout_secs.unwrap_or(180).clamp(10, 7_200);
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let durable_final_idle_grace_secs = codex_durable_final_idle_grace_secs();
         let mut idle_seen_at: Option<Instant> = None;
 
         loop {
@@ -1413,7 +1417,7 @@ impl CodexProviderDriver {
                 PtyCanonicalState::Idle | PtyCanonicalState::Complete
             ) {
                 if let Some(seen_at) = idle_seen_at {
-                    if seen_at.elapsed() >= Duration::from_secs(3) {
+                    if seen_at.elapsed() >= Duration::from_secs(durable_final_idle_grace_secs) {
                         let mut failed =
                             ProviderBoxResult::base(request, ProviderBoxStatus::Failed);
                         failed.slot_id = Some(slot_id.to_string());
@@ -1425,6 +1429,7 @@ impl CodexProviderDriver {
                                 "slot_id": slot_id,
                                 "correlation_id": request.correlation_id,
                                 "codex_home": self.codex_home.display().to_string(),
+                                "idle_grace_secs": durable_final_idle_grace_secs,
                                 "rule": "PTY screen text is diagnostic only; no fallback final was synthesized"
                             }),
                         ));
@@ -3851,6 +3856,23 @@ fn default_codex_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".codex"))
 }
 
+fn clamp_codex_durable_final_idle_grace_secs(value: Option<u64>) -> u64 {
+    value
+        .unwrap_or(CODEX_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS)
+        .clamp(
+            CODEX_DURABLE_FINAL_IDLE_GRACE_MIN_SECS,
+            CODEX_DURABLE_FINAL_IDLE_GRACE_MAX_SECS,
+        )
+}
+
+fn codex_durable_final_idle_grace_secs() -> u64 {
+    clamp_codex_durable_final_idle_grace_secs(
+        std::env::var("MISSIOND_CODEX_DURABLE_FINAL_IDLE_GRACE_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok()),
+    )
+}
+
 fn codex_exec_text_args(output_file: &Path, model: &str, reasoning: Option<&str>) -> Vec<String> {
     codex_exec_args_for_kind(CodexExecTaskKind::TextOnly, output_file, model, reasoning)
 }
@@ -4988,6 +5010,14 @@ mod tests {
 
         assert_eq!(turn.final_text, "final from durable rollout");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn codex_durable_final_idle_grace_is_bounded() {
+        assert_eq!(clamp_codex_durable_final_idle_grace_secs(None), 45);
+        assert_eq!(clamp_codex_durable_final_idle_grace_secs(Some(3)), 10);
+        assert_eq!(clamp_codex_durable_final_idle_grace_secs(Some(45)), 45);
+        assert_eq!(clamp_codex_durable_final_idle_grace_secs(Some(900)), 300);
     }
 
     #[test]

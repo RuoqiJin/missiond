@@ -4237,24 +4237,17 @@ impl PTYWebSocketServer {
             {
                 Ok(draft) => draft,
                 Err(error) => {
-                    let diagnostic = serde_json::json!({
-                        "phase": "plan_authoring_failed",
-                        "error": {
-                            "code": "JARVIS_PLAN_AUTHOR_FAILED",
-                            "message": error.to_string()
-                        }
-                    });
-                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                    Self::write_sse_openai_text_and_persist(
+                    Self::fail_jarvis_gate_visible(
                         &mut stream,
+                        &jarvis_progress_bus,
                         &chat_id,
-                        "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
-                        Some("stop"),
+                        Some(&interaction_id),
+                        format!("plan.lisp 生成失败：{error}。plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。"),
+                        "plan_authoring_failed",
                         db.as_ref(),
                         jarvis_conv_id.as_deref(),
                     )
                     .await?;
-                    Self::finish_sse(&mut stream).await?;
                     return Ok(());
                 }
             };
@@ -11474,24 +11467,17 @@ JSON 字段必须是：\n\
                 {
                     Ok(draft) => draft,
                     Err(error) => {
-                        let diagnostic = serde_json::json!({
-                            "phase": "plan_authoring_failed",
-                            "error": {
-                                "code": "JARVIS_PLAN_AUTHOR_FAILED",
-                                "message": error.to_string()
-                            }
-                        });
-                        Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                        Self::write_sse_openai_text_and_persist(
+                        Self::fail_jarvis_gate_visible(
                             &mut stream,
+                            &jarvis_progress_bus,
                             &chat_id,
-                            "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
-                            Some("stop"),
+                            None,
+                            format!("plan.lisp 生成失败：{error}。plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。"),
+                            "plan_authoring_failed",
                             db.as_ref(),
                             jarvis_conv_id.as_deref(),
                         )
                         .await?;
-                        Self::finish_sse(&mut stream).await?;
                         return Ok(());
                     }
                 };
