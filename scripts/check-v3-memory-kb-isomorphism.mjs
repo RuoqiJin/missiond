@@ -281,6 +281,7 @@ function checkFiles(root, files) {
     'source_summaries.deployment_events.status',
     'top-level deployment_events summary alias',
     'deployment-event unknowns synthesize evidence_gap',
+    'deployment evidence diagnostic/next-action questions',
     'never fall back to conversation/tool timeline hits for deploy evidence',
     'source_summaries.infra.status=feature_disabled',
     'fallback_status=support_catalog_available',
@@ -1208,6 +1209,7 @@ function buildFixture() {
                          "source_summaries.deployment_events.status"
                          "top-level deployment_events summary alias"
                          "deployment-event unknowns synthesize evidence_gap"
+                         "deployment evidence diagnostic/next-action questions"
                          "never fall back to conversation/tool timeline hits for deploy evidence"
 		                 "source_summaries.infra.status=feature_disabled"
                      "fallback_status=support_catalog_available"

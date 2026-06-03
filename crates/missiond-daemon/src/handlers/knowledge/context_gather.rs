@@ -4394,12 +4394,18 @@ fn synthesize_unknowns_with_source_summaries(
 
 fn unknown_targets_deployment_events(unknown: &str) -> bool {
     let lower = unknown.to_ascii_lowercase();
+    let deployment_diagnostic_next_action = (lower.contains("evidence")
+        || lower.contains("diagnostic"))
+        && (lower.contains("next action")
+            || lower.contains("recommend")
+            || lower.contains("diagnostic"));
     (lower.contains("deploy") || lower.contains("deployment"))
         && (lower.contains("event")
             || lower.contains("webhook")
             || lower.contains("relay")
             || lower.contains("authoritative")
-            || lower.contains("deploy_events"))
+            || lower.contains("deploy_events")
+            || deployment_diagnostic_next_action)
 }
 
 fn synthesize_deployment_event_unknown(unknown: &str, summary: &Value) -> Option<Value> {
@@ -6734,6 +6740,7 @@ mod tests {
                 .to_string(),
             "Does context_gather distinguish webhook ingest probes from Deploy Center durable deploy_events?"
                 .to_string(),
+            "What next action should deployment evidence diagnostics recommend?".to_string(),
             "What unrelated owner should review the UI copy?".to_string(),
         ];
 
@@ -6743,7 +6750,7 @@ mod tests {
             &deployment_events_summary,
         );
 
-        assert_eq!(synthesized.len(), 3);
+        assert_eq!(synthesized.len(), 4);
         assert_eq!(
             synthesized[0].get("status").and_then(Value::as_str),
             Some("evidence_gap")
@@ -6771,6 +6778,17 @@ mod tests {
         );
         assert_eq!(
             synthesized[2].get("status").and_then(Value::as_str),
+            Some("evidence_gap")
+        );
+        assert_eq!(
+            synthesized[2]
+                .get("next_actions")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            synthesized[3].get("status").and_then(Value::as_str),
             Some("needs_synthesis")
         );
     }
