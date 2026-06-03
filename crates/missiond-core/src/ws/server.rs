@@ -315,7 +315,7 @@ struct JarvisCodexIntentResponse {
     non_goals: Vec<String>,
     #[serde(default)]
     acceptance_signals: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_jarvis_confidence")]
     confidence: Option<String>,
 }
 
@@ -323,7 +323,7 @@ struct JarvisCodexIntentResponse {
 struct JarvisCodexKeyJudgmentResponse {
     judgment: String,
     review_text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_jarvis_confidence")]
     confidence: Option<String>,
     #[serde(default)]
     rejected_hypotheses: Vec<String>,
@@ -356,7 +356,7 @@ struct JarvisCodexPlanResponse {
     non_goals: Vec<String>,
     #[serde(default)]
     acceptance_signals: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_jarvis_confidence")]
     confidence: Option<String>,
     #[serde(default)]
     workstreams: Vec<serde_json::Value>,
@@ -370,6 +370,46 @@ struct JarvisCodexPlanResponse {
     parallel_groups: Vec<serde_json::Value>,
     #[serde(default)]
     assignment_policy: serde_json::Value,
+}
+
+fn deserialize_jarvis_confidence<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::String(text) => normalize_jarvis_confidence_text(&text),
+        serde_json::Value::Number(number) => number.as_f64().map(normalize_jarvis_confidence_score),
+        serde_json::Value::Bool(true) => Some("high".to_string()),
+        serde_json::Value::Bool(false) => Some("low".to_string()),
+        _ => None,
+    }))
+}
+
+fn normalize_jarvis_confidence_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        "high" | "medium" | "low" => Some(lower),
+        _ => trimmed
+            .parse::<f64>()
+            .ok()
+            .map(normalize_jarvis_confidence_score)
+            .or_else(|| Some(trimmed.to_string())),
+    }
+}
+
+fn normalize_jarvis_confidence_score(score: f64) -> String {
+    if score >= 0.75 {
+        "high".to_string()
+    } else if score >= 0.4 {
+        "medium".to_string()
+    } else {
+        "low".to_string()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -14594,6 +14634,19 @@ done"#;
         assert_eq!(parsed.intent_kind, "implementation");
         assert!(parsed.review_text.contains("目标"));
         assert_eq!(parsed.assumptions, vec!["用户希望 Codex 参与"]);
+    }
+
+    #[test]
+    fn jarvis_author_response_accepts_numeric_confidence() {
+        let output = r#"```json
+{"recognized_objective":"确认 ROUTER 部署方式","intent_kind":"question","understanding":"用户要查明 ROUTER 当前部署链路。","review_text":"确认意图后继续 grounding。","assumptions":[],"non_goals":[],"acceptance_signals":["回答部署方式"],"confidence":0.85}
+```"#;
+        let parsed = PTYWebSocketServer::parse_codex_intent_response(output).unwrap();
+        assert_eq!(parsed.confidence.as_deref(), Some("high"));
+
+        let low = r#"{"judgment":"证据不足","review_text":"需要继续查证","confidence":0.2,"rejected_hypotheses":[],"evidence_refs":["grounding"],"planning_implications":["先查证"],"acceptance_focus":["证据闭环"]}"#;
+        let parsed = PTYWebSocketServer::parse_codex_key_judgment_response(low).unwrap();
+        assert_eq!(parsed.confidence.as_deref(), Some("low"));
     }
 
     #[test]
