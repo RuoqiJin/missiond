@@ -3976,9 +3976,25 @@ fn evidence_item_projection_dedupe_key(item: &EvidenceItemInput) -> String {
             item.task_id.as_deref().unwrap_or(""),
             item.source_id.as_deref().unwrap_or("")
         )
+    } else if evidence_item_is_current_context_projection(item) {
+        format!(
+            "compact_projection|{}|{}|project:{}|task:{}|source_id:{}|source_ref:{}|title:{}|summary:{}",
+            item.lane_id,
+            item.source_type,
+            item.project_id.as_deref().unwrap_or(""),
+            item.task_id.as_deref().unwrap_or(""),
+            item.source_id.as_deref().unwrap_or(""),
+            item.source_ref.as_deref().unwrap_or(""),
+            evidence_item_compact_dedupe_text(&item.title, 180),
+            evidence_item_compact_dedupe_text(&item.summary, 1200)
+        )
     } else {
         format!("id|{}", item.id)
     }
+}
+
+fn evidence_item_compact_dedupe_text(text: &str, max_chars: usize) -> String {
+    compact_text(text, max_chars).to_ascii_lowercase()
 }
 
 fn evidence_item_should_replace_duplicate(
@@ -6188,6 +6204,51 @@ mod tests {
             assert_eq!(items.len(), 1, "{source_type}");
             assert_eq!(items[0].id, deploy_ops.id, "{source_type}");
         }
+    }
+
+    #[test]
+    fn evidence_items_dedupe_compact_projection_by_semantic_identity() {
+        let read_model_projection = missiond_core::types::EvidenceItemInput {
+            id: "evi-old-content-hash".to_string(),
+            lane_id: "skill_evidence".to_string(),
+            source_type: "skill_operational_fact".to_string(),
+            source_id: None,
+            source_ref: None,
+            project_id: Some("payments".to_string()),
+            task_id: None,
+            title: "Scoped deployment closure policy".to_string(),
+            summary: "payments deployment closure support: deploy center slug xjp-payments; runtime target gcp-runtime.".to_string(),
+            authority_class: "evidence-only".to_string(),
+            validity: "evidence_only".to_string(),
+            privacy_class: "internal".to_string(),
+            freshness: "version_bound_or_historical".to_string(),
+            score: Some(7.0),
+            raw_policy: "compact_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({
+                "projection": "mission_context_gather.compact_evidence",
+                "source_profile": "deploy_ops"
+            }),
+        };
+        let mut current_projection = read_model_projection.clone();
+        current_projection.id = "evi-current-content-hash".to_string();
+        current_projection.score = None;
+
+        let mut different_summary = current_projection.clone();
+        different_summary.id = "evi-distinct".to_string();
+        different_summary.summary =
+            "payments deploy-center manifest evidence references Secret Store adoption."
+                .to_string();
+
+        let mut items = vec![read_model_projection, current_projection, different_summary];
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+        assert_eq!(items.len(), 2);
+        assert!(items
+            .iter()
+            .any(|item| item.id == "evi-current-content-hash"));
+        assert!(items.iter().any(|item| item.id == "evi-distinct"));
+        assert!(!items.iter().any(|item| item.id == "evi-old-content-hash"));
     }
 
     #[test]
