@@ -2,7 +2,7 @@ use anyhow::Result;
 use missiond_core::types::{ContextGatherRunInput, EvidenceItemInput, EvidenceSearchInput};
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -11,8 +11,8 @@ use std::{
 };
 
 use crate::context::v3_blueprint_runtime::{
-    CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog, EvidenceLaneRuntimeConfig,
-    EvidenceLaneRuntimeEntry, load_compiled_project_universe,
+    load_compiled_project_universe, CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog,
+    EvidenceLaneRuntimeConfig, EvidenceLaneRuntimeEntry,
 };
 use crate::feature_gates;
 use crate::handlers::comm::conversation;
@@ -1189,18 +1189,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     } else {
         collect_evidence_refs_from_value(&source_summaries)
     };
-    let unresolved = args
-        .unknowns
-        .iter()
-        .filter(|unknown| !unknown.trim().is_empty())
-        .map(|unknown| {
-            json!({
-                "unknown": unknown,
-                "status": "needs_synthesis",
-                "hint": "Review sources and promote to resolved/evidence_gap in the context-pack."
-            })
-        })
-        .collect::<Vec<_>>();
+    let deployment_events_summary = source_summaries
+        .get("deployment_events")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let unresolved = synthesize_unknowns_with_source_summaries(
+        &args.unknowns,
+        &source_summaries,
+        &deployment_events_summary,
+    );
 
     let sources_used = sources.keys().cloned().collect::<Vec<_>>();
     let runtime_environment = sources
@@ -1250,6 +1247,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "runtime_environment": runtime_environment,
         "sources": response_sources,
         "source_summaries": source_summaries,
+        "deployment_events": deployment_events_summary,
         "raw_sources_omitted": !selection.include_raw_sources,
         "raw_sources_policy": raw_sources_policy(selection.include_raw_sources),
         "source_profile": profile.as_str(),
@@ -4363,6 +4361,102 @@ fn raw_sources_policy(include_raw_sources: bool) -> &'static str {
     }
 }
 
+fn synthesize_unknowns_with_source_summaries(
+    unknowns: &[String],
+    source_summaries: &Value,
+    deployment_events_summary: &Value,
+) -> Vec<Value> {
+    unknowns
+        .iter()
+        .filter(|unknown| !unknown.trim().is_empty())
+        .map(|unknown| {
+            if unknown_targets_deployment_events(unknown) {
+                if let Some(synthesized) =
+                    synthesize_deployment_event_unknown(unknown, deployment_events_summary)
+                {
+                    return synthesized;
+                }
+            }
+
+            json!({
+                "unknown": unknown,
+                "status": "needs_synthesis",
+                "hint": "Review sources and promote to resolved/evidence_gap in the context-pack.",
+                "evidence_ref": if source_summaries.get("deployment_events").is_some() {
+                    Value::String("source_summaries.deployment_events".to_string())
+                } else {
+                    Value::Null
+                }
+            })
+        })
+        .collect()
+}
+
+fn unknown_targets_deployment_events(unknown: &str) -> bool {
+    let lower = unknown.to_ascii_lowercase();
+    (lower.contains("deploy") || lower.contains("deployment"))
+        && (lower.contains("event")
+            || lower.contains("webhook")
+            || lower.contains("relay")
+            || lower.contains("authoritative")
+            || lower.contains("deploy_events"))
+}
+
+fn synthesize_deployment_event_unknown(unknown: &str, summary: &Value) -> Option<Value> {
+    if !summary.is_object() {
+        return None;
+    }
+
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_count = summary
+        .get("event_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let relay_diagnostics = summary
+        .get("relay_diagnostics")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let observed_candidates = summary
+        .get("observed_candidates")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let inferred_gap = relay_diagnostics
+        .get("inferred_gap")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    let synthesized_status = if status == "ok" || event_count > 0 {
+        "resolved"
+    } else if status == "no_matching_deploy_center_events" || inferred_gap != "unknown" {
+        "evidence_gap"
+    } else {
+        "needs_synthesis"
+    };
+
+    Some(json!({
+        "unknown": unknown,
+        "status": synthesized_status,
+        "evidence_ref": "source_summaries.deployment_events",
+        "authority": summary.get("authority").cloned().unwrap_or(Value::Null),
+        "deployment_event_status": status,
+        "event_count": event_count,
+        "observed_candidates": observed_candidates,
+        "relay_diagnostics": relay_diagnostics,
+        "next_actions": relay_diagnostics
+            .get("next_actions")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "hint": if synthesized_status == "evidence_gap" {
+            "Deployment event summary has enough evidence to classify the unknown as an evidence gap; use relay_diagnostics.next_actions before inferring release state."
+        } else {
+            "Deployment event summary answered this unknown; inspect source_summaries.deployment_events for authority and event rows."
+        }
+    }))
+}
+
 fn build_source_summaries(sources: &serde_json::Map<String, Value>) -> Value {
     let mut summaries = serde_json::Map::new();
     for (key, value) in sources {
@@ -5301,14 +5395,13 @@ fn collect_evidence_refs_inner(value: &Value, path: &str, refs: &mut Vec<Value>)
 mod tests {
     use std::{fs, path::Path};
 
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     use crate::context::v3_blueprint_runtime::EvidenceLaneRuntimeConfig;
 
     use super::{
-        CompiledDeploymentPolicyFingerprint, ContextGatherArgs, DEPLOYMENT_EVENT_RELEVANT_KINDS,
-        DeploymentEventFilterResult, SourceProfile, attach_infra_os_disabled_support_fallback,
-        build_evidence_items, build_evidence_items_with_options, build_evidence_lanes,
+        attach_infra_os_disabled_support_fallback, build_evidence_items,
+        build_evidence_items_with_options, build_evidence_lanes,
         build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
         build_support_catalog, collect_evidence_refs_from_value, context_gather_persist_artifact,
         context_gather_persist_read_model, context_gather_worker_visible_dir_for,
@@ -5325,7 +5418,9 @@ mod tests {
         filter_stale_runtime_environment_evidence_items_with_dir,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
         source_selection, summarize_source, support_catalog_has_content,
-        support_catalog_response_view,
+        support_catalog_response_view, synthesize_unknowns_with_source_summaries,
+        CompiledDeploymentPolicyFingerprint, ContextGatherArgs, DeploymentEventFilterResult,
+        SourceProfile, DEPLOYMENT_EVENT_RELEVANT_KINDS,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -6040,16 +6135,14 @@ mod tests {
             .to_string(),
             created_at: "2026-06-02 20:08:16".to_string(),
         };
-        assert!(
-            deployment_event_item_from_timeline_row(
-                &unscoped,
-                Some("payments"),
-                Some("payments"),
-                Some("xjp-payments"),
-                "Payments canary",
-            )
-            .is_none()
-        );
+        assert!(deployment_event_item_from_timeline_row(
+            &unscoped,
+            Some("payments"),
+            Some("payments"),
+            Some("xjp-payments"),
+            "Payments canary",
+        )
+        .is_none());
         match deployment_event_filter_timeline_row(
             &unscoped,
             Some("payments"),
@@ -6083,16 +6176,14 @@ mod tests {
             "payload_json": "{}",
         })
         .to_string();
-        assert!(
-            deployment_event_item_from_timeline_row(
-                &non_deploy,
-                Some("deploy-center"),
-                Some("deploy-center"),
-                Some("xjp-deploy-center"),
-                "deploy-center",
-            )
-            .is_none()
-        );
+        assert!(deployment_event_item_from_timeline_row(
+            &non_deploy,
+            Some("deploy-center"),
+            Some("deploy-center"),
+            Some("xjp-deploy-center"),
+            "deploy-center",
+        )
+        .is_none());
         match deployment_event_filter_timeline_row(
             &non_deploy,
             Some("deploy-center"),
@@ -6360,12 +6451,10 @@ mod tests {
                 .and_then(Value::as_str),
             Some("not_available")
         );
-        assert!(
-            diagnostics
-                .get("next_actions")
-                .and_then(Value::as_array)
-                .is_some_and(|items| !items.is_empty())
-        );
+        assert!(diagnostics
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty()));
     }
 
     #[test]
@@ -6396,14 +6485,12 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(true)
         );
-        assert!(
-            diagnostics
-                .get("next_actions")
-                .and_then(Value::as_array)
-                .is_some_and(|items| items.iter().any(|item| item
-                    .as_str()
-                    .is_some_and(|text| text.contains("deploy_event_relay_state"))))
-        );
+        assert!(diagnostics
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("deploy_event_relay_state")))));
     }
 
     #[test]
@@ -6413,27 +6500,22 @@ mod tests {
             Some("relay_env_names_present"),
         );
 
-        assert!(
-            actions
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item
-                    .as_str()
-                    .is_some_and(|text| text.contains("runtime env values"))))
-        );
+        assert!(actions
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("runtime env values")))));
         assert!(actions.as_array().is_some_and(|items| {
             items
                 .iter()
                 .any(|item| item.as_str().is_some_and(|text| text.contains("reachable")))
         }));
-        assert!(
-            actions
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| {
-                    item.as_str().is_some_and(|text| {
-                        text.contains("Secret Store namespace xjp-deploy-center")
-                    })
-                }))
-        );
+        assert!(actions
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| {
+                item.as_str()
+                    .is_some_and(|text| text.contains("Secret Store namespace xjp-deploy-center"))
+            })));
     }
 
     #[test]
@@ -6490,14 +6572,12 @@ mod tests {
                 .map(Path::new),
             Some(root.as_path())
         );
-        assert!(
-            probe
-                .get("missing_env_groups")
-                .and_then(Value::as_array)
-                .is_some_and(|items| items
-                    .iter()
-                    .any(|item| { item.get("group").and_then(Value::as_str) == Some("enable") }))
-        );
+        assert!(probe
+            .get("missing_env_groups")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items
+                .iter()
+                .any(|item| { item.get("group").and_then(Value::as_str) == Some("enable") })));
         assert_eq!(
             probe
                 .get("secret_store_key_probe")
@@ -6505,29 +6585,25 @@ mod tests {
                 .and_then(Value::as_str),
             Some("xjp-deploy-center")
         );
-        assert!(
-            probe
-                .get("secret_store_key_probe")
-                .and_then(|value| value.get("required_key_names"))
-                .and_then(Value::as_array)
-                .is_some_and(|items| items
-                    .iter()
-                    .any(|item| item.as_str() == Some("MISSIOND_EXTERNAL_WEBHOOK_TOKEN")))
-        );
-        assert!(
-            probe
-                .get("code_refs")
-                .and_then(Value::as_array)
-                .is_some_and(|items| items.iter().any(|item| {
-                    item.get("expected_needles_present")
-                        .and_then(Value::as_array)
-                        .is_some_and(|needles| {
-                            needles.iter().any(|needle| {
-                                needle.as_str() == Some("deploy_event_relay::spawn_from_env")
-                            })
+        assert!(probe
+            .get("secret_store_key_probe")
+            .and_then(|value| value.get("required_key_names"))
+            .and_then(Value::as_array)
+            .is_some_and(|items| items
+                .iter()
+                .any(|item| item.as_str() == Some("MISSIOND_EXTERNAL_WEBHOOK_TOKEN"))));
+        assert!(probe
+            .get("code_refs")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| {
+                item.get("expected_needles_present")
+                    .and_then(Value::as_array)
+                    .is_some_and(|needles| {
+                        needles.iter().any(|needle| {
+                            needle.as_str() == Some("deploy_event_relay::spawn_from_env")
                         })
-                }))
-        );
+                    })
+            })));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -6627,6 +6703,61 @@ mod tests {
     }
 
     #[test]
+    fn deployment_event_unknowns_are_synthesized_from_summary() {
+        let summary = json!({
+            "kind": "deployment_events",
+            "status": "no_matching_deploy_center_events",
+            "authority": "deploy-center ExternalServiceEvent via MissionD EventBridge",
+            "event_count": 0,
+            "observed_candidates": {
+                "observed_webhook_ingest_probe": true,
+                "observed_authoritative_deploy_center_source": false,
+                "webhook_ingest_probe_candidate_count": 2,
+                "authoritative_deploy_center_candidate_count": 0
+            },
+            "relay_diagnostics": {
+                "schema": "missiond.deployment-event-relay-diagnostics.v1",
+                "inferred_gap": "missiond_webhook_ingest_ok_deploy_center_relay_absent",
+                "next_actions": [
+                    "deploy_events cursor inspection",
+                    "deploy_logs-to-deploy_events write-path verification"
+                ]
+            }
+        });
+        let source_summaries = json!({"deployment_events": summary.clone()});
+        let unknowns = vec![
+            "Does context_gather distinguish webhook ingest probes from Deploy Center durable deploy_events?".to_string(),
+            "Which skill should handle this?".to_string(),
+        ];
+
+        let synthesized =
+            synthesize_unknowns_with_source_summaries(&unknowns, &source_summaries, &summary);
+
+        assert_eq!(
+            synthesized[0].get("status").and_then(Value::as_str),
+            Some("evidence_gap")
+        );
+        assert_eq!(
+            synthesized[0]
+                .get("relay_diagnostics")
+                .and_then(|value| value.get("inferred_gap"))
+                .and_then(Value::as_str),
+            Some("missiond_webhook_ingest_ok_deploy_center_relay_absent")
+        );
+        assert_eq!(
+            synthesized[0]
+                .get("observed_candidates")
+                .and_then(|value| value.get("observed_authoritative_deploy_center_source"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            synthesized[1].get("status").and_then(Value::as_str),
+            Some("needs_synthesis")
+        );
+    }
+
+    #[test]
     fn infra_os_disabled_diagnostics_are_not_hard_context_failures() {
         assert!(!diagnostics_have_hard_failures(&[
             optional_infra_os_disabled_diagnostic("infra"),
@@ -6698,12 +6829,11 @@ mod tests {
         }));
 
         let raw = response_sources(&sources, &summaries, true);
-        assert!(
-            raw.get("skill_context")
-                .and_then(|value| value.get("operational_facts"))
-                .and_then(|value| value.as_array())
-                .is_some_and(|items| items.len() == 1)
-        );
+        assert!(raw
+            .get("skill_context")
+            .and_then(|value| value.get("operational_facts"))
+            .and_then(|value| value.as_array())
+            .is_some_and(|items| items.len() == 1));
     }
 
     #[test]
@@ -6850,14 +6980,12 @@ mod tests {
             support_refs.get("item_count").and_then(Value::as_u64),
             Some(1)
         );
-        assert!(
-            support_refs
-                .get("source_keys")
-                .and_then(Value::as_array)
-                .is_some_and(|keys| keys
-                    .iter()
-                    .any(|value| value.as_str() == Some("support_catalog")))
-        );
+        assert!(support_refs
+            .get("source_keys")
+            .and_then(Value::as_array)
+            .is_some_and(|keys| keys
+                .iter()
+                .any(|value| value.as_str() == Some("support_catalog"))));
 
         let scoped_catalog_with_closure = json!({
             "schema": "missiond.support-catalog.v1",
@@ -7229,12 +7357,10 @@ mod tests {
             None,
             None,
         );
-        assert!(
-            !items
-                .iter()
-                .any(|item| item.source_type == "support_catalog"
-                    || item.source_type == "deployment_closure_policy")
-        );
+        assert!(!items
+            .iter()
+            .any(|item| item.source_type == "support_catalog"
+                || item.source_type == "deployment_closure_policy"));
     }
 
     #[test]
@@ -7260,16 +7386,12 @@ mod tests {
             Some("payments"),
             None,
         );
-        assert!(
-            items
-                .iter()
-                .any(|item| item.source_type == "support_catalog")
-        );
-        assert!(
-            !items
-                .iter()
-                .any(|item| item.source_type == "deployment_closure_policy")
-        );
+        assert!(items
+            .iter()
+            .any(|item| item.source_type == "support_catalog"));
+        assert!(!items
+            .iter()
+            .any(|item| item.source_type == "deployment_closure_policy"));
     }
 
     #[test]
@@ -7297,16 +7419,12 @@ mod tests {
             None,
             false,
         );
-        assert!(
-            items
-                .iter()
-                .any(|item| item.source_type == "support_catalog")
-        );
-        assert!(
-            !items
-                .iter()
-                .any(|item| item.source_type == "deployment_closure_policy")
-        );
+        assert!(items
+            .iter()
+            .any(|item| item.source_type == "support_catalog"));
+        assert!(!items
+            .iter()
+            .any(|item| item.source_type == "deployment_closure_policy"));
     }
 
     #[test]

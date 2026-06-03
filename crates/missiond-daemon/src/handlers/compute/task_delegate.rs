@@ -26,6 +26,8 @@ const EXCLUDED_ROLES: &[&str] = &["jarvis", "memory", "supervisor", "decision"];
 /// Phase 6.2: Valid intent whitelist — reject unknown intents instead of silent fallback.
 const VALID_INTENTS: &[&str] = &["code", "ops", "deploy-ops", "research", "general"];
 
+const DEPLOY_OPS_OUTPUT_CONTRACT: &str = "return exactly one deploy-ops artifact type: preflight-report | release-evidence-review | closure-verdict-review | rollback-plan | postmortem";
+
 /// Phase 6.3: Context injection size limits.
 const MAX_ENTRY_CHARS: usize = 500; // Per KB/Skill entry
 const MAX_CONTEXT_CHARS: usize = 2000; // Total context block
@@ -127,6 +129,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             .map(str::to_string),
         accepted_shard_id: string_arg(&args, &["accepted_shard_id", "acceptedShardId"])
             .map(str::to_string),
+        output_contract: string_arg(&args, &["output_contract", "outputContract"])
+            .map(str::to_string),
         read_scope: string_list_arg(&args, &["read_scope", "readScope"]),
         write_scope: string_list_arg(&args, &["write_scope", "writeScope"]),
         must_not_touch: string_list_arg(&args, &["must_not_touch", "mustNotTouch"]),
@@ -144,6 +148,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             .unwrap_or(0) as usize,
         shared_claim_ids: Vec::new(),
         source_id: source_id.clone(),
+        mutation_approval_ref: deploy_ops_mutation_approval_ref(&args),
+        mutation_approval_source: deploy_ops_mutation_approval_source(&args),
     };
     if intent == "deploy-ops" {
         delegation_metadata
@@ -155,6 +161,20 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         delegation_metadata
             .engine_hint
             .get_or_insert_with(|| "claude-code".to_string());
+        delegation_metadata
+            .output_contract
+            .get_or_insert_with(|| DEPLOY_OPS_OUTPUT_CONTRACT.to_string());
+        if deploy_ops_write_scope_without_approval(intent, &delegation_metadata) {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    "DEPLOY_OPS_APPROVAL_REQUIRED",
+                    "mission_task_delegate refused write-scoped deploy-ops work without a deploy-center policy, explicit Board approval, or explicit user approval reference",
+                )
+                .with_suggestion(
+                    "rerun as read-only, or pass deploy_center_policy_approval_id, board_approval_id, user_approval_id, approval_id, or approval_ref",
+                ),
+            ));
+        }
     }
     let mechanic_config = match parse_mechanic_run_config(&args, &delegation_metadata) {
         Ok(config) => config,
@@ -2028,6 +2048,7 @@ struct DelegationMetadata {
     engine_hint: Option<String>,
     context_pack_path: Option<String>,
     accepted_shard_id: Option<String>,
+    output_contract: Option<String>,
     /// Paths the worker is explicitly allowed (and expected) to READ. Distinct
     /// from `write_scope` / `must_not_touch`: review-class tasks ship with a
     /// non-empty `read_scope` and an empty `write_scope`, making the
@@ -2046,6 +2067,8 @@ struct DelegationMetadata {
     /// original anchor visible so dedup can refuse a second concurrent code
     /// worker even when the immediate parent shifts.
     source_id: Option<String>,
+    mutation_approval_ref: Option<String>,
+    mutation_approval_source: Option<String>,
 }
 
 fn delegation_runtime_metadata(
@@ -2063,6 +2086,7 @@ fn delegation_runtime_metadata(
             "engine_hint": metadata.engine_hint,
             "context_pack_path": metadata.context_pack_path,
             "accepted_shard_id": metadata.accepted_shard_id,
+            "output_contract": metadata.output_contract,
             "read_scope": metadata.read_scope,
             "write_scope": metadata.write_scope,
             "must_not_touch": metadata.must_not_touch,
@@ -2075,6 +2099,8 @@ fn delegation_runtime_metadata(
             "parent_board_task_id": parent_id,
             "project_id": project_id,
             "project_root": project_root,
+            "mutation_approval_ref": metadata.mutation_approval_ref,
+            "mutation_approval_source": metadata.mutation_approval_source,
             "authority": {
                 "control_state": "task_contracts",
                 "description": "prompt_projection"
@@ -2760,6 +2786,12 @@ fn exact_shard_ready(metadata: &DelegationMetadata) -> bool {
         && !metadata.write_scope.is_empty()
 }
 
+fn deploy_ops_write_scope_without_approval(intent: &str, metadata: &DelegationMetadata) -> bool {
+    intent == "deploy-ops"
+        && !metadata.write_scope.is_empty()
+        && metadata.mutation_approval_ref.is_none()
+}
+
 fn dispatch_grounding_required(metadata: &DelegationMetadata, emergency_code_first: bool) -> bool {
     if emergency_code_first || exact_shard_ready(metadata) {
         return false;
@@ -3411,6 +3443,46 @@ fn string_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+fn deploy_ops_mutation_approval_ref(args: &Value) -> Option<String> {
+    string_arg(
+        args,
+        &[
+            "deploy_center_policy_approval_id",
+            "deployCenterPolicyApprovalId",
+            "board_approval_id",
+            "boardApprovalId",
+            "user_approval_id",
+            "userApprovalId",
+            "approval_id",
+            "approvalId",
+            "approval_ref",
+            "approvalRef",
+        ],
+    )
+    .map(str::to_string)
+}
+
+fn deploy_ops_mutation_approval_source(args: &Value) -> Option<String> {
+    if string_arg(
+        args,
+        &[
+            "deploy_center_policy_approval_id",
+            "deployCenterPolicyApprovalId",
+        ],
+    )
+    .is_some()
+    {
+        return Some("deploy-center-policy".to_string());
+    }
+    if string_arg(args, &["board_approval_id", "boardApprovalId"]).is_some() {
+        return Some("explicit-board-approval".to_string());
+    }
+    if string_arg(args, &["user_approval_id", "userApprovalId"]).is_some() {
+        return Some("explicit-user-approval".to_string());
+    }
+    string_arg(args, &["approval_source", "approvalSource"]).map(str::to_string)
+}
+
 fn bool_arg(args: &Value, keys: &[&str]) -> Option<bool> {
     keys.iter().find_map(|key| {
         let value = args.get(*key)?;
@@ -3504,6 +3576,9 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     if let Some(value) = &metadata.accepted_shard_id {
         lines.push(format!("- accepted_shard_id: {}", value));
     }
+    if let Some(value) = &metadata.output_contract {
+        lines.push(format!("- output_contract: {}", value));
+    }
     if let Some(value) = &metadata.grounding_context_id {
         lines.push(format!("- grounding_context_id: {}", value));
     }
@@ -3546,6 +3621,12 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     if let Some(value) = &metadata.source_id {
         lines.push(format!("- source_board_task_id: {}", value));
     }
+    if let Some(value) = &metadata.mutation_approval_ref {
+        lines.push(format!("- mutation_approval_ref: {}", value));
+    }
+    if let Some(value) = &metadata.mutation_approval_source {
+        lines.push(format!("- mutation_approval_source: {}", value));
+    }
     if !metadata.read_scope.is_empty()
         || !metadata.write_scope.is_empty()
         || !metadata.must_not_touch.is_empty()
@@ -3575,7 +3656,7 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     }
     if matches!(metadata.task_class.as_deref(), Some("deploy-ops")) {
         lines.push(
-            "- deployment_contract: query deploy-center/provenance first; structured smoke evidence is required; use xjp_build_wait/xjp_deploy_watch or deploy-center events for CI/build waiting; raw gh api polling loops are forbidden; do not mutate production, DNS, Cloudflare, or secrets without explicit approval"
+            "- deployment_contract: query deploy-center/provenance first; produce exactly one of preflight-report, release-evidence-review, closure-verdict-review, rollback-plan, or postmortem; use xjp_build_wait/xjp_deploy_watch or deploy-center events for CI/build waiting; raw gh api polling loops are forbidden; do not mutate production deploys, rollback, DNS, Cloudflare, secrets, SSH, or break-glass paths without deploy-center policy or explicit Board/user approval"
                 .to_string(),
         );
     }
@@ -4516,6 +4597,7 @@ data: {"type":"final","task_id":"t1","status":"done","at":"now"}
             engine_hint: Some("claude-code".to_string()),
             context_pack_path: Some(".missiond/tasks/wave99/context-pack.lisp".to_string()),
             accepted_shard_id: None,
+            output_contract: None,
             read_scope: vec!["crates/missiond-core/src/types/board.rs".to_string()],
             write_scope: vec!["crates/a.rs".to_string()],
             must_not_touch: vec!["packages/**".to_string()],
@@ -4525,6 +4607,8 @@ data: {"type":"final","task_id":"t1","status":"done","at":"now"}
             grounding_sources: vec!["project_registry".to_string()],
             grounding_evidence_refs_count: 1,
             source_id: None,
+            mutation_approval_ref: None,
+            mutation_approval_source: None,
         };
         let block = render_delegation_metadata_block(&metadata);
         for expected in [
@@ -4586,6 +4670,7 @@ data: {"type":"final","task_id":"t1","status":"done","at":"now"}
             task_class: Some("deploy-ops".to_string()),
             engine_hint: Some("claude-code".to_string()),
             pool_hint: Some("claude-code-deploy-ops".to_string()),
+            output_contract: Some(DEPLOY_OPS_OUTPUT_CONTRACT.to_string()),
             read_scope: vec!["deploy-center provenance".to_string()],
             write_scope: Vec::new(),
             must_not_touch: vec!["production DNS".to_string(), "secrets".to_string()],
@@ -4597,9 +4682,52 @@ data: {"type":"final","task_id":"t1","status":"done","at":"now"}
             "- task_class: deploy-ops",
             "- pool_hint: claude-code-deploy-ops",
             "- engine_hint: claude-code",
+            "preflight-report, release-evidence-review, closure-verdict-review, rollback-plan, or postmortem",
             "- deployment_contract: query deploy-center/provenance first",
         ] {
             assert!(block.contains(expected), "missing {expected}: {block}");
+        }
+    }
+
+    #[test]
+    fn deploy_ops_write_scope_requires_approval_reference() {
+        let mut metadata = DelegationMetadata {
+            task_class: Some("deploy-ops".to_string()),
+            write_scope: vec!["prod://payments".to_string()],
+            ..DelegationMetadata::default()
+        };
+        assert!(deploy_ops_write_scope_without_approval(
+            "deploy-ops",
+            &metadata
+        ));
+        metadata.mutation_approval_ref = Some("board-approval-123".to_string());
+        assert!(!deploy_ops_write_scope_without_approval(
+            "deploy-ops",
+            &metadata
+        ));
+    }
+
+    #[test]
+    fn deploy_ops_approval_ref_accepts_policy_board_or_user_refs() {
+        for (payload, expected_source) in [
+            (
+                json!({"deploy_center_policy_approval_id": "policy-1"}),
+                "deploy-center-policy",
+            ),
+            (
+                json!({"board_approval_id": "board-1"}),
+                "explicit-board-approval",
+            ),
+            (
+                json!({"user_approval_id": "user-1"}),
+                "explicit-user-approval",
+            ),
+        ] {
+            assert!(deploy_ops_mutation_approval_ref(&payload).is_some());
+            assert_eq!(
+                deploy_ops_mutation_approval_source(&payload).as_deref(),
+                Some(expected_source)
+            );
         }
     }
 

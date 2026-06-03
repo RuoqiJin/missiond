@@ -1,6 +1,6 @@
 ---
 name: independent-app-bootstrap
-description: Create or update project SKILL.md files and MissionD M6 SSOT scaffolding for independent apps. Use when the user wants a reusable template for new standalone web apps, needs stack selection guidance, wants frontend/backend deployed to Vercel, wants Supabase connected quickly, or wants the project registered in MissionD project universe.
+description: Create or update project SKILL.md files and MissionD M6 SSOT scaffolding for independent apps. Use when the user wants a reusable template for new standalone web apps, needs stack/deployment guidance, wants Vercel frontend plus privatecloud/deploy-center Rust backend deployment, wants Supabase/Postgres connected quickly, or wants the project registered in MissionD project universe.
 ---
 
 # Independent App Bootstrap
@@ -37,7 +37,7 @@ Before writing the project skill, collect or infer:
 - App type: CRUD/admin tool, editor/exporter, simulation/game, local-agent bridge, AI tool, marketplace/content app.
 - Required surfaces: frontend, backend API, local agent, background jobs, public API, auth, billing, object storage.
 - Data classes: public, private user content, SPI, payment ledger, WeChat/local-device data, generated media.
-- Deployment target: Vercel only, Vercel + ECS, local agent + Vercel, or other.
+- Deployment target: Vercel frontend only, Vercel frontend + GCP/ECS Rust API, local agent + cloud API, or other.
 - Auth choice: XJP Auth, Supabase Auth, private single-user gate, or none for public tools.
 - DB choice and region: Supabase shared project, dedicated Supabase project, or no DB.
 
@@ -48,10 +48,10 @@ If facts are missing but a safe default exists, proceed with explicit assumption
 Default stack for XJP/MissionD standalone apps:
 
 - Frontend: `Next.js 16 + React 19 + TypeScript + Tailwind 4`.
-- Backend: `Rust axum 0.8 + sqlx 0.8 + PostgreSQL` as a Vercel Rust Function.
+- Backend: `Rust axum 0.8 + sqlx 0.8 + PostgreSQL`, built through deploy-center approved privatecloud/codebase build lane.
 - DB: Supabase Postgres, using pooler session mode on port `5432`.
 - Auth: XJP Auth with PKCE for user apps; service API key or ingest token for machine endpoints.
-- Deployment: Vercel Services with frontend route `/` and backend route `/api`.
+- Deployment: Vercel frontend plus deploy-center runtime deployment for Rust APIs. GCP/ECS runtime targets pull built artifacts; they do not compile Rust or run `docker compose up --build`.
 
 Use simpler Next.js full-stack route handlers when:
 
@@ -72,9 +72,24 @@ Use Rust backend by default for:
 
 - Games/simulations, payment/auth-sensitive flows, durable event logs, local-agent ingest, strict authorization, API products, or any project intended to become M6 in MissionD.
 
-## Vercel Deployment Pattern
+## Frontend Vercel + Privatecloud Rust Build Pattern
 
-For Rust backend + Next frontend, use a root `vercel.json` like this:
+Default: Vercel deploys only the frontend. The Rust backend build goes through deploy-center privatecloud/codebase build lane, then the runtime target pulls/recreates the already-built artifact.
+
+Do not run `cargo build`, `docker build`, or `docker compose up --build` on GCP production VMs for product-service Rust backends. GCP VM is a runtime target, not a Rust builder.
+
+Use a root `vercel.json` for frontend deployment, such as:
+
+```json
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm --dir frontend build",
+  "installCommand": "pnpm --dir frontend install",
+  "outputDirectory": "frontend/.next"
+}
+```
+
+Only use Vercel Services / Rust Functions as a recorded MissionD/deploy-center exception. If a legacy exception exists, the shape may look like:
 
 ```json
 {
@@ -93,9 +108,9 @@ For Rust backend + Next frontend, use a root `vercel.json` like this:
 }
 ```
 
-Vercel does not strip `routePrefix`. If routePrefix is `/api`, axum routes must include `/api/...`.
+Vercel does not strip `routePrefix`. If an explicit `experimentalServices` exception uses routePrefix `/api`, axum routes must include `/api/...`.
 
-Backend `Cargo.toml` should have a local binary and a Vercel function binary:
+Backend `Cargo.toml` should have a local binary. Add a Vercel function binary only when an explicit exception exists:
 
 ```toml
 [lib]
@@ -106,6 +121,7 @@ path = "src/lib.rs"
 name = "<project-id>-backend"
 path = "src/main.rs"
 
+# Explicit Vercel Rust exception only.
 [[bin]]
 name = "axum"
 path = "api/axum.rs"
@@ -115,7 +131,7 @@ Backend layout:
 
 ```text
 backend/
-  api/axum.rs      # Vercel entry, wraps build_app(pool) with VercelLayer
+  api/axum.rs      # optional Vercel exception entry, not default
   src/lib.rs       # build_app, connect_db, shared app state
   src/main.rs      # local dev server; may run migrations locally only
   src/api.rs       # routes and handlers
@@ -133,6 +149,27 @@ frontend/
   src/lib/auth*.ts # PKCE/Auth helpers when needed
   src/proxy.ts     # Next 16 auth marker-cookie gate when needed
 ```
+
+## Rust Build Lane
+
+Required production chain for Rust product-service backends:
+
+```text
+release commit
+  -> deploy-center/codebase source sync
+  -> privatecloud Rust build
+  -> image or binary artifact with digest/provenance
+  -> runtime target pull/recreate
+  -> public and local health smoke
+```
+
+Rules:
+
+- The default builder is the deploy-center approved privatecloud/codebase lane (`privatecloud-10900kf` in MissionD SSOT).
+- GitHub Actions, Vercel, and local Codex sessions may trigger or inspect the rollout, but they are not the Rust release builder by default.
+- Runtime targets such as GCP VM and ECS receive already-built artifacts and report deploy-center provenance.
+- Operator laptop builds are break-glass bootstrap only and must create follow-up lane repair evidence.
+- Record the build lane, runtime target, artifact digest, smoke URLs, and rollback artifact in the project operations SSOT.
 
 ## Supabase Fast Path
 
@@ -221,7 +258,11 @@ Document project ref, region, connection mode, table names, migration command, a
 
 ## Vercel
 
-Document `vercel.json`, route prefixes, env vars, production domain, and how to trigger/check deployments.
+Document frontend `vercel.json`, env vars, production domain, and how to trigger/check frontend deployments. Route prefixes for Rust APIs belong in the backend/runtime section unless the project has an explicit Vercel Rust exception.
+
+## Deploy Center / Privatecloud
+
+Document the Rust build lane, privatecloud builder, runtime target, artifact digest/provenance surface, smoke URLs, rollback artifact, and the rule that production GCP/ECS targets do not run `cargo build`, `docker build`, or `docker compose up --build`.
 
 ## Auth
 
@@ -239,7 +280,7 @@ node scripts/check-project-ssot-universe.mjs --engine=ocaml --json
 
 ## Known Pitfalls
 
-Capture only project-specific pitfalls: routePrefix behavior, Supabase pooler, local agent permissions, region separation, billing boundary, or deployment blockers.
+Capture only project-specific pitfalls: privatecloud build lane, target-VM build prohibition, routePrefix exception behavior, Supabase pooler, local agent permissions, region separation, billing boundary, or deployment blockers.
 
 ## Current State
 

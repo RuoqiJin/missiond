@@ -136,7 +136,7 @@
       :deployment (:substrate deploy-center :dc_slug "xjp-deploy-center" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-deploy-center" :default-port 8090 :authority release-provenance :provenance-api "/api/deploy/provenance/:project")
       :deployment-confirmation (:checker "node scripts/check-m6-deployment-status.mjs --json" :status-api "/api/deploy/status" :rollout-workflow ".missiond/workflows/m6-deployment-rollout.lisp")
       :event-ingest (:endpoint "/webhooks/deploy-center-event" :domain system :event ExternalServiceEvent :source deploy_events :token-env MISSIOND_EXTERNAL_WEBHOOK_TOKEN :authority deploy-center.deploy_events :rule "deploy-center relays durable deploy_events rows into MissionD EventBridge with stable event_id and MissionD idempotency; MissionD must not infer production release state by stitching GitHub/curl/git when deploy-center has provenance.")
-      :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed workflow_run_created workflow_job_started workflow_job_succeeded workflow_job_failed workflow_job_cancelled workflow_job_lease_expired artifact_recorded smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed]
+      :events [deploy_created build_started build_succeeded build_failed deploy_started deploy_succeeded deploy_failed workflow_run_created workflow_job_started workflow_job_succeeded workflow_job_failed workflow_job_cancelled workflow_job_lease_expired artifact_recorded smoke_succeeded smoke_failed rollback_started rollback_succeeded rollback_failed agent_heartbeat agent_update_started agent_update_succeeded agent_update_failed provenance_changed closure_verdict]
       :health ["/api/deploy/health" "/api/deploy/healthz/db"]
       :dependencies [xjp-pg-prod secret-store deploy-agent github-actions ghcr]
       :ops-capability deploy-ops
@@ -432,13 +432,14 @@
       :dns-provider cloudflare
       :dns-records [(:type CNAME :name "goodnews.xiaojinpro.top" :content "cname.vercel-dns.com" :proxied false :authority xjp-domain-service :status planned)
                     (:type A :name "goodnews-api.xiaojinpro.top" :content "34.104.147.118" :proxied false :authority xjp-domain-service :status planned)]
-      :deployment (:substrate gcp-vm :runtime-target gcp-runtime :container "good-things-daily-backend" :local-bind "127.0.0.1:4017" :proxy caddy :database "xjp-pg-prod/good_things_daily" :authority deploy-center-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "backend/Dockerfile" :image "ghcr.io/ruoqijin/good-things-daily-backend" :artifact-lane cloud-registry-lane :manifest "service.manifest.toml" :target-side-build-prohibited true :provenance [source_commit builder_id image_digest target_image rollback_image])
+      :deployment (:substrate gcp-vm :runtime-target gcp-runtime :container "good-things-daily-backend" :local-bind "127.0.0.1:4017" :proxy caddy :database "xjp-pg-prod/good_things_daily" :compose "deploy/gcp-vm/compose.yaml" :image-env GOOD_THINGS_BACKEND_IMAGE :target-side-build-prohibited true :authority deploy-center-provenance)
       :frontend-deployment (:substrate vercel :project "rickyjim626/good-things-daily" :root-directory "frontend" :production-domain "goodnews.xiaojinpro.top")
       :health ["https://goodnews.xiaojinpro.top/" "https://goodnews-api.xiaojinpro.top/api/health" "https://goodnews-api.xiaojinpro.top/api/v1/feed/today?lang=zh" "https://goodnews-api.xiaojinpro.top/api/v1/digests/today?lang=zh"]
       :dependencies [xjp-router xjp-pg-prod secret-store vercel cloudflare xjp-domain-service]
       :llm-provider (:authority xjp-router :endpoint "/v1/chat/completions" :model "claude-opus-4-6" :env [XJP_ROUTER_BASE_URL XJP_ROUTER_SERVICE_TOKEN GOOD_THINGS_TITLE_MODEL] :rule "Home feed headlines are story_presentations.what_happened values created through xjp-router claude-opus-4-6 prompt open-door-joy-presentation-v1; generated_title is the fallback/detail headline; source_title remains evidence only and must not be rendered as the primary public title.")
       :ops-capability deploy-ops
-      :source-evidence ["/Users/jinchen/Projects/good-things-daily/.missiond/intent.lisp" "/Users/jinchen/Projects/good-things-daily/.missiond/check.sh"]
+      :source-evidence ["/Users/jinchen/Projects/good-things-daily/.missiond/intent.lisp" "/Users/jinchen/Projects/good-things-daily/.missiond/check.sh" "/Users/jinchen/Projects/good-things-daily/service.manifest.toml" "/Users/jinchen/Projects/good-things-daily/deploy/deploy-center/project.json"]
       :risks [presentation-layer-regression-pending feedback-event-regression-pending feed-browser-smoke-pending scheduled-job-runner-pending]
       :surface service-runtime-universe)
     (capability :id cloudflare-dns

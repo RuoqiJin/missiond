@@ -24,6 +24,8 @@ Default frontend: `Next.js 16 + React 19 + TypeScript + Tailwind 4`.
 
 Default backend: `Rust axum + sqlx + PostgreSQL`.
 
+Rust production builds are not Vercel or target-VM builds by default. Product-service Rust backends use the deploy-center approved privatecloud/codebase build lane, then deploy built artifacts to the runtime target.
+
 Use Next.js route handlers only for thin CRUD/BFF APIs. Keep Vite only for existing Vite apps or browser-heavy editor/exporter surfaces.
 
 ## Layout
@@ -33,7 +35,7 @@ Independent full-stack layout:
 ```text
 frontend/
 backend/
-  api/axum.rs
+  api/axum.rs      # optional, explicit Vercel Rust exception only
   src/lib.rs
   src/main.rs
   src/api.rs
@@ -137,6 +139,53 @@ Do not guess the pooler host. Do not run production migrations during Vercel col
 
 Shared Supabase projects require table namespacing. Data-bearing services must declare region, data classes, retention, and cross-region default in MissionD SSOT.
 
+## Rust Build Lane
+
+Default Rust backend build lane:
+
+```text
+release commit
+  -> deploy-center/codebase source sync
+  -> privatecloud Rust build
+  -> image or binary artifact with digest/provenance
+  -> runtime target pull/recreate
+  -> health smoke and deploy-center provenance
+```
+
+The builder is the deploy-center approved privatecloud/codebase lane, currently represented in MissionD as `privatecloud-10900kf`. This applies even when the runtime target is a GCP VM.
+
+Do not run `cargo build`, `docker build`, or `docker compose up --build` on GCP production VMs for product-service Rust backends. A GCP VM deploy stage should only pull or receive an already-built artifact, recreate the service, and report smoke/provenance.
+
+GitHub Actions or Vercel may trigger control-plane events, but they are not the release evidence for Rust backend compilation unless MissionD/deploy-center records an explicit exception. Operator laptop builds are break-glass bootstrap only and need follow-up lane repair.
+
+## Deployment Closure Bundle
+
+Before a new product service reaches production deploy, generate the closure bundle:
+
+```bash
+node scripts/scaffold-product-deployment-closure.mjs \
+  --project-id <project-id> \
+  --name "<Product Name>" \
+  --domain <frontend-domain> \
+  --api-domain <api-domain> \
+  --out /Users/jinchen/Projects/<project-id>
+```
+
+The bundle creates `service.manifest.toml`, Deploy Center project config, runtime target, DB adoption plan, domain plan, rollback plan, Vercel projection, GCP compose runtime, and `.missiond/check.sh`.
+
+Production deployment is fail-closed if any of these are missing:
+
+- `service.manifest.toml`
+- Deploy Center project slug/config
+- runtime target
+- Secret Store refs
+- DB adoption plan
+- domain/DNS plan
+- rollback artifact plan
+- deep smoke and runtime digest observation
+
+Generated GCP compose files must consume immutable image digests and must not contain `build:`. Vercel success, GitHub success, and curl probes are evidence only; deployed status still requires Deploy Center `ReleaseEvidence + ClosureVerdict`.
+
 ## Secrets
 
 Secret values never go into Lisp, Markdown, `.env.example`, `vercel.json`, or code.
@@ -163,7 +212,20 @@ Common env names:
 
 ## Vercel
 
-Default full-stack deployment uses Vercel Services:
+Default Vercel deployment is frontend-only. Use Vercel for the Next.js app, production domains, and public env projection; use deploy-center/privatecloud for Rust backend builds and runtime deploys.
+
+Frontend default:
+
+```json
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm --dir frontend build",
+  "installCommand": "pnpm --dir frontend install",
+  "outputDirectory": "frontend/.next"
+}
+```
+
+If a legacy or experimental service still uses Vercel Services, record the exception in MissionD/deploy-center before scaffolding it. Example exception shape:
 
 ```json
 {
@@ -182,7 +244,7 @@ Default full-stack deployment uses Vercel Services:
 }
 ```
 
-Vercel does not strip `routePrefix`; axum routes must include `/api/...`.
+Vercel does not strip `routePrefix`; if an explicit exception uses `experimentalServices` with `routePrefix` `/api`, axum routes must include `/api/...`.
 
 ## MissionD Registration
 

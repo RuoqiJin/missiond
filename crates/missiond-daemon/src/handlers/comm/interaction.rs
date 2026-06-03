@@ -187,7 +187,9 @@ fn string_value(value: &Value, key: &str) -> Option<String> {
 
 fn status_next_action(phase: &str) -> &'static str {
     match phase {
-        "terminal_event_replayed" => "render terminal_event/result artifact and close the client-side follow loop",
+        "terminal_event_replayed" => {
+            "render terminal_event/result artifact and close the client-side follow loop"
+        }
         "task_done_no_terminal_event" | "task_terminal_no_interaction_final" => {
             "inspect task runtime_metadata and stale-final audit; terminal task lacks a replayed interaction final"
         }

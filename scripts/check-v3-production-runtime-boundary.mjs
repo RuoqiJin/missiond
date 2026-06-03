@@ -6,6 +6,8 @@ import { runSemanticRules } from './lib/v3_semantic_rules.mjs';
 
 const FILES = {
   rustRuntime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
+  coreWsRuntime: 'crates/missiond-core/src/ws/server.rs',
+  coreContractAbi: 'crates/missiond-core/src/v3_contracts.rs',
   jsRuntime: 'scripts/lib/v3_workstation_runtime.mjs',
   contractProjector: 'scripts/project-v3-contracts.mjs',
 };
@@ -34,6 +36,17 @@ function main() {
               'load_compiled_runtime_config',
               'v3_contracts::RUNTIME_CONFIG_SOURCE_HASH',
               'Raw V3 Lisp source fallback is not a production runtime path',
+            ],
+          },
+          {
+            file: FILES.coreWsRuntime,
+            source: sources.coreWsRuntime,
+            needles: [
+              'compiled_abi_freshness_check',
+              'compiled-contract-abi.json',
+              'abi_freshness_mismatch',
+              'crate::v3_contracts::SOURCE_HASH',
+              'ABI_FRESHNESS_MISMATCH',
             ],
           },
           {
@@ -72,6 +85,7 @@ function main() {
       },
     }));
     requireAll(FILES.contractProjector, sources.contractProjector, diagnostics, [
+      'RUST_CORE_OUTPUT',
       'RuntimePolicyDescriptor',
       'RUNTIME_POLICIES',
       'payload_key',
@@ -80,6 +94,12 @@ function main() {
       'requestStateProjections',
       'scannerPolicies',
       'semanticGates',
+    ]);
+    requireAll(FILES.coreContractAbi, sources.coreContractAbi, diagnostics, [
+      'pub const SCHEMA_VERSION',
+      'pub const SOURCE_HASH',
+      'pub const RUNTIME_CONFIG_SOURCE_HASH',
+      'pub const PROJECT_UNIVERSE_SOURCE_HASH',
     ]);
   }
 

@@ -78,12 +78,10 @@ pub(super) fn board_store_error(tool: &str, err: missiond_core::db::error::DbErr
             error_codes::NOT_FOUND,
             "verify the BoardTask id; short ids are accepted only when they resolve uniquely",
         ),
-        missiond_core::db::error::DbError::EvidenceRequired { .. } => {
-            (
-                error_codes::EVIDENCE_REQUIRED,
-                "record canonical evidence first with mission_shared_memory(action=\"task_result_put\", task_id=..., result_status=\"completed\", ...), then mark the BoardTask done",
-            )
-        }
+        missiond_core::db::error::DbError::EvidenceRequired { .. } => (
+            error_codes::EVIDENCE_REQUIRED,
+            "record canonical evidence first with mission_shared_memory(action=\"task_result_put\", task_id=..., result_status=\"completed\", ...), then mark the BoardTask done",
+        ),
         missiond_core::db::error::DbError::CompletionArtifactInvalid { .. } => (
             error_codes::COMPLETION_ARTIFACT_INVALID,
             "rewrite the task-result-artifact with the required structured fields before closing the task",

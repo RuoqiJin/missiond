@@ -87,7 +87,7 @@ pub(super) async fn action_heartbeat(state: &AppState, args: &Value) -> Result<T
                 .with_suggestion(
                     "reclaim the scope so MissionD can create a work_leases-backed claim",
                 ),
-            ))
+            ));
         }
     };
 
@@ -111,7 +111,9 @@ pub(super) async fn action_heartbeat(state: &AppState, args: &Value) -> Result<T
                 "legacy_claim_id": claim_id
             }),
             allow_system_bypass: claim_bypass_allowed(args),
-            bypass_reason: Some("mission_execution heartbeat system/operator authority".to_string()),
+            bypass_reason: Some(
+                "mission_execution heartbeat system/operator authority".to_string(),
+            ),
         })
         .await
     {
@@ -120,7 +122,7 @@ pub(super) async fn action_heartbeat(state: &AppState, args: &Value) -> Result<T
             return Ok(control_error_tool_result(
                 err,
                 "provide a subject-bound claim grant or explicit system/operator bypass before heartbeating execution scope",
-            ))
+            ));
         }
     };
     if lease_heartbeat.get("ok").and_then(Value::as_bool) != Some(true) {

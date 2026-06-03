@@ -6,7 +6,7 @@
        (deploy-center :owns [runtime-target-inventory release-closure-authority release-evidence closure-verdict release-lease runtime-observation])
        (deploy-agent :owns [controlled-runtime-actions read-only-runtime-inspection evidence-reporting])
        (secret-store :owns [credential-values credential-availability])
-       (deploy-ops-agent :owns [preflight-report evidence-review rollback-plan postmortem]))
+       (deploy-ops-agent :owns [preflight-report release-evidence-review closure-verdict-review rollback-plan postmortem]))
     :release-state-machine
       (:states [classify_change preflight build_candidate acquire_release_lease deploy runtime_observe deep_smoke closure_verdict release_or_rollback]
       :rules ["build_succeeded means only that an artifact was produced."
@@ -44,6 +44,7 @@
        "MissionD self-deploy MUST compare the candidate git_full_sha with the current active release commit and fail closed when the candidate is behind or divergent, unless an explicit commit-regression override is present."
        "MissionD self-deploy MUST treat compiled runtime projections as release artifacts: compile them under the candidate release and switch MISSIOND_COMPILED_RUNTIME_DIR only with the active release, so failed deploys cannot leave source/ABI freshness mismatches."
        "deploy-ops agents may audit, plan, and collect approved read-only diagnostics by default, but production deploy, rollback, DNS mutation, secret mutation, SSH, and break-glass actions require deploy-center policy or explicit Board/user approval."
+       "deploy-ops agent outputs MUST be exactly one of preflight-report, release-evidence-review, closure-verdict-review, rollback-plan, or postmortem; generic Findings/Evidence summaries are not closure artifacts for deploy-ops tasks."
        "Production resolver/readiness MUST surface abi_freshness_mismatch when binary/runtime compiled hashes disagree; silent candidate fallback is forbidden for closure decisions."]
     :diagnostics [reported_digest_missing runtime_digest_mismatch provenance_partial db_adoption_required abi_freshness_mismatch release_lease_conflict deployment_lane_mismatch deploy_blocked_by_secret_store target_digest_missing final_runtime_digest_missing final_source_commit_missing source_commit_mismatch]
     :surfaces [deployment-event-ingest m6-deployment-confirmation deployment-evidence-preflight deploy-agent-self-update-governance mission_project mission_timeline.wait compiled-deployment-policy scripts/deploy-daemon.sh deploy-center-release-closure-ledger]

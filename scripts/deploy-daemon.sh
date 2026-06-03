@@ -283,6 +283,10 @@ BUILD_ONLY_RUNTIME_TMP=""
 CANDIDATE_DIR=""
 CANDIDATE_COMPILED_RUNTIME_DIR=""
 RELEASE_ID=""
+SELF_DEPLOY_LEASE_ROOT="${MISSIOND_SELF_DEPLOY_LEASE_ROOT:-${INSTALL_ROOT}/release-lease.lock}"
+SELF_DEPLOY_LEASE_TTL_SECS="${MISSIOND_SELF_DEPLOY_LEASE_TTL_SECS:-1800}"
+SELF_DEPLOY_LEASE_HELD=0
+SELF_DEPLOY_LEASE_ID=""
 export MISSIOND_RUNTIME_DIR="$RUNTIME_DIR"
 export MISSIOND_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"
 
@@ -293,7 +297,19 @@ cleanup_build_only_runtime_tmp() {
     rm -rf "$BUILD_ONLY_RUNTIME_TMP"
   fi
 }
-trap cleanup_build_only_runtime_tmp EXIT
+
+release_self_deploy_release_lease() {
+  if [ "$SELF_DEPLOY_LEASE_HELD" -eq 1 ] && [ -d "$SELF_DEPLOY_LEASE_ROOT" ]; then
+    rm -rf "$SELF_DEPLOY_LEASE_ROOT"
+    log "release-lease: released $SELF_DEPLOY_LEASE_ID"
+  fi
+}
+
+cleanup_on_exit() {
+  cleanup_build_only_runtime_tmp
+  release_self_deploy_release_lease
+}
+trap cleanup_on_exit EXIT
 
 ensure_codex_app_cli_on_path() {
   if command -v codex >/dev/null 2>&1; then
@@ -800,6 +816,59 @@ truthy_env_value() {
   esac
 }
 
+acquire_self_deploy_release_lease() {
+  mkdir -p "$INSTALL_ROOT"
+  SELF_DEPLOY_LEASE_ID="missiond-daemon:${RELEASE_ID}:$$"
+  if ! mkdir "$SELF_DEPLOY_LEASE_ROOT" 2>/dev/null; then
+    log "release-lease: conflict lock=$SELF_DEPLOY_LEASE_ROOT"
+    if [ -f "$SELF_DEPLOY_LEASE_ROOT/release-lease.json" ]; then
+      sed 's/^/[release-lease-conflict] /' "$SELF_DEPLOY_LEASE_ROOT/release-lease.json" >&2 || true
+    fi
+    return 1
+  fi
+  SELF_DEPLOY_LEASE_HELD=1
+  SELF_DEPLOY_LEASE_ROOT_VALUE="$SELF_DEPLOY_LEASE_ROOT" \
+  SELF_DEPLOY_LEASE_ID_VALUE="$SELF_DEPLOY_LEASE_ID" \
+  SELF_DEPLOY_LEASE_TTL_SECS_VALUE="$SELF_DEPLOY_LEASE_TTL_SECS" \
+  SELF_DEPLOY_RELEASE_ID_VALUE="$RELEASE_ID" \
+  SELF_DEPLOY_SERVICE_VALUE="missiond-daemon" \
+  SELF_DEPLOY_RUNTIME_TARGET_VALUE="local-launchd" \
+  SELF_DEPLOY_OWNER_VALUE="scripts/deploy-daemon.sh:$$" \
+  SELF_DEPLOY_OWNER_ROOT_VALUE="$DEPLOY_OWNER_ROOT" \
+  SELF_DEPLOY_EXPECTED_ACTIVE_ROOT_VALUE="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$DEPLOY_OWNER_ROOT}" \
+  SELF_DEPLOY_EXPECTED_ACTIVE_RELEASE_VALUE="${EXPECTED_ACTIVE_RELEASE:-}" \
+  SELF_DEPLOY_INITIAL_ACTIVE_VALUE="${INITIAL_ACTIVE_RELEASE:-}" \
+  SELF_DEPLOY_ACTIVE_LINK_VALUE="$ACTIVE_LINK" \
+  SELF_DEPLOY_GIT_SHA_VALUE="$GIT_FULL_SHA" \
+  node <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.env.SELF_DEPLOY_LEASE_ROOT_VALUE;
+const now = new Date();
+const ttlSecs = Number(process.env.SELF_DEPLOY_LEASE_TTL_SECS_VALUE || 1800);
+const lease = {
+  schema: 'missiond.release-lease.v1',
+  id: process.env.SELF_DEPLOY_LEASE_ID_VALUE,
+  service: process.env.SELF_DEPLOY_SERVICE_VALUE,
+  runtime_target: process.env.SELF_DEPLOY_RUNTIME_TARGET_VALUE,
+  release_id: process.env.SELF_DEPLOY_RELEASE_ID_VALUE,
+  owner: process.env.SELF_DEPLOY_OWNER_VALUE,
+  expected_active_root: process.env.SELF_DEPLOY_EXPECTED_ACTIVE_ROOT_VALUE || null,
+  expected_active_release: process.env.SELF_DEPLOY_EXPECTED_ACTIVE_RELEASE_VALUE || null,
+  initial_active_release: process.env.SELF_DEPLOY_INITIAL_ACTIVE_VALUE || null,
+  expected_running_digest: process.env.SELF_DEPLOY_GIT_SHA_VALUE || null,
+  active_link: process.env.SELF_DEPLOY_ACTIVE_LINK_VALUE || null,
+  owner_root: process.env.SELF_DEPLOY_OWNER_ROOT_VALUE || null,
+  conflict_policy: 'fail-closed-local-lease-project-root-active-release-generation-and-commit-ancestry',
+  created_at: now.toISOString(),
+  expires_at: new Date(now.getTime() + ttlSecs * 1000).toISOString(),
+};
+fs.writeFileSync(path.join(root, 'release-lease.json'), `${JSON.stringify(lease, null, 2)}\n`, { mode: 0o600 });
+NODE
+  chmod 700 "$SELF_DEPLOY_LEASE_ROOT"
+  log "release-lease: acquired $SELF_DEPLOY_LEASE_ID lock=$SELF_DEPLOY_LEASE_ROOT"
+}
+
 capture_expected_active_release() {
   INITIAL_ACTIVE_RELEASE="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
   EXPECTED_ACTIVE_RELEASE="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_RELEASE:-$INITIAL_ACTIVE_RELEASE}"
@@ -1097,6 +1166,8 @@ write_self_deploy_closure_files() {
   SELF_DEPLOY_SMOKE_STATUS="$smoke_status" \
   SELF_DEPLOY_NEXT_ACTION="$next_action" \
   SELF_DEPLOY_ACTIVE_LINK="$ACTIVE_LINK" \
+  SELF_DEPLOY_LEASE_ID="${SELF_DEPLOY_LEASE_ID:-}" \
+  SELF_DEPLOY_LEASE_ROOT="${SELF_DEPLOY_LEASE_ROOT:-}" \
   SELF_DEPLOY_PREVIOUS_ACTIVE="${PREVIOUS_ACTIVE:-}" \
   SELF_DEPLOY_INITIAL_ACTIVE="${INITIAL_ACTIVE_RELEASE:-}" \
   SELF_DEPLOY_EXPECTED_ACTIVE_RELEASE="${EXPECTED_ACTIVE_RELEASE:-}" \
@@ -1136,9 +1207,11 @@ const evidence = {
     compiled_abi_hash: manifest.typed_lisp_runtime?.projections?.v3?.source_hash ?? null,
   },
   release_lease: {
+    id: process.env.SELF_DEPLOY_LEASE_ID || null,
     service: 'missiond-daemon',
     runtime_target: 'local-launchd',
     owner: 'scripts/deploy-daemon.sh',
+    lock_path: process.env.SELF_DEPLOY_LEASE_ROOT || null,
     expected_active_root: process.env.SELF_DEPLOY_EXPECTED_ACTIVE_ROOT || null,
     expected_active_release: process.env.SELF_DEPLOY_EXPECTED_ACTIVE_RELEASE || null,
     expected_active_commit: manifest.active_git_sha || null,
@@ -1300,6 +1373,8 @@ if [ "$DO_DEPLOY" -eq 1 ]; then
   RELEASE_ID="${MISSIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${GIT_SHA}-${PROFILE}}"
   CANDIDATE_DIR="$RELEASES_DIR/$RELEASE_ID"
   [ ! -e "$CANDIDATE_DIR" ] || fail "candidate release already exists: $CANDIDATE_DIR" 1
+  acquire_self_deploy_release_lease ||
+    fail "release lease conflict; refusing concurrent MissionD self-deploy" 1
   CANDIDATE_COMPILED_RUNTIME_DIR="$CANDIDATE_DIR/compiled-runtime"
   COMPILED_RUNTIME_DIR="$CANDIDATE_COMPILED_RUNTIME_DIR"
   export MISSIOND_COMPILED_RUNTIME_DIR="$COMPILED_RUNTIME_DIR"

@@ -597,11 +597,7 @@ fn build_followup_task_input(
     );
     let description = format!(
         "Review MissionD self-evolution proposal artifact(s).\n\nMode: {}\nReason: {}\nFailed stage: {}\nFinding ids: {}\n\nProposal paths:\n{}\n\nAcceptance:\n1. Read the proposal Lisp artifact(s) and referenced SSOT/checker evidence.\n2. Decide whether to approve, reject, or ask for a narrower exact shard.\n3. Do not edit code, Lisp, or checker files from this review task.",
-        options.mode,
-        options.reason,
-        failed_stage,
-        finding_ids,
-        proposal_path_text,
+        options.mode, options.reason, failed_stage, finding_ids, proposal_path_text,
     );
     CreateBoardTaskInput {
         title: format!("Review nightly self-evolution proposals: {}", options.mode),

@@ -2507,11 +2507,11 @@ impl AgyProviderDriver {
         request: &ProviderInteractionRequest,
         result: &mut ProviderBoxResult,
         slot_id: &str,
-    ) {
+    ) -> bool {
         let mut cleanup = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
         self.clear_screen_locked(&mut cleanup, slot_id).await;
         if cleanup.status == ProviderBoxStatus::Completed {
-            return;
+            return false;
         }
         let observation = self.observe(slot_id).await;
         result.add_diagnostic(ProviderBoxDiagnostic::warning(
@@ -2538,6 +2538,7 @@ impl AgyProviderDriver {
                             "next_request": "cold_start_and_reverify_pinned_model",
                         }),
                     ));
+                    return true;
                 }
                 Err(err) => {
                     result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -2551,6 +2552,7 @@ impl AgyProviderDriver {
                 }
             }
         }
+        false
     }
 
     async fn exit_locked(&self, result: &mut ProviderBoxResult, slot_id: &str) {
@@ -3166,13 +3168,12 @@ impl ProviderDriver for AgyProviderDriver {
         {
             cold_start_slot = true;
         }
-        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+        let Some(mut slot_id) = self.ensure_slot(request, &mut result).await else {
             return result;
         };
         result.slot_id = Some(slot_id.clone());
         self.mark_text_slot_used(&slot_id).await;
-        let lock = self.slot_lock(&slot_id).await;
-        let _guard = lock.lock().await;
+        let mut slot_guard = Some(self.slot_lock(&slot_id).await.lock_owned().await);
 
         if let Some(target_model) = request.model.as_deref() {
             if !target_model.trim().is_empty() {
@@ -3250,7 +3251,8 @@ impl ProviderDriver for AgyProviderDriver {
                     ));
                     result.durable_source = Some(final_turn.transcript_path);
                     result.final_text = Some(final_turn.final_text);
-                    self.cleanup_after_pure_text_locked(request, &mut result, &slot_id)
+                    let _ = self
+                        .cleanup_after_pure_text_locked(request, &mut result, &slot_id)
                         .await;
                     self.mark_text_slot_used(&slot_id).await;
                     result.status = ProviderBoxStatus::Completed;
@@ -3292,9 +3294,45 @@ impl ProviderDriver for AgyProviderDriver {
                                 "retry_attempt": attempt + 1,
                             }),
                         ));
-                        self.cleanup_after_pure_text_locked(request, &mut result, &slot_id)
+                        let recycled = self
+                            .cleanup_after_pure_text_locked(request, &mut result, &slot_id)
                             .await;
                         result.status = ProviderBoxStatus::Unknown;
+                        if recycled {
+                            drop(slot_guard.take());
+                            let Some(restarted_slot_id) =
+                                self.ensure_slot(request, &mut result).await
+                            else {
+                                return result;
+                            };
+                            slot_id = restarted_slot_id;
+                            result.slot_id = Some(slot_id.clone());
+                            self.mark_text_slot_used(&slot_id).await;
+                            slot_guard = Some(self.slot_lock(&slot_id).await.lock_owned().await);
+                            if let Some(target_model) = request.model.as_deref() {
+                                if !target_model.trim().is_empty()
+                                    && !self
+                                        .switch_model_locked(
+                                            request,
+                                            &mut result,
+                                            &slot_id,
+                                            target_model,
+                                        )
+                                        .await
+                                {
+                                    return result;
+                                }
+                            }
+                            result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                                DIAG_PROVIDER_TURN_STALLED,
+                                "AGY private text-only slot was cold-started before retry after cleanup recycle",
+                                json!({
+                                    "slot_id": slot_id,
+                                    "retry_attempt": attempt + 1,
+                                    "recovery": "cold_start_and_reverify_pinned_model",
+                                }),
+                            ));
+                        }
                         if self
                             .ensure_composer_ready(&mut result, &slot_id)
                             .await
@@ -3907,10 +3945,31 @@ fn is_private_agy_text_slot_id(slot_id: &str) -> bool {
     if !slot_id.starts_with("slot-agy-") {
         return false;
     }
-    let Some((_, replica)) = slot_id.rsplit_once('-') else {
+    let Some(stem) = slot_id.strip_prefix("slot-agy-") else {
         return false;
     };
-    matches!(replica, "a" | "b")
+    let Some((_, replica)) = slot_id.rsplit_once('-') else {
+        return is_private_agy_text_slot_stem(stem);
+    };
+    matches!(replica, "a" | "b") || is_private_agy_text_slot_stem(stem)
+}
+
+fn is_private_agy_text_slot_stem(stem: &str) -> bool {
+    const EXPORTABLE_MODEL_STEMS: &[&str] = &[
+        "gemini-35-flash-medium",
+        "gemini-35-flash-high",
+        "gemini-35-flash-low",
+        "gemini-31-pro-low",
+        "gemini-31-pro-high",
+        "claude-sonnet-46-thinking",
+        "claude-opus-46-thinking",
+    ];
+    EXPORTABLE_MODEL_STEMS.iter().any(|model| {
+        stem == *model
+            || stem
+                .strip_prefix(model)
+                .is_some_and(|rest| rest.starts_with('-'))
+    })
 }
 
 fn should_switch_model_for_pure_text_slot(
@@ -3928,7 +3987,9 @@ fn should_restart_private_text_slot_before_turn(
 ) -> bool {
     is_private_agy_text_slot_id(slot_id)
         && !matches!(session_state, SessionState::Exited | SessionState::Error)
-        && !is_ready_for_text(observation)
+        && (matches!(session_state, SessionState::SlashMenu)
+            || is_slash_command_surface(observation)
+            || !is_ready_for_text(observation))
 }
 
 fn idle_agy_text_slot_reclaim_candidates(
@@ -5661,10 +5722,30 @@ mod tests {
     #[test]
     fn private_text_slot_restart_detects_stale_thinking_replica() {
         let stale = observation(&["⣻", "for 2s", "? for shortcuts"]);
+        assert!(is_private_agy_text_slot_id(
+            "slot-agy-claude-opus-46-thinking"
+        ));
+        assert!(is_private_agy_text_slot_id(
+            "slot-agy-claude-opus-46-thinking-planning"
+        ));
+        assert!(is_private_agy_text_slot_id(
+            "slot-agy-claude-opus-46-thinking-planning-a"
+        ));
+        assert!(!is_private_agy_text_slot_id("slot-agy-usage-probe"));
+        assert!(!is_private_agy_text_slot_id("slot-agy-research"));
         assert!(should_restart_private_text_slot_before_turn(
             "slot-agy-claude-opus-46-thinking-b",
             SessionState::Thinking,
             &stale
+        ));
+        assert!(should_restart_private_text_slot_before_turn(
+            "slot-agy-claude-opus-46-thinking",
+            SessionState::SlashMenu,
+            &observation(&[
+                "      \"output_language\": {",
+                "  Runtime contract: this is a text-only provider export.",
+                "  Output ONLY one valid JSON object. Do no",
+            ])
         ));
         assert!(should_restart_private_text_slot_before_turn(
             "slot-agy-claude-opus-46-thinking-b",

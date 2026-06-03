@@ -13,6 +13,7 @@ import {
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const RUST_OUTPUT = 'crates/missiond-daemon/src/context/v3_contracts/generated.rs';
+const RUST_CORE_OUTPUT = 'crates/missiond-core/src/v3_contracts.rs';
 const JS_OUTPUT = 'scripts/generated/v3_contracts.mjs';
 const DTS_OUTPUT = 'scripts/generated/v3_contracts.d.ts';
 const RUST_RUNTIME_DEFAULTS_OUTPUT = 'crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs';
@@ -28,6 +29,7 @@ function main() {
   const generated = renderAll(contract, {
     blueprint,
     rustOutput: RUST_OUTPUT,
+    rustCoreOutput: RUST_CORE_OUTPUT,
     jsOutput: JS_OUTPUT,
     dtsOutput: DTS_OUTPUT,
     rustRuntimeDefaultsOutput: RUST_RUNTIME_DEFAULTS_OUTPUT,
@@ -44,6 +46,7 @@ function main() {
   });
   const outputs = [
     { id: 'rust', rel: opts.rustOutput, text: generated.rust },
+    { id: 'rust-core', rel: opts.rustCoreOutput, text: generated.rustCore },
     { id: 'js', rel: opts.jsOutput, text: generated.js },
     { id: 'dts', rel: opts.dtsOutput, text: generated.dts },
     { id: 'rust-runtime-defaults', rel: opts.rustRuntimeDefaultsOutput, text: generatedRuntimeDefaults.rust },
@@ -107,6 +110,7 @@ function parseArgs(argv) {
     repo: process.cwd(),
     blueprint: BLUEPRINT,
     rustOutput: RUST_OUTPUT,
+    rustCoreOutput: RUST_CORE_OUTPUT,
     jsOutput: JS_OUTPUT,
     dtsOutput: DTS_OUTPUT,
     rustRuntimeDefaultsOutput: RUST_RUNTIME_DEFAULTS_OUTPUT,
@@ -126,6 +130,8 @@ function parseArgs(argv) {
     else if (arg.startsWith('--blueprint=')) opts.blueprint = arg.slice('--blueprint='.length);
     else if (arg === '--rust-output') opts.rustOutput = argv[++i] ?? fail('--rust-output requires a value');
     else if (arg.startsWith('--rust-output=')) opts.rustOutput = arg.slice('--rust-output='.length);
+    else if (arg === '--rust-core-output') opts.rustCoreOutput = argv[++i] ?? fail('--rust-core-output requires a value');
+    else if (arg.startsWith('--rust-core-output=')) opts.rustCoreOutput = arg.slice('--rust-core-output='.length);
     else if (arg === '--js-output') opts.jsOutput = argv[++i] ?? fail('--js-output requires a value');
     else if (arg.startsWith('--js-output=')) opts.jsOutput = arg.slice('--js-output='.length);
     else if (arg === '--dts-output') opts.dtsOutput = argv[++i] ?? fail('--dts-output requires a value');
@@ -209,6 +215,7 @@ function loadProjectUniverse({ repo, blueprint }) {
 function renderAll(contract, labels) {
   return {
     rust: renderRust(contract, labels),
+    rustCore: renderCoreRust(contract, labels),
     js: renderJs(contract, labels),
     dts: renderDts(contract, labels),
   };
@@ -311,6 +318,20 @@ pub fn is_surface_id(value: &str) -> bool {
 pub fn is_function_id(value: &str) -> bool {
     FUNCTION_IDS.contains(&value)
 }
+`;
+}
+
+function renderCoreRust(contract, labels) {
+  return `${header(labels.blueprint, labels.rustCoreOutput, '//')}
+
+pub const SCHEMA_VERSION: &str = ${rustString(contract.schemaVersion)};
+pub const SOURCE_HASH: &str = ${rustString(contract.sourceHash)};
+pub const RUNTIME_CONFIG_SOURCE_HASH: &str = ${rustString(labels.runtimeConfigSourceHash)};
+pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = ${rustString(labels.projectUniverseSourceHash)};
+#[rustfmt::skip]
+pub const RUNTIME_DOMAIN_SOURCE_HASHES: &[(&str, &str)] = &[
+${Object.entries(labels.runtimeDomainSourceHashes).map(renderRustTuple2).join('\n')}
+];
 `;
 }
 
