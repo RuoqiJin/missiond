@@ -1227,6 +1227,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         &source_summaries,
         &deployment_events_summary,
     );
+    let next_action = context_gather_next_action(profile, &deployment_events_summary, &unresolved);
     let requested_unknowns = args.unknowns.clone();
 
     let sources_used = sources.keys().cloned().collect::<Vec<_>>();
@@ -1299,7 +1300,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "evidence_refs": evidence_refs,
         "unresolved": unresolved,
         "diagnostics": diagnostics,
-        "next_action": "Synthesize grounded intent. If intent is confirmed, assign a plan-authoring worker to compile plan.lisp from the confirmed intent plus tool/resource inventory."
+        "next_action": next_action
     });
 
     let mut artifact_hash_for_run: Option<String> = None;
@@ -4571,6 +4572,70 @@ fn raw_sources_policy(include_raw_sources: bool) -> &'static str {
     }
 }
 
+const CONTEXT_GATHER_DEFAULT_NEXT_ACTION: &str = "Synthesize grounded intent. If intent is confirmed, assign a plan-authoring worker to compile plan.lisp from the confirmed intent plus tool/resource inventory.";
+
+fn context_gather_next_action(
+    profile: SourceProfile,
+    deployment_events_summary: &Value,
+    unresolved: &[Value],
+) -> String {
+    if profile == SourceProfile::DeployOps
+        && (deployment_events_summary_has_authority_gap(deployment_events_summary)
+            || unresolved.iter().any(unresolved_is_deployment_event_gap))
+    {
+        if let Some(first_action) =
+            deployment_events_summary_first_next_action(deployment_events_summary)
+        {
+            return format!(
+                "Resolve Deploy Center deployment_events authority gap before inferring release state: {first_action}. See deployment_events.relay_diagnostics.next_actions for the full checklist."
+            );
+        }
+
+        return "Resolve Deploy Center deployment_events authority gap before inferring release state; inspect deployment_events.relay_diagnostics, observed_candidates, and drop_reason_counts.".to_string();
+    }
+
+    CONTEXT_GATHER_DEFAULT_NEXT_ACTION.to_string()
+}
+
+fn deployment_events_summary_has_authority_gap(summary: &Value) -> bool {
+    let event_count = summary
+        .get("event_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let status = summary.get("status").and_then(Value::as_str).unwrap_or("");
+    let inferred_gap = summary
+        .get("relay_diagnostics")
+        .and_then(|value| value.get("inferred_gap"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    event_count == 0
+        && (status == "no_matching_deploy_center_events"
+            || (!inferred_gap.is_empty() && inferred_gap != "unknown"))
+}
+
+fn deployment_events_summary_first_next_action(summary: &Value) -> Option<&str> {
+    summary
+        .get("relay_diagnostics")
+        .and_then(|value| value.get("next_actions"))
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|item| !item.trim().is_empty())
+        })
+}
+
+fn unresolved_is_deployment_event_gap(value: &Value) -> bool {
+    value.get("unknown_id").and_then(Value::as_str) == Some("deployment_events_authority_gap")
+        || (value.get("status").and_then(Value::as_str) == Some("evidence_gap")
+            && value
+                .get("evidence_ref")
+                .and_then(Value::as_str)
+                .is_some_and(|reference| reference == "source_summaries.deployment_events"))
+}
+
 fn synthesize_unknowns_with_source_summaries(
     unknowns: &[String],
     source_summaries: &Value,
@@ -5645,14 +5710,14 @@ mod tests {
         attach_infra_os_disabled_support_fallback, build_evidence_items,
         build_evidence_items_with_options, build_evidence_lanes,
         build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
-        build_support_catalog, collect_evidence_refs_from_value, context_gather_persist_artifact,
-        context_gather_persist_read_model, context_gather_worker_visible_dir_for,
-        context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_items,
-        dedupe_evidence_search_items, deployment_event_drop_reason_is_sample_worthy,
-        deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
-        deployment_event_observed_candidate_summary, deployment_event_relay_diagnostics,
-        deployment_event_relay_local_config_probe, deployment_event_relay_next_actions,
-        diagnostics_have_hard_failures, evidence_item_id,
+        build_support_catalog, collect_evidence_refs_from_value, context_gather_next_action,
+        context_gather_persist_artifact, context_gather_persist_read_model,
+        context_gather_worker_visible_dir_for, context_noise_metrics,
+        context_pack_artifact_payload, dedupe_evidence_items, dedupe_evidence_search_items,
+        deployment_event_drop_reason_is_sample_worthy, deployment_event_filter_timeline_row,
+        deployment_event_item_from_timeline_row, deployment_event_observed_candidate_summary,
+        deployment_event_relay_diagnostics, deployment_event_relay_local_config_probe,
+        deployment_event_relay_next_actions, diagnostics_have_hard_failures, evidence_item_id,
         evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
         filter_deployment_closure_policy_evidence_items,
         filter_incomplete_deployment_closure_evidence_items,
@@ -5662,7 +5727,7 @@ mod tests {
         source_selection, summarize_source, support_catalog_has_content,
         support_catalog_response_view, synthesize_unknowns_with_source_summaries,
         CompiledDeploymentPolicyFingerprint, ContextGatherArgs, DeploymentEventFilterResult,
-        SourceProfile, DEPLOYMENT_EVENT_RELEVANT_KINDS,
+        SourceProfile, CONTEXT_GATHER_DEFAULT_NEXT_ACTION, DEPLOYMENT_EVENT_RELEVANT_KINDS,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -7303,6 +7368,41 @@ mod tests {
                 .and_then(Value::as_str),
             Some("missiond_webhook_ingest_ok_deploy_center_relay_absent")
         );
+    }
+
+    #[test]
+    fn deploy_ops_next_action_surfaces_deployment_event_gap() {
+        let summary = json!({
+            "kind": "deployment_events",
+            "status": "no_matching_deploy_center_events",
+            "event_count": 0,
+            "relay_diagnostics": {
+                "inferred_gap": "missiond_webhook_ingest_ok_deploy_center_relay_absent",
+                "next_actions": [
+                    "deploy_events cursor inspection",
+                    "deploy_logs-to-deploy_events write-path verification"
+                ]
+            }
+        });
+        let source_summaries = json!({"deployment_events": summary.clone()});
+        let unresolved =
+            synthesize_unknowns_with_source_summaries(&[], &source_summaries, &summary);
+
+        let next_action =
+            context_gather_next_action(SourceProfile::DeployOps, &summary, &unresolved);
+
+        assert!(next_action.contains("deployment_events authority gap"));
+        assert!(next_action.contains("deploy_events cursor inspection"));
+        assert!(next_action.contains("deployment_events.relay_diagnostics.next_actions"));
+        assert!(!next_action.contains("Synthesize grounded intent"));
+    }
+
+    #[test]
+    fn intent_default_next_action_keeps_grounded_intent_hint() {
+        let next_action =
+            context_gather_next_action(SourceProfile::IntentDefault, &Value::Null, &[]);
+
+        assert_eq!(next_action, CONTEXT_GATHER_DEFAULT_NEXT_ACTION);
     }
 
     #[test]
