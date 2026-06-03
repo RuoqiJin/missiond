@@ -823,6 +823,42 @@ assert_active_release_owned() {
   assert_active_project_root_can_mutate "$1"
 }
 
+assert_launchd_runtime_owned() {
+  local phase="$1"
+  local active manifest expected_project_root expected_runtime_dir expected_compiled_dir
+  local launchd_project_root launchd_runtime_dir launchd_compiled_dir
+  active="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  if [ -z "$active" ]; then
+    log "ownership: launchd runtime guard has no active release phase=$phase"
+    return 1
+  fi
+  manifest="$active/release-manifest.json"
+  if [ ! -f "$manifest" ]; then
+    log "ownership: launchd runtime guard missing active manifest phase=$phase active=$active"
+    return 1
+  fi
+  expected_project_root="$(json_string_field "$manifest" "launchd_project_root" 2>/dev/null || true)"
+  expected_runtime_dir="$(json_string_field "$manifest" "runtime_dir" 2>/dev/null || true)"
+  expected_compiled_dir="$(json_string_field "$manifest" "compiled_runtime_dir" 2>/dev/null || true)"
+  launchd_project_root="$(plist_read_string "$LAUNCHD_PLIST" "WorkingDirectory" || true)"
+  launchd_runtime_dir="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_RUNTIME_DIR" || true)"
+  launchd_compiled_dir="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_COMPILED_RUNTIME_DIR" || true)"
+
+  if [ -n "$expected_project_root" ] && [ "$launchd_project_root" != "$expected_project_root" ]; then
+    log "ownership: launchd project-root mismatch phase=$phase expected=$expected_project_root actual=$launchd_project_root active=$active"
+    return 1
+  fi
+  if [ -n "$expected_runtime_dir" ] && [ "$launchd_runtime_dir" != "$expected_runtime_dir" ]; then
+    log "ownership: launchd runtime-dir mismatch phase=$phase expected=$expected_runtime_dir actual=$launchd_runtime_dir active=$active"
+    return 1
+  fi
+  if [ -n "$expected_compiled_dir" ] && [ "$launchd_compiled_dir" != "$expected_compiled_dir" ]; then
+    log "ownership: launchd compiled-runtime-dir mismatch phase=$phase expected=$expected_compiled_dir actual=$launchd_compiled_dir active=$active"
+    return 1
+  fi
+  log "ownership: launchd runtime guard verified phase=$phase active=$active"
+}
+
 capture_launchd_runtime_state() {
   PREVIOUS_LAUNCHD_PROJECT_ROOT="$(plist_read_string "$LAUNCHD_PLIST" "WorkingDirectory" || true)"
   PREVIOUS_RUNTIME_DIR="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_RUNTIME_DIR" || true)"
