@@ -592,6 +592,10 @@ fn filter_deployment_closure_policy_evidence_items(
 }
 
 fn evidence_item_has_incomplete_deployment_closure_placeholder(item: &EvidenceItemInput) -> bool {
+    if evidence_item_has_incomplete_support_catalog_placeholder(item) {
+        return true;
+    }
+
     let text = format!("{} {}", item.title, item.summary).to_ascii_lowercase();
     if !text.contains("deployment closure") {
         return false;
@@ -604,6 +608,31 @@ fn evidence_item_has_incomplete_deployment_closure_placeholder(item: &EvidenceIt
     ]
     .iter()
     .any(|marker| text.contains(marker))
+}
+
+fn evidence_item_has_incomplete_support_catalog_placeholder(item: &EvidenceItemInput) -> bool {
+    if item.source_type != "support_catalog" {
+        return false;
+    }
+    if support_catalog_evidence_item_has_identity(item) {
+        return false;
+    }
+    let text = format!("{} {}", item.title, item.summary).to_ascii_lowercase();
+    text.contains("support catalog")
+        || text.contains("domain, service, deploy, endpoint")
+        || text.contains("redacted secret-reference support catalog")
+}
+
+fn support_catalog_evidence_item_has_identity(item: &EvidenceItemInput) -> bool {
+    normalized_scope_value(item.project_id.as_deref()).is_some()
+        || normalized_scope_value(item.source_id.as_deref()).is_some()
+        || normalized_scope_value(item.source_ref.as_deref()).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["project_id"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["projectId"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["service_id"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["serviceId"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["deploy_center_slug"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["deployCenterSlug"]).is_some()
 }
 
 fn filter_stale_runtime_environment_evidence_items_with_dir(
@@ -6124,6 +6153,53 @@ mod tests {
         assert_eq!(filtered_count, 1);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "evi-payments");
+    }
+
+    #[test]
+    fn evidence_search_filters_identity_free_support_catalog_placeholders() {
+        let placeholder = missiond_core::types::EvidenceItemInput {
+            id: "evi-global-support-catalog".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "support_catalog".to_string(),
+            source_id: None,
+            source_ref: None,
+            project_id: None,
+            task_id: None,
+            title: "Support catalog".to_string(),
+            summary: "Domain, service, deploy, endpoint, DB/migration, agent, and redacted secret-reference support catalog.".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: Some(1.0),
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({"projection": "mission_context_gather.compact_evidence"}),
+        };
+        let mut scoped = placeholder.clone();
+        scoped.id = "evi-scoped-support-catalog".to_string();
+        scoped.source_id = Some("asr".to_string());
+        scoped.project_id = Some("asr".to_string());
+        scoped.summary = "Support catalog for asr / xjp-asr.".to_string();
+        let mut ref_scoped = placeholder.clone();
+        ref_scoped.id = "evi-ref-scoped-support-catalog".to_string();
+        ref_scoped.evidence_refs = json!({"deploy_center_slug": "xjp-payments"});
+        ref_scoped.summary = "Support catalog for xjp-payments.".to_string();
+
+        let (items, filtered_count) = filter_incomplete_deployment_closure_evidence_items(vec![
+            placeholder,
+            scoped,
+            ref_scoped,
+        ]);
+
+        assert_eq!(filtered_count, 1);
+        assert_eq!(items.len(), 2);
+        assert!(items
+            .iter()
+            .any(|item| item.id == "evi-scoped-support-catalog"));
+        assert!(items
+            .iter()
+            .any(|item| item.id == "evi-ref-scoped-support-catalog"));
     }
 
     #[test]
