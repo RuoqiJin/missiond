@@ -1524,7 +1524,7 @@ impl CodexProviderDriver {
         request: &ProviderInteractionRequest,
         slot_id: &str,
         prompt: &str,
-    ) -> bool {
+    ) -> Option<String> {
         let before = self.observe(slot_id).await;
         let send_result = self.pty.send_fire_and_forget(slot_id, prompt).await;
         let after = self.observe_after_action(slot_id).await;
@@ -1581,7 +1581,7 @@ impl CodexProviderDriver {
         }
         let ok = step.verification_status == PtyStepVerificationStatus::Verified;
         result.record_step(step);
-        ok
+        ok.then(|| rollout_ack).flatten()
     }
 
     async fn monitor_turn(
@@ -1589,6 +1589,7 @@ impl CodexProviderDriver {
         request: &ProviderInteractionRequest,
         result: &mut ProviderBoxResult,
         slot_id: &str,
+        rollout_path_hint: Option<&str>,
     ) -> ProviderBoxResult {
         let timeout_secs = request.timeout_secs.unwrap_or(180).clamp(10, 7_200);
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -1599,7 +1600,7 @@ impl CodexProviderDriver {
 
         loop {
             if let Some(final_turn) = self
-                .extract_turn_from_rollouts(&request.correlation_id)
+                .extract_turn_from_rollout_hint_or_scan(&request.correlation_id, rollout_path_hint)
                 .await
             {
                 result.status = ProviderBoxStatus::Completed;
@@ -3147,6 +3148,30 @@ impl CodexProviderDriver {
         .flatten()
     }
 
+    async fn extract_turn_from_rollout_hint_or_scan(
+        &self,
+        correlation_id: &str,
+        rollout_path_hint: Option<&str>,
+    ) -> Option<CodexTurnFinal> {
+        if let Some(path) = rollout_path_hint
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        {
+            let correlation_id = correlation_id.to_string();
+            if let Some(turn) = tokio::task::spawn_blocking(move || {
+                extract_correlated_rollout(&path, &correlation_id)
+            })
+            .await
+            .ok()
+            .flatten()
+            {
+                return Some(turn);
+            }
+        }
+        self.extract_turn_from_rollouts(correlation_id).await
+    }
+
     async fn wait_for_correlated_rollout_input(
         &self,
         correlation_id: &str,
@@ -3470,14 +3495,20 @@ impl ProviderDriver for CodexProviderDriver {
             return result;
         }
         let prompt = correlate_prompt(request);
-        if !self
+        let Some(rollout_path_hint) = self
             .submit_prompt_step(&mut result, request, &slot_id, prompt.as_str())
             .await
-        {
+        else {
             result.status = ProviderBoxStatus::Failed;
             return result;
-        }
-        self.monitor_turn(request, &mut result, &slot_id).await
+        };
+        self.monitor_turn(
+            request,
+            &mut result,
+            &slot_id,
+            Some(rollout_path_hint.as_str()),
+        )
+        .await
     }
 
     async fn control_action(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
@@ -5518,6 +5549,54 @@ mod tests {
         let turn = extract_correlated_rollout(&path, corr).expect("turn");
 
         assert_eq!(turn.final_text, "response item durable final");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rollout_extractor_handles_current_codex_agent_message_shape() {
+        let dir = std::env::temp_dir().join(format!(
+            "missiond-codex-provider-box-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("rollout.jsonl");
+        let corr = "corr-current-codex";
+        let response_item_user = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": format!("hello {corr}")}]
+            }
+        });
+        let event_user = json!({
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": format!("hello {corr}")}
+        });
+        let agent_message = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "{\"ok\":true}",
+                "phase": "final_answer"
+            }
+        });
+        let task_complete = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "last_agent_message": "{\"ok\":true}"
+            }
+        });
+        fs::write(
+            &path,
+            format!("{response_item_user}\n{event_user}\n{agent_message}\n{task_complete}\n"),
+        )
+        .expect("write");
+
+        let turn = extract_correlated_rollout(&path, corr).expect("turn");
+
+        assert_eq!(turn.final_text, "{\"ok\":true}");
         let _ = fs::remove_dir_all(dir);
     }
 
