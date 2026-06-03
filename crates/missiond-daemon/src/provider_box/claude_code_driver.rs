@@ -2146,6 +2146,62 @@ impl ClaudeCodeProviderDriver {
         let mut output_contract_file_seen: Option<(u64, Instant)> = None;
 
         loop {
+            if let Some(path) = output_contract_file.as_ref() {
+                match output_contract_file_completion_state(
+                    path,
+                    output_contract_file_seen.as_ref(),
+                ) {
+                    OutputContractFileState::Pending { len } => {
+                        output_contract_file_seen = Some((len, Instant::now()));
+                    }
+                    OutputContractFileState::Stable { len } => {
+                        let durable_source = path.display().to_string();
+                        result.status = ProviderBoxStatus::Completed;
+                        result.provider = request
+                            .provider
+                            .clone()
+                            .or_else(|| Some("claude_code".to_string()));
+                        result.model = request.model.clone();
+                        result.model_profile = request.model_profile.clone();
+                        result.provider_conversation_id = Some(session_id.to_string());
+                        result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                            result.provider.clone(),
+                            CliEngine::ClaudeCode,
+                            Some(slot_id.to_string()),
+                            session_id.to_string(),
+                            "output_contract_file",
+                            Some(durable_source.clone()),
+                            request.cwd.clone().or_else(|| request.project_root.clone()),
+                            "must_write_file_stable",
+                        ));
+                        result.durable_source = Some(durable_source.clone());
+                        result.slot_status = Some(json!({
+                            "slot_id": slot_id,
+                            "completion_source": "output_contract_file",
+                            "observation_skipped": true,
+                            "reason": "The requested output_contract.must_write_file is stable; PTY screen observation is diagnostic only."
+                        }));
+                        result.final_text =
+                            Some(format!("Output contract file written: {}", path.display()));
+                        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                            "PROVIDER_OUTPUT_CONTRACT_FILE_COMPLETED",
+                            "ClaudeCode worker-turn completed from stable output_contract.must_write_file",
+                            json!({
+                                "slot_id": slot_id,
+                                "session_id": session_id,
+                                "must_write_file": path.display().to_string(),
+                                "bytes": len,
+                                "rule": "The requested artifact file is the canonical output; PTY screen text and JSONL final extraction were not required"
+                            }),
+                        ));
+                        return result.clone();
+                    }
+                    OutputContractFileState::MissingOrTooSmall => {
+                        output_contract_file_seen = None;
+                    }
+                }
+            }
+
             let analysis =
                 analyze_claude_code_jsonl_after_cursor(&self.claude_home, session_id, &cursor);
             if claude_code_analysis_line_count_advanced(
@@ -2217,63 +2273,6 @@ impl ClaudeCodeProviderDriver {
                     Some(slot_status_value(slot_id, status.as_ref(), &observation));
                 result.final_text = Some(final_text.to_string());
                 return result.clone();
-            }
-
-            if let Some(path) = output_contract_file.as_ref() {
-                match output_contract_file_completion_state(
-                    path,
-                    output_contract_file_seen.as_ref(),
-                ) {
-                    OutputContractFileState::Pending { len } => {
-                        output_contract_file_seen = Some((len, Instant::now()));
-                    }
-                    OutputContractFileState::Stable { len } => {
-                        let _ = self.pty.write(slot_id, "\x1b").await;
-                        tokio::time::sleep(Duration::from_millis(250)).await;
-                        let status = self.pty.get_status(slot_id).await;
-                        let observation = self.observe(slot_id).await;
-                        let durable_source = path.display().to_string();
-                        result.status = ProviderBoxStatus::Completed;
-                        result.provider = request
-                            .provider
-                            .clone()
-                            .or_else(|| Some("claude_code".to_string()));
-                        result.model = request.model.clone();
-                        result.model_profile = request.model_profile.clone();
-                        result.provider_conversation_id = Some(session_id.to_string());
-                        result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
-                            result.provider.clone(),
-                            CliEngine::ClaudeCode,
-                            Some(slot_id.to_string()),
-                            session_id.to_string(),
-                            "output_contract_file",
-                            Some(durable_source.clone()),
-                            request.cwd.clone().or_else(|| request.project_root.clone()),
-                            "must_write_file_stable",
-                        ));
-                        result.durable_source = Some(durable_source.clone());
-                        result.slot_status =
-                            Some(slot_status_value(slot_id, status.as_ref(), &observation));
-                        result.final_text =
-                            Some(format!("Output contract file written: {}", path.display()));
-                        result.add_diagnostic(ProviderBoxDiagnostic::warning(
-                            "PROVIDER_OUTPUT_CONTRACT_FILE_COMPLETED",
-                            "ClaudeCode worker-turn completed from stable output_contract.must_write_file",
-                            json!({
-                                "slot_id": slot_id,
-                                "session_id": session_id,
-                                "must_write_file": path.display().to_string(),
-                                "bytes": len,
-                                "line_count": analysis.line_count,
-                                "rule": "The requested artifact file is the canonical output; PTY screen text was not used as a semantic final"
-                            }),
-                        ));
-                        return result.clone();
-                    }
-                    OutputContractFileState::MissingOrTooSmall => {
-                        output_contract_file_seen = None;
-                    }
-                }
             }
 
             let observation = self.observe(slot_id).await;
