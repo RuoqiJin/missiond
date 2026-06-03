@@ -1683,6 +1683,15 @@ impl AgyProviderDriver {
                 last_progress = Instant::now();
             }
 
+            if let Some(diagnostic) = text_turn_submission_surface_diagnostic(slot_id, &observation)
+            {
+                let mut failed = ProviderBoxResult::base(request, ProviderBoxStatus::Failed);
+                failed.slot_id = Some(slot_id.to_string());
+                failed.step_records = result.step_records.clone();
+                failed.add_diagnostic(diagnostic);
+                return AgyMonitorOutcome::Failed(failed);
+            }
+
             if is_hard_blocked(&observation) {
                 let mut failed = ProviderBoxResult::base(request, ProviderBoxStatus::Blocked);
                 failed.slot_id = Some(slot_id.to_string());
@@ -3358,6 +3367,26 @@ fn is_slash_command_surface(observation: &AgyObservation) -> bool {
     )
 }
 
+fn text_turn_submission_surface_diagnostic(
+    slot_id: &str,
+    observation: &AgyObservation,
+) -> Option<ProviderBoxDiagnostic> {
+    if !is_slash_command_surface(observation) {
+        return None;
+    }
+    Some(ProviderBoxDiagnostic::warning(
+        DIAG_PROVIDER_TURN_STALLED,
+        "AGY entered a slash command surface during text-only prompt submission",
+        json!({
+            "slot_id": slot_id,
+            "screen_state": observation.snapshot.state,
+            "reason": observation.snapshot.reason,
+            "blocked_kind": observation.snapshot.blocked_kind,
+            "retry_policy": "clear_and_retry_text_only_turn",
+        }),
+    ))
+}
+
 fn is_exit_confirm_pending(observation: &AgyObservation) -> bool {
     observation.snapshot.reason == "agy:exit_confirm_pending"
         || observation.snapshot.blocked_kind.as_deref() == Some("exit_confirmation")
@@ -4502,6 +4531,25 @@ mod tests {
         assert!(is_overlay_screen(&obs));
         assert!(is_slash_command_surface(&obs));
         assert!(!is_ready_for_text(&obs));
+    }
+
+    #[test]
+    fn text_turn_slash_surface_is_retryable_stall() {
+        let obs = observation(&[
+            "────────────────────────────────────────",
+            "> /clear",
+            "────────────────────────────────────────",
+            "? for shortcuts                                                                                  Claude Opus 4.6 (Thinking)",
+        ]);
+        let diagnostic =
+            text_turn_submission_surface_diagnostic("slot-agy-claude-opus-46-thinking-a", &obs)
+                .expect("diagnostic");
+        assert_eq!(diagnostic.code, DIAG_PROVIDER_TURN_STALLED);
+
+        let request = ProviderInteractionRequest::pure_text(CliEngine::Agy, "hello".to_string());
+        let mut result = ProviderBoxResult::base(&request, ProviderBoxStatus::Failed);
+        result.add_diagnostic(diagnostic);
+        assert!(is_retryable_text_turn_failure(&result));
     }
 
     #[test]
