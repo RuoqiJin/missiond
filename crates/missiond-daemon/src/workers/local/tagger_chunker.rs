@@ -33,6 +33,8 @@ const RECONCILE_LOOKBACK_MINUTES: i64 = 5;
 
 /// Max sessions to recover in a single reconciliation sweep.
 const RECONCILE_BATCH_LIMIT: i64 = 50;
+const DEFAULT_STARTUP_BACKFILL_LIMIT: i64 = 50;
+const STARTUP_BACKFILL_LIMIT_ENV: &str = "MISSIOND_TAGGER_STARTUP_LIMIT";
 
 /// Max messages to fetch per session in one pass.
 const MAX_MESSAGES_PER_SESSION: i64 = 10_000;
@@ -60,7 +62,8 @@ impl BackgroundWorker for TaggerChunkerWorker {
 
 async fn run_tagger_chunker(state: Arc<AppState>, mut ctx: WorkerContext) {
     // Startup backfill: process completed sessions that have no turns yet
-    startup_backfill(&state).await;
+    super::wait_for_background_db_grace("tagger_chunker").await;
+    startup_backfill(&state, startup_backfill_limit()).await;
 
     let mut sub = match state
         .bus
@@ -78,6 +81,8 @@ async fn run_tagger_chunker(state: Arc<AppState>, mut ctx: WorkerContext) {
     let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(BATCH_INTERVAL_SECS));
     let mut reconcile_tick =
         tokio::time::interval(tokio::time::Duration::from_secs(RECONCILE_INTERVAL_SECS));
+    tick.tick().await;
+    reconcile_tick.tick().await;
 
     loop {
         ctx.wait_if_paused().await;
@@ -110,8 +115,11 @@ async fn run_tagger_chunker(state: Arc<AppState>, mut ctx: WorkerContext) {
 }
 
 /// Backfill completed/compacted sessions that have messages but no turns.
-async fn startup_backfill(state: &AppState) {
-    let unprocessed = match state.store.sessions_pending_turn_extraction(500).await {
+async fn startup_backfill(state: &AppState, limit: i64) {
+    if limit <= 0 {
+        return;
+    }
+    let unprocessed = match state.store.sessions_pending_turn_extraction(limit).await {
         Ok(ids) => ids,
         Err(e) => {
             warn!(error = %e, "TaggerChunker: backfill query failed");
@@ -194,6 +202,15 @@ async fn reconcile_missed_sessions(state: &AppState) {
             "TaggerChunker: reconciliation sweep recovered missed sessions"
         );
     }
+}
+
+fn startup_backfill_limit() -> i64 {
+    super::env_i64_bounded(
+        STARTUP_BACKFILL_LIMIT_ENV,
+        DEFAULT_STARTUP_BACKFILL_LIMIT,
+        0,
+        500,
+    )
 }
 
 async fn process_batch(state: &AppState, session_ids: &[String]) {

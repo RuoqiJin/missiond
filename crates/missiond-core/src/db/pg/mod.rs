@@ -18,16 +18,37 @@ pub struct PgMissionStore {
 }
 
 #[cfg(feature = "postgres")]
+fn env_u32_bounded(name: &str, default: u32, min: u32, max: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
+}
+
+#[cfg(feature = "postgres")]
+fn env_u64_bounded(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
+}
+
+#[cfg(feature = "postgres")]
 impl PgMissionStore {
     /// Connect to PostgreSQL and run migrations.
     pub async fn connect(database_url: &str) -> Result<Self, sqlx::Error> {
         use sqlx::postgres::PgPoolOptions;
         use std::time::Duration;
 
+        let max_connections = env_u32_bounded("MISSIOND_PG_MAX_CONNECTIONS", 40, 5, 200);
+        let min_connections = env_u32_bounded("MISSIOND_PG_MIN_CONNECTIONS", 2, 0, max_connections);
+        let acquire_timeout_secs = env_u64_bounded("MISSIOND_PG_ACQUIRE_TIMEOUT_SECS", 5, 1, 60);
         let pool = PgPoolOptions::new()
-            .max_connections(20)
-            .min_connections(2)
-            .acquire_timeout(Duration::from_secs(5))
+            .max_connections(max_connections)
+            .min_connections(min_connections)
+            .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
             .idle_timeout(Duration::from_secs(600))
             .connect(database_url)
             .await?;

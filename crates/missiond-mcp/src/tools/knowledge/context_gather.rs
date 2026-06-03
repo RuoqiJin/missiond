@@ -50,6 +50,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "persistReadModel": {"type": "boolean", "default": true, "description": "persist_read_model alias"},
                     "conversation_time_range": {"type": "string", "default": "last_30d", "description": "Conversation search window: last_24h, last_7d, last_30d"},
                     "conversationTimeRange": {"type": "string", "default": "last_30d", "description": "conversation_time_range alias"},
+                    "conversation_type": {"type": "string", "description": "Conversation read-model filter for conversation_audit/full_debug/include_conversations, e.g. user, codex_chat, gemini_chat, subagent, worker, all"},
+                    "conversationType": {"type": "string", "description": "conversation_type alias"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 25, "default": 8}
                 }
             }),

@@ -166,7 +166,12 @@ impl BackgroundWorker for CodexIngestionWorker {
             "Codex ingestion worker started (poll interval: {POLL_INTERVAL_SECS}s)"
         );
 
-        tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
+        let startup_delay_secs = STARTUP_DELAY_SECS.max(super::background_db_grace_secs());
+        info!(
+            secs = startup_delay_secs,
+            "Codex ingestion: waiting before first provider-local poll"
+        );
+        tokio::time::sleep(Duration::from_secs(startup_delay_secs)).await;
 
         // Watermark: thread_id → (file mtime, file size) of the rollout JSONL.
         // We deliberately ignore Codex's `threads.updated_at` because it does NOT

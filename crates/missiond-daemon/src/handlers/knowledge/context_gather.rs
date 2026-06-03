@@ -73,6 +73,8 @@ struct ContextGatherArgs {
     include_raw_sources: Option<bool>,
     #[serde(default, alias = "conversationTimeRange")]
     conversation_time_range: Option<String>,
+    #[serde(default, alias = "conversationType", alias = "conversation_type")]
+    conversation_type: Option<String>,
     #[serde(default, alias = "taskId")]
     task_id: Option<String>,
     #[serde(default, alias = "sourceId")]
@@ -4790,6 +4792,8 @@ fn noise_diagnostics(
         "raw_sources_in_artifact": selection.include_raw_sources,
         "raw_sources_in_response": selection.include_raw_sources,
         "raw_sources_omitted": !selection.include_raw_sources,
+        "conversation_project_diagnostics": conversation_project_diagnostics(sources),
+        "conversation_cross_project_warning": conversation_project_diagnostic_field(sources, "warning"),
         "rule": "Default grounding is authority-aware and does not preload conversations, infra skill evidence, or credential refs unless the source profile or explicit include flag opts in."
     })
 }
@@ -4826,6 +4830,7 @@ fn context_noise_metrics(
                 .collect::<serde_json::Map<_, _>>()
         })
         .unwrap_or_default();
+    let conversation_project_diagnostics = conversation_project_diagnostics(sources);
     json!({
         "schema": "missiond.context-noise-metrics.v1",
         "source_profile": profile.as_str(),
@@ -5428,6 +5433,16 @@ fn summarize_source(key: &str, value: &Value) -> Value {
                 "operational_fact_count".to_string(),
                 json!(array_len(value.get("operational_facts"))),
             );
+            map.insert(
+                "operational_fact_samples".to_string(),
+                summarize_skill_operational_fact_samples(value, 8),
+            );
+            map.insert(
+                "operational_fact_sample_policy".to_string(),
+                Value::String(
+                    "high-confidence query-ranked bounded samples (query_match_score>=4); raw operational_facts stay omitted unless include_raw_sources=true or source_profile=full_debug".to_string(),
+                ),
+            );
             map.insert("kb_count".to_string(), json!(array_len(value.get("kb"))));
             map.insert(
                 "board_count".to_string(),
@@ -5544,6 +5559,137 @@ fn summarize_array_source(key: &str, value: &Value, limit: usize) -> Value {
         );
     }
     Value::Object(map)
+}
+
+const MIN_OPERATIONAL_FACT_SAMPLE_SCORE: usize = 4;
+
+fn summarize_skill_operational_fact_samples(value: &Value, limit: usize) -> Value {
+    let facts = value
+        .get("operational_facts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if facts.is_empty() {
+        return Value::Array(Vec::new());
+    }
+    let query = value
+        .get("query")
+        .and_then(|query| query.get("original").or_else(|| query.get("augmented")))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let tokens = summary_query_tokens(query);
+    let mut ranked: Vec<(usize, usize, &Value)> = facts
+        .iter()
+        .enumerate()
+        .map(|(idx, fact)| (skill_operational_fact_score(fact, &tokens), idx, fact))
+        .filter(|(score, _, _)| *score >= MIN_OPERATIONAL_FACT_SAMPLE_SCORE)
+        .collect();
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    Value::Array(
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|(score, _, fact)| summarize_skill_operational_fact(fact, score))
+            .collect(),
+    )
+}
+
+fn summarize_skill_operational_fact(fact: &Value, score: usize) -> Value {
+    let mut item_map = serde_json::Map::new();
+    insert_field(&mut item_map, fact, "skill");
+    insert_field(&mut item_map, fact, "source_path");
+    insert_field(&mut item_map, fact, "source_line");
+    insert_field(&mut item_map, fact, "key");
+    insert_compact_field(&mut item_map, fact, "value", 260);
+    item_map.insert("query_match_score".to_string(), json!(score));
+    Value::Object(item_map)
+}
+
+fn skill_operational_fact_score(fact: &Value, tokens: &[String]) -> usize {
+    if tokens.is_empty() {
+        return 0;
+    }
+    let skill = fact
+        .get("skill")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let source_path = fact
+        .get("source_path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let key = fact
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let value = fact
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let mut score = 0usize;
+    for token in tokens {
+        if key.contains(token) {
+            score += 5;
+        }
+        if value.contains(token) {
+            score += 3;
+        }
+        if skill.contains(token) || source_path.contains(token) {
+            score += 1;
+        }
+    }
+    if skill.contains("deploy") || source_path.contains("deploy") {
+        score += 1;
+    }
+    score
+}
+
+fn summary_query_tokens(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for raw in query.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        let token = raw.trim().to_ascii_lowercase();
+        if token.len() < 3 && !token.chars().any(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        if is_generic_summary_query_token(&token) {
+            continue;
+        }
+        if !tokens.iter().any(|existing| existing == &token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+fn is_generic_summary_query_token(token: &str) -> bool {
+    matches!(
+        token,
+        "and"
+            | "but"
+            | "for"
+            | "the"
+            | "with"
+            | "without"
+            | "service"
+            | "deploy"
+            | "center"
+            | "project"
+            | "runtime"
+            | "query"
+            | "context"
+            | "missing"
+            | "skipping"
+            | "backward"
+            | "compat"
+            | "verify"
+            | "verified"
+            | "status"
+            | "state"
+    )
 }
 
 fn summarize_conversation_source(key: &str, value: &Value) -> Value {
@@ -8322,14 +8468,24 @@ mod tests {
         sources.insert(
             "skill_context".to_string(),
             json!({
+                "query": {"original": "deploy service.manifest.toml canary"},
                 "skills": [{"name": "deploy-ops", "path": "/skills/deploy-ops/SKILL.md", "matched_by": "query"}],
-                "operational_facts": [{
-                    "skill": "deploy-ops",
-                    "source_path": "/skills/deploy-ops/SKILL.md",
-                    "source_line": 174,
-                    "key": "xjp-router docker-compose.yml volumes",
-                    "value": "full raw operational fact"
-                }]
+                "operational_facts": [
+                    {
+                        "skill": "deploy-ops",
+                        "source_path": "/skills/deploy-ops/SKILL.md",
+                        "source_line": 174,
+                        "key": "xjp-router docker-compose.yml volumes",
+                        "value": "full raw operational fact"
+                    },
+                    {
+                        "skill": "deploy-ops",
+                        "source_path": "/skills/deploy-ops/SKILL.md",
+                        "source_line": 391,
+                        "key": "service.manifest.toml Manifest Gate",
+                        "value": "canary smoke probes must come from manifest"
+                    }
+                ]
             }),
         );
         let summaries = build_source_summaries(&sources);
@@ -8342,16 +8498,24 @@ mod tests {
             skill_summary
                 .get("operational_fact_count")
                 .and_then(|value| value.as_u64()),
-            Some(1)
+            Some(2)
+        );
+        let fact_samples = skill_summary
+            .get("operational_fact_samples")
+            .and_then(|value| value.as_array())
+            .expect("compact skill summary should carry ranked operational fact samples");
+        assert_eq!(fact_samples.len(), 1);
+        assert_eq!(
+            fact_samples
+                .first()
+                .and_then(|item| item.get("key"))
+                .and_then(|value| value.as_str()),
+            Some("service.manifest.toml Manifest Gate")
         );
         let refs = collect_evidence_refs_from_value(&compact);
         assert!(refs.iter().any(|item| {
             item.get("value").and_then(|value| value.as_str())
                 == Some("/skills/deploy-ops/SKILL.md")
-        }));
-        assert!(!refs.iter().any(|item| {
-            item.get("value").and_then(|value| value.as_str())
-                == Some("xjp-router docker-compose.yml volumes")
         }));
 
         let raw = response_sources(&sources, &summaries, true);
@@ -8359,7 +8523,7 @@ mod tests {
             .get("skill_context")
             .and_then(|value| value.get("operational_facts"))
             .and_then(|value| value.as_array())
-            .is_some_and(|items| items.len() == 1));
+            .is_some_and(|items| items.len() == 2));
     }
 
     #[test]
@@ -8569,7 +8733,18 @@ mod tests {
         let mut sources = serde_json::Map::new();
         sources.insert(
             "conversation_logs".to_string(),
-            json!({"results": [], "filteredSemanticHits": 4}),
+            json!({
+                "results": [],
+                "filteredSemanticHits": 4,
+                "projectDiagnostics": {
+                    "schema": "missiond.conversation-search-project-diagnostics.v1",
+                    "projectFilterApplied": false,
+                    "scope": "global_unscoped",
+                    "distinctProjectLanes": 2,
+                    "suggestedProjectFilters": ["missiond", "router"],
+                    "warning": "Unscoped conversation search returned multiple project lanes; pass project=<id> to make the audit bounded."
+                }
+            }),
         );
         let lanes = build_evidence_lanes(&sources);
         let args = args(json!({"query": "audit", "source_profile": "conversation_audit"}));

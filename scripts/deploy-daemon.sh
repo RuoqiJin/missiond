@@ -18,6 +18,15 @@
 #   MISSIOND_ACTIVE_LINK        active symlink, default: $root/active
 #   MISSIOND_RELEASES_DIR       releases dir, default: $root/releases
 #   MISSIOND_RELEASE_KEEP       number of newest releases to keep, default: 5
+#   MISSIOND_DEPLOY_LOCK_PATH   deploy ownership lock directory, default:
+#                               $root/deploy.lock.d
+#   MISSIOND_DEPLOY_LOCK_STALE_SECS  age before metadata-less lock recovery,
+#                               default: 300
+#   MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT  expected launchd_project_root for
+#                               the currently active release before mutating
+#                               active/apply-cleanup; default: this Git root
+#   MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER  explicit 1/true override for
+#                               switching active from another project root
 #   MISSIOND_BACKUP_RETENTION_DAYS  old .bak/.new cleanup age, default: 7
 #   MISSIOND_SOCKET_PATH        IPC socket, default: ~/.missiond/missiond.sock
 #   MISSIOND_LAUNCHCTL_LABEL    launchd label, default: com.missiond.daemon
@@ -89,6 +98,12 @@
 #   MISSIOND_FULL_OS_ENABLE     when truthy, enable optional full-os layers in
 #                               launchd. Individual MISSIOND_FEATURE_* gates
 #                               are also propagated when present.
+#   MISSIOND_PG_MAX_CONNECTIONS / MISSIOND_PG_MIN_CONNECTIONS /
+#   MISSIOND_PG_ACQUIRE_TIMEOUT_SECS optional PostgreSQL pool tuning propagated
+#                               to launchd.
+#   MISSIOND_BACKGROUND_DB_GRACE_SECS and worker startup limits tune full-os
+#                               background DB maintenance so post-deploy MCP
+#                               read/query paths keep foreground capacity.
 #   MISSION_WS_PORT             daemon HTTP/WebSocket port, default: 9120.
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 90
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 45
@@ -141,6 +156,8 @@ SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-45}"
 MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT="${MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT:-auto}"
 MISSION_WS_PORT="${MISSION_WS_PORT:-9120}"
 RELEASE_KEEP="${MISSIOND_RELEASE_KEEP:-5}"
+DEPLOY_LOCK_PATH="${MISSIOND_DEPLOY_LOCK_PATH:-${INSTALL_ROOT}/deploy.lock.d}"
+DEPLOY_LOCK_STALE_SECS="${MISSIOND_DEPLOY_LOCK_STALE_SECS:-300}"
 BACKUP_RETENTION_DAYS="${MISSIOND_BACKUP_RETENTION_DAYS:-7}"
 APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
 PREVIOUS_LAUNCHD_PROJECT_ROOT=""
@@ -365,6 +382,81 @@ print_timing_summary() {
   for i in "${!TIMING_NAMES[@]}"; do
     log "timing-summary: ${TIMING_NAMES[$i]}=${TIMING_SECS[$i]}s"
   done
+}
+
+release_deploy_lock() {
+  if [ "$DEPLOY_LOCK_HELD" -ne 1 ]; then
+    return 0
+  fi
+  case "$DEPLOY_LOCK_PATH" in
+    ""|"/"|"$HOME"|"$INSTALL_ROOT"|"$RELEASES_DIR")
+      log "deploy-lock: refuse to remove unsafe lock path $DEPLOY_LOCK_PATH"
+      return 0
+      ;;
+  esac
+  if [ -f "$DEPLOY_LOCK_PATH/pid" ] && [ "$(cat "$DEPLOY_LOCK_PATH/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$DEPLOY_LOCK_PATH"
+    log "deploy-lock: released $DEPLOY_LOCK_PATH"
+  else
+    log "deploy-lock: owner changed before release; left $DEPLOY_LOCK_PATH untouched"
+  fi
+  DEPLOY_LOCK_HELD=0
+}
+
+try_recover_stale_deploy_lock() {
+  [ -d "$DEPLOY_LOCK_PATH" ] || return 1
+  local owner_pid lock_mtime now age
+  owner_pid="$(cat "$DEPLOY_LOCK_PATH/pid" 2>/dev/null || true)"
+  case "$owner_pid" in
+    ""|*[!0-9]*)
+      lock_mtime="$(stat -f %m "$DEPLOY_LOCK_PATH" 2>/dev/null || stat -c %Y "$DEPLOY_LOCK_PATH" 2>/dev/null || echo 0)"
+      now="$(date +%s)"
+      age=$(( now - lock_mtime ))
+      if [ "$age" -lt "$DEPLOY_LOCK_STALE_SECS" ]; then
+        log "deploy-lock: metadata missing but lock is fresh age=${age}s stale_after=${DEPLOY_LOCK_STALE_SECS}s"
+        return 1
+      fi
+      log "deploy-lock: removing stale metadata-less lock $DEPLOY_LOCK_PATH age=${age}s"
+      ;;
+    *)
+      if kill -0 "$owner_pid" >/dev/null 2>&1; then
+        return 1
+      fi
+      log "deploy-lock: removing stale lock $DEPLOY_LOCK_PATH owned by exited pid=$owner_pid"
+      ;;
+  esac
+  rm -rf "$DEPLOY_LOCK_PATH"
+  return 0
+}
+
+acquire_deploy_lock() {
+  mkdir -p "$INSTALL_ROOT"
+  local lock_created=0
+  if mkdir "$DEPLOY_LOCK_PATH" 2>/dev/null; then
+    lock_created=1
+  else
+    try_recover_stale_deploy_lock || true
+  fi
+  if [ "$lock_created" -ne 1 ] && ! mkdir "$DEPLOY_LOCK_PATH" 2>/dev/null; then
+    log "deploy-lock: busy $DEPLOY_LOCK_PATH"
+    if [ -f "$DEPLOY_LOCK_PATH/owner" ]; then
+      sed 's/^/[deploy-lock-owner] /' "$DEPLOY_LOCK_PATH/owner" >&2 || true
+    fi
+    return 1
+  fi
+  DEPLOY_LOCK_HELD=1
+  trap release_deploy_lock EXIT
+  {
+    printf 'schema=missiond.deploy-lock.v1\n'
+    printf 'pid=%s\n' "$$"
+    printf 'repo_root=%s\n' "$REPO_ROOT"
+    printf 'install_root=%s\n' "$INSTALL_ROOT"
+    printf 'active_link=%s\n' "$ACTIVE_LINK"
+    printf 'profile=%s\n' "$PROFILE"
+    printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$DEPLOY_LOCK_PATH/owner"
+  printf '%s\n' "$$" > "$DEPLOY_LOCK_PATH/pid"
+  log "deploy-lock: acquired $DEPLOY_LOCK_PATH"
 }
 
 codesign_or_verify() {
@@ -622,6 +714,12 @@ ensure_launchd_runtime_root() {
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_SOCKET_PATH" "$SOCK_PATH"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_RUNTIME_DIR" "$RUNTIME_DIR"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_COMPILED_RUNTIME_DIR" "$COMPILED_RUNTIME_DIR"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PG_MAX_CONNECTIONS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PG_MIN_CONNECTIONS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PG_ACQUIRE_TIMEOUT_SECS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_BACKGROUND_DB_GRACE_SECS"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_MESSAGE_LABELER_STARTUP_LIMIT"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_TAGGER_STARTUP_LIMIT"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_FULL_OS_ENABLE"
@@ -1360,6 +1458,13 @@ if [ "$DO_DEPLOY" -eq 1 ] || { [ "$CLEANUP_ONLY" -eq 1 ] && [ "$APPLY_CLEANUP" -
   fi
 fi
 
+if [ "$DO_DEPLOY" -eq 1 ] || { [ "$CLEANUP_ONLY" -eq 1 ] && [ "$APPLY_CLEANUP" -eq 1 ]; }; then
+  acquire_deploy_lock ||
+    fail "another MissionD deploy/cleanup owns $DEPLOY_LOCK_PATH; retry after it finishes or remove a verified stale lock" 1
+  assert_active_project_root_can_mutate "pre-mutation" ||
+    fail "active release belongs to another project root; refusing to mutate active without MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER=1" 1
+fi
+
 if [ "$CLEANUP_ONLY" -eq 1 ]; then
   PREVIOUS_ACTIVE="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
   cleanup_old_releases "$APPLY_CLEANUP"
@@ -1476,6 +1581,8 @@ assert_active_release_matches_expected "pre-switch" ||
 assert_candidate_commit_not_behind_active "pre-switch" "$GIT_FULL_SHA" ||
   fail "candidate commit is behind or divergent from active release before switch; refusing without MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1" 4
 switch_active_release "$CANDIDATE_DIR"
+assert_active_release_owned "post-switch" ||
+  fail "deploy ownership guard failed after active switch; refusing to continue" 4
 ensure_default_mcp_config
 
 LAUNCHD_PROJECT_ROOT="$CANDIDATE_LAUNCHD_PROJECT_ROOT"
@@ -1484,6 +1591,10 @@ if ! restart_daemon_supervisor; then
   rollback_with_smoke "$PREVIOUS_ACTIVE" || true
   fail "launchctl reload/kickstart failed; rollback attempted" 4
 fi
+assert_active_release_owned "post-launchd" ||
+  fail "deploy ownership guard failed after launchd restart; refusing to continue" 4
+assert_launchd_runtime_owned "post-launchd" ||
+  fail "deploy ownership guard failed: launchd runtime roots do not match active release" 4
 record_timing "launchd-kickstart" "$KICKSTART_START"
 
 SOCKET_WAIT_START="$(date +%s)"
@@ -1504,6 +1615,10 @@ if ! post_switch_smoke; then
   rollback_with_smoke "$PREVIOUS_ACTIVE" || true
   fail "smoke check failed; rollback attempted" 6
 fi
+assert_active_release_owned "post-mcp-smoke" ||
+  fail "deploy ownership guard failed after MCP smoke; refusing to continue" 6
+assert_launchd_runtime_owned "post-mcp-smoke" ||
+  fail "deploy ownership guard failed after MCP smoke: launchd roots drifted" 6
 record_timing "post-switch-mcp-smoke" "$POST_SMOKE_START"
 
 JARVIS_SLOT_START="$(date +%s)"
@@ -1511,11 +1626,17 @@ if ! post_switch_jarvis_slot_ensure; then
   rollback_with_smoke "$PREVIOUS_ACTIVE" || true
   fail "Jarvis default slot ensure failed; rollback attempted" 6
 fi
+assert_active_release_owned "post-jarvis-smoke" ||
+  fail "deploy ownership guard failed after Jarvis smoke; refusing to continue" 6
 record_timing "post-switch-jarvis-slot-ensure" "$JARVIS_SLOT_START"
 
 CLEANUP_START="$(date +%s)"
 cleanup_old_releases 1
 cleanup_repo_runtime_cache
+assert_active_release_owned "post-cleanup" ||
+  fail "deploy ownership guard failed after cleanup; refusing to report success" 6
+assert_launchd_runtime_owned "post-cleanup" ||
+  fail "deploy ownership guard failed after cleanup: launchd roots drifted" 6
 record_timing "cleanup" "$CLEANUP_START"
 write_self_deploy_closure_files "$CANDIDATE_DIR" "success" "passed" "release closed"
 print_timing_summary

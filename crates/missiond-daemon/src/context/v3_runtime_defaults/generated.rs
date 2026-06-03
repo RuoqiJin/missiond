@@ -41,7 +41,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 21,
-      "source_hash": "09b81d3db03d8642ff6377a54c2a3c02"
+      "source_hash": "fbd35c72c6aa3c0ddaa8cacd190baafa"
     },
     {
       "file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
@@ -207,7 +207,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 21,
-          "source_hash": "09b81d3db03d8642ff6377a54c2a3c02"
+          "source_hash": "fbd35c72c6aa3c0ddaa8cacd190baafa"
         }
       ]
     },

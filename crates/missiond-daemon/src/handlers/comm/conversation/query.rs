@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
 use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::lenient;
@@ -10,6 +11,7 @@ use crate::state::AppState;
 const CONVERSATION_HYBRID_FTS_WEIGHT: f64 = 0.65;
 const CONVERSATION_HYBRID_VEC_WEIGHT: f64 = 0.35;
 const MIN_HYBRID_VECTOR_ONLY_SIMILARITY: f32 = 0.50;
+const CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS: usize = 420;
 
 fn compact_preview(content: &str, max_chars: usize) -> String {
     let mut out = String::new();
@@ -20,6 +22,151 @@ fn compact_preview(content: &str, max_chars: usize) -> String {
         out.push('…');
     }
     out
+}
+
+fn compact_conversation_match_reason(raw: &str, max_chars: usize) -> (String, bool, usize) {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let raw_chars = normalized.chars().count();
+    if raw_chars <= max_chars {
+        return (normalized, false, raw_chars);
+    }
+    let suffix = "...";
+    let take_chars = max_chars.saturating_sub(suffix.chars().count());
+    let mut compact = normalized.chars().take(take_chars).collect::<String>();
+    compact.push_str(suffix);
+    (compact, true, raw_chars)
+}
+
+fn conversation_duplicate_signature(
+    project_id: Option<&str>,
+    raw_match_reason: &str,
+) -> Option<String> {
+    let mut normalized = String::new();
+    let mut last_was_space = true;
+    for ch in raw_match_reason.chars().flat_map(char::to_lowercase) {
+        if ch.is_alphanumeric() {
+            normalized.push(ch);
+            last_was_space = false;
+        } else if !last_was_space {
+            normalized.push(' ');
+            last_was_space = true;
+        }
+    }
+    let tokens = normalized
+        .split_whitespace()
+        .take(80)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if tokens.chars().count() < 48 {
+        return None;
+    }
+    Some(format!(
+        "{}|{}",
+        project_id.unwrap_or("unknown-project"),
+        tokens
+    ))
+}
+
+fn copy_duplicate_summary_field(map: &mut Map<String, Value>, result: &Value, key: &str) {
+    if let Some(value) = result.get(key) {
+        if !value.is_null() {
+            map.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
+fn duplicate_session_summary(result: &Value) -> Value {
+    let mut map = Map::new();
+    for key in [
+        "sessionId",
+        "project",
+        "projectId",
+        "canonicalProjectId",
+        "canonicalProjectPath",
+        "projectMatchReason",
+        "conversationType",
+        "status",
+        "slotId",
+        "messageCount",
+        "startedAt",
+        "summary",
+        "matchReason",
+        "matchReasonTruncated",
+        "rawMatchReasonChars",
+        "cosineSim",
+        "rawMatchReason",
+    ] {
+        copy_duplicate_summary_field(&mut map, result, key);
+    }
+    Value::Object(map)
+}
+
+fn remove_internal_duplicate_signature(result: &mut Value) {
+    if let Some(object) = result.as_object_mut() {
+        object.remove("_duplicateSignature");
+    }
+}
+
+fn collapse_similar_conversation_results(
+    results: Vec<Value>,
+    include_duplicate_sessions: bool,
+) -> (Vec<Value>, usize, usize) {
+    let mut groups: BTreeMap<String, usize> = BTreeMap::new();
+    let mut collapsed = Vec::new();
+    let mut duplicate_groups = 0usize;
+    let mut duplicate_sessions_collapsed = 0usize;
+
+    for mut result in results {
+        let signature = result
+            .get("_duplicateSignature")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        remove_internal_duplicate_signature(&mut result);
+
+        let Some(signature) = signature else {
+            collapsed.push(result);
+            continue;
+        };
+
+        if let Some(existing_index) = groups.get(&signature).copied() {
+            duplicate_sessions_collapsed += 1;
+            if let Some(existing) = collapsed
+                .get_mut(existing_index)
+                .and_then(Value::as_object_mut)
+            {
+                let next_count = existing
+                    .get("duplicateSessionCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    + 1;
+                if next_count == 2 {
+                    duplicate_groups += 1;
+                }
+                existing.insert(
+                    "duplicateSessionCount".to_string(),
+                    serde_json::json!(next_count),
+                );
+                if include_duplicate_sessions {
+                    let summary = duplicate_session_summary(&result);
+                    existing
+                        .entry("duplicateSessions".to_string())
+                        .or_insert_with(|| Value::Array(Vec::new()))
+                        .as_array_mut()
+                        .expect("duplicateSessions is initialized as an array")
+                        .push(summary);
+                }
+            }
+            continue;
+        }
+
+        if let Some(object) = result.as_object_mut() {
+            object.insert("duplicateSessionCount".to_string(), serde_json::json!(1));
+        }
+        groups.insert(signature, collapsed.len());
+        collapsed.push(result);
+    }
+
+    (collapsed, duplicate_groups, duplicate_sessions_collapsed)
 }
 
 fn load_conversation_config() -> Result<ConversationIngestionRuntimeConfig> {
@@ -76,6 +223,179 @@ fn normalize_search_conversation_type(conversation_type: Option<String>) -> Opti
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalProjectMatch {
+    id: String,
+    path: String,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProjectDiagnosticBucket {
+    count: usize,
+    path: Option<String>,
+    raw_projects: Vec<String>,
+    match_reasons: Vec<&'static str>,
+}
+
+fn encoded_project_path(path: &str) -> String {
+    path.trim_end_matches('/').replace('/', "-")
+}
+
+fn decoded_claude_projects_path(raw: &str) -> Option<String> {
+    let marker = "/.claude/projects/";
+    let encoded = raw.split_once(marker)?.1.split('/').next()?.trim();
+    if let Some(rest) = encoded.strip_prefix("-Users-jinchen-Projects-") {
+        if !rest.is_empty() {
+            return Some(format!("/Users/jinchen/Projects/{rest}"));
+        }
+    }
+    None
+}
+
+fn raw_conversation_project_path(raw_project: Option<&str>) -> Option<String> {
+    let raw = raw_project.map(str::trim).filter(|p| !p.is_empty())?;
+    if raw.contains("/.claude/projects/") {
+        return decoded_claude_projects_path(raw);
+    }
+    if raw.starts_with('/') {
+        return Some(raw.to_string());
+    }
+    None
+}
+
+fn canonical_conversation_project(
+    raw_project: Option<&str>,
+    raw_project_id: Option<&str>,
+    projects: &[missiond_core::types::ProjectConfig],
+) -> Option<CanonicalProjectMatch> {
+    if let Some(project_id) = raw_project_id.map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some(project) = projects
+            .iter()
+            .find(|project| project.active && project.id == project_id)
+        {
+            let path =
+                raw_conversation_project_path(raw_project).unwrap_or_else(|| project.path.clone());
+            return Some(CanonicalProjectMatch {
+                id: project.id.clone(),
+                path,
+                reason: "conversation_project_id",
+            });
+        }
+    }
+
+    let raw = raw_project.map(str::trim).filter(|p| !p.is_empty())?;
+    for project in projects.iter().filter(|project| project.active) {
+        if raw == project.id {
+            return Some(CanonicalProjectMatch {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                reason: "registered_project_id",
+            });
+        }
+        if raw == project.path
+            || std::path::Path::new(raw).starts_with(std::path::Path::new(&project.path))
+        {
+            return Some(CanonicalProjectMatch {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                reason: "registered_path_prefix",
+            });
+        }
+        let encoded_path = encoded_project_path(&project.path);
+        if !encoded_path.is_empty() && raw.contains(&encoded_path) {
+            return Some(CanonicalProjectMatch {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                reason: "claude_encoded_project_path",
+            });
+        }
+    }
+    if let Some(decoded_path) = decoded_claude_projects_path(raw) {
+        if let Some(decoded_name) = std::path::Path::new(&decoded_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        {
+            if let Some(project) = projects
+                .iter()
+                .find(|project| project.active && project.id == decoded_name)
+            {
+                return Some(CanonicalProjectMatch {
+                    id: project.id.clone(),
+                    path: decoded_path,
+                    reason: "claude_encoded_project_leaf",
+                });
+            }
+        }
+    }
+    None
+}
+
+fn record_project_diagnostic(
+    buckets: &mut BTreeMap<String, ProjectDiagnosticBucket>,
+    raw_project: Option<&str>,
+    canonical: Option<&CanonicalProjectMatch>,
+) {
+    let key = canonical
+        .map(|project| project.id.clone())
+        .or_else(|| raw_project.map(|project| format!("raw:{project}")))
+        .unwrap_or_else(|| "unknown".to_string());
+    let bucket = buckets.entry(key).or_default();
+    bucket.count += 1;
+    if bucket.path.is_none() {
+        bucket.path = canonical.map(|project| project.path.clone());
+    }
+    if let Some(project) = raw_project {
+        if !bucket.raw_projects.iter().any(|seen| seen == project) {
+            bucket.raw_projects.push(project.to_string());
+        }
+    }
+    if let Some(project) = canonical {
+        if !bucket.match_reasons.contains(&project.reason) {
+            bucket.match_reasons.push(project.reason);
+        }
+    }
+}
+
+fn conversation_search_project_diagnostics(
+    requested_project: Option<&str>,
+    buckets: &BTreeMap<String, ProjectDiagnosticBucket>,
+) -> Value {
+    let result_project_counts: Vec<Value> = buckets
+        .iter()
+        .map(|(project_id, bucket)| {
+            serde_json::json!({
+                "projectId": project_id,
+                "canonicalPath": bucket.path.clone(),
+                "count": bucket.count,
+                "rawProjects": bucket.raw_projects.clone(),
+                "matchReasons": bucket.match_reasons.clone(),
+            })
+        })
+        .collect();
+    let project_filter_applied = requested_project.is_some();
+    let distinct_project_lanes = buckets.len();
+    let suggested_filters: Vec<&str> = buckets
+        .keys()
+        .filter(|project| project.as_str() != "unknown" && !project.starts_with("raw:"))
+        .map(|project| project.as_str())
+        .collect();
+    serde_json::json!({
+        "schema": "missiond.conversation-search-project-diagnostics.v1",
+        "projectFilterApplied": project_filter_applied,
+        "requestedProject": requested_project,
+        "scope": if project_filter_applied { "explicit_project" } else { "global_unscoped" },
+        "distinctProjectLanes": distinct_project_lanes,
+        "resultProjectCounts": result_project_counts,
+        "suggestedProjectFilters": suggested_filters,
+        "warning": if !project_filter_applied && distinct_project_lanes > 1 {
+            Some("Unscoped conversation search returned multiple project lanes; pass project=<id> to make the audit bounded.")
+        } else {
+            None
+        },
+    })
+}
+
 pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     let config = load_conversation_config()?;
     match name {
@@ -120,7 +440,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 status: Option<String>,
                 #[serde(default, deserialize_with = "lenient::option_i64")]
                 limit: Option<i64>,
-                #[serde(alias = "conversation_type")]
+                #[serde(alias = "conversation_type", alias = "conversationType")]
                 conversation_type: Option<String>,
                 #[serde(alias = "task_id")]
                 task_id: Option<String>,
@@ -597,8 +917,14 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 time_range: Option<String>,
                 project: Option<String>,
                 /// Filter by conversation_type (e.g. "gemini_chat")
-                #[serde(alias = "conversation_type")]
+                #[serde(alias = "conversation_type", alias = "conversationType")]
                 conversation_type: Option<String>,
+                #[serde(default, alias = "include_raw_match_reason")]
+                include_raw_match_reason: bool,
+                #[serde(default, alias = "collapse_similar")]
+                collapse_similar: Option<bool>,
+                #[serde(default, alias = "include_duplicate_sessions")]
+                include_duplicate_sessions: bool,
                 #[serde(alias = "user_id")]
                 user_id: Option<String>,
                 #[serde(alias = "tenant_id")]
@@ -617,6 +943,9 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 time_range,
                 project,
                 conversation_type,
+                include_raw_match_reason,
+                collapse_similar,
+                include_duplicate_sessions,
                 user_id,
                 tenant_id,
                 application_id,
@@ -625,6 +954,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             let top_k = limit.unwrap_or(config.conversation_search_default_limit) as usize;
             let skip = offset.unwrap_or(0) as usize;
             let mode = query_mode.as_deref().unwrap_or("hybrid");
+            let collapse_similar = collapse_similar.unwrap_or(true);
 
             let conversation_type = normalize_search_conversation_type(conversation_type);
 
@@ -872,15 +1202,38 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             if skip > 0 {
                 ranked = ranked.into_iter().skip(skip).collect();
             }
-            ranked.truncate(top_k);
+            let enrich_limit = if collapse_similar {
+                top_k.saturating_mul(3).max(top_k)
+            } else {
+                top_k
+            };
+            ranked.truncate(enrich_limit);
 
             // 4. Enrich with snippets (Postgres FTS native) or llmSummary fallback
+            let active_projects: Vec<missiond_core::types::ProjectConfig> = {
+                let registry = state.project_registry.read().await;
+                registry.active_projects().into_iter().cloned().collect()
+            };
+            let mut project_buckets: BTreeMap<String, ProjectDiagnosticBucket> = BTreeMap::new();
             let mut results = Vec::new();
             for (sid, _rrf, fts_r, _vec_r, sim) in &ranked {
                 let conv = state.store.get_conversation(sid).await.ok().flatten();
+                let canonical_project = conv.as_ref().and_then(|conversation| {
+                    canonical_conversation_project(
+                        conversation.project.as_deref(),
+                        conversation.project_id.as_deref(),
+                        &active_projects,
+                    )
+                });
+                record_project_diagnostic(
+                    &mut project_buckets,
+                    conv.as_ref()
+                        .and_then(|conversation| conversation.project.as_deref()),
+                    canonical_project.as_ref(),
+                );
 
                 // Build matchReason: FTS snippet if keyword-matched, llmSummary if vector-only
-                let match_reason = if fts_r.is_some() {
+                let raw_match_reason = if fts_r.is_some() {
                     // FTS hit: get native snippet text from the store.
                     let snippets = state
                         .store
@@ -908,10 +1261,25 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                             .unwrap_or("(无摘要)")
                     )
                 };
+                let (match_reason, match_reason_truncated, raw_match_reason_chars) =
+                    compact_conversation_match_reason(
+                        &raw_match_reason,
+                        CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS,
+                    );
+                let duplicate_signature = conversation_duplicate_signature(
+                    canonical_project
+                        .as_ref()
+                        .map(|project| project.id.as_str()),
+                    &raw_match_reason,
+                );
 
-                results.push(serde_json::json!({
+                let mut result = serde_json::json!({
                     "sessionId": sid,
                     "project": conv.as_ref().and_then(|c| c.project.as_deref()),
+                    "projectId": conv.as_ref().and_then(|c| c.project_id.as_deref()),
+                    "canonicalProjectId": canonical_project.as_ref().map(|project| project.id.as_str()),
+                    "canonicalProjectPath": canonical_project.as_ref().map(|project| project.path.as_str()),
+                    "projectMatchReason": canonical_project.as_ref().map(|project| project.reason),
                     "conversationType": conv.as_ref().map(|c| c.conversation_type.as_str()),
                     "status": conv.as_ref().map(|c| c.status.as_str()),
                     "slotId": conv.as_ref().and_then(|c| c.slot_id.as_deref()),
@@ -919,9 +1287,31 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                     "messageCount": conv.as_ref().map(|c| c.message_count),
                     "startedAt": conv.as_ref().map(|c| &c.started_at),
                     "matchReason": match_reason,
+                    "matchReasonTruncated": match_reason_truncated,
+                    "rawMatchReasonChars": raw_match_reason_chars,
                     "cosineSim": sim,
-                }));
+                });
+                if let Some(signature) = duplicate_signature {
+                    result["_duplicateSignature"] = serde_json::json!(signature);
+                }
+                if include_raw_match_reason {
+                    result["rawMatchReason"] = serde_json::json!(raw_match_reason);
+                }
+                results.push(result);
             }
+
+            let uncollapsed_returned_candidates = results.len();
+            let (mut results, duplicate_groups, duplicate_sessions_collapsed) = if collapse_similar
+            {
+                collapse_similar_conversation_results(results, include_duplicate_sessions)
+            } else {
+                results
+                    .iter_mut()
+                    .for_each(remove_internal_duplicate_signature);
+                (results, 0, 0)
+            };
+            let collapsed_candidate_count = results.len();
+            results.truncate(top_k);
 
             Ok(ToolResult::json(&serde_json::json!({
                 "results": results,
@@ -929,9 +1319,26 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 "totalHits": total_hits,
                 "query": query,
                 "mode": mode,
+                "conversationTypeFilter": conversation_type,
                 "ftsHits": fts_ranked.len(),
                 "vecHits": vec_ranked.len(),
                 "filteredSemanticHits": filtered_semantic_hits,
+                "projectDiagnostics": conversation_search_project_diagnostics(project.as_deref(), &project_buckets),
+                "matchReasonPolicy": {
+                    "maxChars": CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS,
+                    "rawOptIn": "includeRawMatchReason=true"
+                },
+                "duplicateCollapse": {
+                    "enabled": collapse_similar,
+                    "policy": "same-project normalized matchReason fingerprint",
+                    "rawOptIn": "includeDuplicateSessions=true",
+                    "disableOptOut": "collapseSimilar=false",
+                    "uncollapsedReturnedCandidates": uncollapsed_returned_candidates,
+                    "collapsedCandidateCount": collapsed_candidate_count,
+                    "duplicateGroups": duplicate_groups,
+                    "duplicateSessionsCollapsed": duplicate_sessions_collapsed,
+                    "includeDuplicateSessions": include_duplicate_sessions,
+                },
             })))
         }
 
@@ -1231,9 +1638,32 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        conversation_search_score, keep_conversation_hybrid_candidate,
-        normalize_search_conversation_type, MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
+        canonical_conversation_project, collapse_similar_conversation_results,
+        compact_conversation_match_reason, conversation_duplicate_signature,
+        conversation_search_project_diagnostics, conversation_search_score,
+        keep_conversation_hybrid_candidate, normalize_search_conversation_type,
+        record_project_diagnostic, CanonicalProjectMatch,
+        CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS, MIN_HYBRID_VECTOR_ONLY_SIMILARITY,
     };
+    use missiond_core::types::ProjectConfig;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn project(id: &str, path: &str) -> ProjectConfig {
+        ProjectConfig {
+            id: id.to_string(),
+            path: path.to_string(),
+            intent_path: None,
+            active: true,
+            slots: vec![],
+            github_url: None,
+            kind: "managed".to_string(),
+            vault_path: None,
+            parent_id: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
 
     #[test]
     fn hybrid_ranking_prefers_fts_over_vector_only() {
@@ -1270,6 +1700,91 @@ mod tests {
     }
 
     #[test]
+    fn compact_match_reason_bounds_direct_search_output() {
+        let raw = "Manifest Gate skipping verify backward compat ".repeat(40);
+        let (compact, truncated, raw_chars) =
+            compact_conversation_match_reason(&raw, CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS);
+        assert!(truncated);
+        assert!(raw_chars > compact.chars().count());
+        assert!(compact.chars().count() <= CONVERSATION_SEARCH_MATCH_REASON_MAX_CHARS);
+        assert!(compact.ends_with("..."));
+    }
+
+    #[test]
+    fn duplicate_collapse_folds_same_project_session_hits() {
+        let raw = "[assistant] Deploy Center canary failed and service.manifest.toml skipped verify backward compat because Manifest Gate was bypassed in the same deployment evidence.";
+        let signature = conversation_duplicate_signature(Some("missiond"), raw).unwrap();
+        let results = vec![
+            json!({
+                "sessionId": "s1",
+                "project": "/Users/jinchen/Projects/missiond",
+                "status": "completed",
+                "startedAt": "2026-06-02T01:00:00Z",
+                "slotId": "slot-codex-default",
+                "canonicalProjectId": "missiond",
+                "canonicalProjectPath": "/Users/jinchen/Projects/missiond",
+                "projectMatchReason": "conversation_project_id",
+                "conversationType": "codex_chat",
+                "messageCount": 21,
+                "matchReason": raw,
+                "rawMatchReasonChars": raw.chars().count(),
+                "matchReasonTruncated": false,
+                "_duplicateSignature": signature,
+            }),
+            json!({
+                "sessionId": "s2",
+                "project": "/Users/jinchen/Projects/missiond",
+                "status": "active",
+                "startedAt": "2026-06-02T02:00:00Z",
+                "slotId": "slot-codex-default",
+                "canonicalProjectId": "missiond",
+                "canonicalProjectPath": "/Users/jinchen/Projects/missiond",
+                "projectMatchReason": "conversation_project_id",
+                "conversationType": "codex_chat",
+                "messageCount": 22,
+                "matchReason": raw,
+                "rawMatchReasonChars": raw.chars().count(),
+                "matchReasonTruncated": false,
+                "_duplicateSignature": conversation_duplicate_signature(Some("missiond"), raw).unwrap(),
+            }),
+            json!({
+                "sessionId": "s3",
+                "status": "completed",
+                "startedAt": "2026-06-02T03:00:00Z",
+                "canonicalProjectId": "asr",
+                "conversationType": "codex_chat",
+                "rawMatchReasonChars": raw.chars().count(),
+                "matchReasonTruncated": false,
+                "_duplicateSignature": conversation_duplicate_signature(Some("asr"), raw).unwrap(),
+            }),
+        ];
+
+        let (collapsed, duplicate_groups, duplicate_sessions_collapsed) =
+            collapse_similar_conversation_results(results, true);
+        assert_eq!(collapsed.len(), 2);
+        assert_eq!(duplicate_groups, 1);
+        assert_eq!(duplicate_sessions_collapsed, 1);
+        assert_eq!(collapsed[0]["duplicateSessionCount"], 2);
+        assert_eq!(collapsed[0]["duplicateSessions"][0]["sessionId"], "s2");
+        assert_eq!(
+            collapsed[0]["duplicateSessions"][0]["project"],
+            "/Users/jinchen/Projects/missiond"
+        );
+        assert_eq!(
+            collapsed[0]["duplicateSessions"][0]["canonicalProjectId"],
+            "missiond"
+        );
+        assert_eq!(
+            collapsed[0]["duplicateSessions"][0]["projectMatchReason"],
+            "conversation_project_id"
+        );
+        assert_eq!(collapsed[0]["duplicateSessions"][0]["messageCount"], 22);
+        assert_eq!(collapsed[0]["duplicateSessions"][0]["matchReason"], raw);
+        assert!(collapsed[0].get("_duplicateSignature").is_none());
+        assert_eq!(collapsed[1]["duplicateSessionCount"], 1);
+    }
+
+    #[test]
     fn search_conversation_type_all_means_unfiltered() {
         assert_eq!(normalize_search_conversation_type(None), None);
         assert_eq!(normalize_search_conversation_type(Some("".into())), None);
@@ -1289,6 +1804,107 @@ mod tests {
         assert_eq!(
             normalize_search_conversation_type(Some("user".into())),
             Some("user".into())
+        );
+    }
+
+    #[test]
+    fn canonical_project_matches_registered_and_claude_encoded_paths() {
+        let projects = vec![
+            project("missiond", "/Users/jinchen/Projects/missiond"),
+            project(
+                "router",
+                "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/router",
+            ),
+        ];
+
+        assert_eq!(
+            canonical_conversation_project(None, Some("missiond"), &projects),
+            Some(CanonicalProjectMatch {
+                id: "missiond".into(),
+                path: "/Users/jinchen/Projects/missiond".into(),
+                reason: "conversation_project_id",
+            })
+        );
+        assert_eq!(
+            canonical_conversation_project(
+                Some("/Users/jinchen/.claude/projects/-Users-jinchen-Projects-missiond"),
+                None,
+                &projects,
+            )
+            .map(|project| (project.id, project.reason)),
+            Some(("missiond".into(), "claude_encoded_project_path"))
+        );
+        assert_eq!(
+            canonical_conversation_project(
+                Some("/Users/jinchen/.claude/projects/-Users-jinchen-Downloads-xiaojinpro-gateway-xiaojinpro-backend-services-router/session/subagents"),
+                None,
+                &projects,
+            )
+            .map(|project| (project.id, project.reason)),
+            Some(("router".into(), "claude_encoded_project_path"))
+        );
+    }
+
+    #[test]
+    fn canonical_project_id_prefers_raw_conversation_path_over_runtime_root() {
+        let projects = vec![project(
+            "missiond",
+            "/private/tmp/missiond-search-noise-fix",
+        )];
+
+        let canonical = canonical_conversation_project(
+            Some("/Users/jinchen/Projects/missiond"),
+            Some("missiond"),
+            &projects,
+        )
+        .expect("canonical project");
+        assert_eq!(canonical.id, "missiond");
+        assert_eq!(canonical.path, "/Users/jinchen/Projects/missiond");
+        assert_eq!(canonical.reason, "conversation_project_id");
+
+        let legacy = canonical_conversation_project(
+            Some("/Users/jinchen/.claude/projects/-Users-jinchen-Projects-missiond"),
+            None,
+            &projects,
+        )
+        .expect("legacy canonical project");
+        assert_eq!(legacy.id, "missiond");
+        assert_eq!(legacy.path, "/Users/jinchen/Projects/missiond");
+        assert_eq!(legacy.reason, "claude_encoded_project_leaf");
+    }
+
+    #[test]
+    fn unscoped_project_diagnostics_warn_on_multiple_lanes() {
+        let mut buckets = BTreeMap::new();
+        record_project_diagnostic(
+            &mut buckets,
+            Some("/Users/jinchen/Projects/missiond"),
+            Some(&CanonicalProjectMatch {
+                id: "missiond".into(),
+                path: "/Users/jinchen/Projects/missiond".into(),
+                reason: "registered_path_prefix",
+            }),
+        );
+        record_project_diagnostic(
+            &mut buckets,
+            Some("/Users/jinchen/Projects/router"),
+            Some(&CanonicalProjectMatch {
+                id: "router".into(),
+                path: "/Users/jinchen/Projects/router".into(),
+                reason: "registered_path_prefix",
+            }),
+        );
+
+        let diagnostics = conversation_search_project_diagnostics(None, &buckets);
+        assert_eq!(diagnostics["scope"], "global_unscoped");
+        assert_eq!(diagnostics["distinctProjectLanes"], 2);
+        assert!(diagnostics["warning"].as_str().is_some());
+        assert_eq!(
+            diagnostics["suggestedProjectFilters"]
+                .as_array()
+                .expect("filters")
+                .len(),
+            2
         );
     }
 }

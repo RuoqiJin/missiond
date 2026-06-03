@@ -56,12 +56,16 @@ child.stderr.on('data', (chunk) => {
 
 const timeout = setTimeout(() => {
   child.kill('SIGTERM');
-  console.error(`mission-mcp-call timed out calling ${toolName}`);
-  if (stderr.trim()) console.error(stderr.trim());
+  process.stderr.write(`mission-mcp-call timed out calling ${toolName}\n`);
+  if (stderr.trim()) process.stderr.write(`${stderr.trim()}\n`);
   process.exit(124);
 }, Number(process.env.MISSION_MCP_CALL_TIMEOUT_MS ?? 120000));
 
 child.on('close', (code) => {
+  void finish(code);
+});
+
+async function finish(code) {
   clearTimeout(timeout);
   const lines = stdout.trim().split(/\n+/).filter(Boolean);
   const responses = [];
@@ -75,13 +79,22 @@ child.on('close', (code) => {
   }
   const callResponse = responses.find((response) => response.id === 2) ?? responses.at(-1);
   if (stderr.trim()) {
-    console.error(stderr.trim());
+    await writeStream(process.stderr, `${stderr.trim()}\n`);
   }
   if (callResponse) {
-    console.log(JSON.stringify(callResponse, null, 2));
+    await writeStream(process.stdout, `${JSON.stringify(callResponse, null, 2)}\n`);
   }
-  process.exit(code ?? 0);
-});
+  process.exitCode = code ?? 0;
+}
+
+function writeStream(stream, text) {
+  return new Promise((resolve, reject) => {
+    stream.write(text, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
 
 for (const request of requests) {
   child.stdin.write(JSON.stringify(request));

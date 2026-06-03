@@ -29,9 +29,10 @@ const RULE_VERSION: &str = "20260531.1";
 
 const BATCH_INTERVAL_SECS: u64 = 5;
 const RECONCILE_INTERVAL_SECS: u64 = 60;
-const STARTUP_BACKFILL_LIMIT: i64 = 200;
+const DEFAULT_STARTUP_BACKFILL_LIMIT: i64 = 25;
 const RECONCILE_BACKFILL_LIMIT: i64 = 50;
 const MAX_MESSAGES_PER_SESSION: i64 = 10_000;
+const STARTUP_BACKFILL_LIMIT_ENV: &str = "MISSIOND_MESSAGE_LABELER_STARTUP_LIMIT";
 
 const NOISE_TOOL_RESULT_CHARS: usize = 10_000;
 const NOISE_THINKING_CHARS: usize = 5_000;
@@ -97,13 +98,16 @@ async fn run_message_labeler(state: Arc<AppState>, mut ctx: WorkerContext) {
         }
     };
 
-    process_pending_sessions(&state, STARTUP_BACKFILL_LIMIT, "startup").await;
+    super::wait_for_background_db_grace("message_labeler").await;
+    process_pending_sessions(&state, startup_backfill_limit(), "startup").await;
 
     let mut dirty: HashSet<String> = HashSet::new();
     let mut batch_tick =
         tokio::time::interval(tokio::time::Duration::from_secs(BATCH_INTERVAL_SECS));
     let mut reconcile_tick =
         tokio::time::interval(tokio::time::Duration::from_secs(RECONCILE_INTERVAL_SECS));
+    batch_tick.tick().await;
+    reconcile_tick.tick().await;
 
     loop {
         ctx.wait_if_paused().await;
@@ -134,6 +138,15 @@ async fn run_message_labeler(state: Arc<AppState>, mut ctx: WorkerContext) {
             }
         }
     }
+}
+
+fn startup_backfill_limit() -> i64 {
+    super::env_i64_bounded(
+        STARTUP_BACKFILL_LIMIT_ENV,
+        DEFAULT_STARTUP_BACKFILL_LIMIT,
+        0,
+        500,
+    )
 }
 
 async fn process_sessions(state: &AppState, session_ids: &[String], reason: &str) {

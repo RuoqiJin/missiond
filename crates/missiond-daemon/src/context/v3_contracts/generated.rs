@@ -169,7 +169,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "multi-section-shard",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(21u32),
-        source_hash: "09b81d3db03d8642ff6377a54c2a3c02",
+        source_hash: "fbd35c72c6aa3c0ddaa8cacd190baafa",
     },
     SourceUnit {
         file: ".missiond/v3/shards/memory-knowledge-runtime.lisp",
@@ -343,7 +343,7 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
                 kind: "multi-section-shard",
                 included_by: Some(".missiond/v3/shards/index.lisp"),
                 include_line: Some(21u32),
-                source_hash: "09b81d3db03d8642ff6377a54c2a3c02",
+                source_hash: "fbd35c72c6aa3c0ddaa8cacd190baafa",
             },
         ],
     },

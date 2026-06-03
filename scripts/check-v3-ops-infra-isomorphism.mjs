@@ -30,6 +30,7 @@ const DEFAULT_FILES = {
   corePgMod: 'crates/missiond-core/src/db/pg/mod.rs',
   coreDbTraits: 'crates/missiond-core/src/db/traits.rs',
   codexIngestionWorker: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
+  sysinfraInfra: 'crates/missiond-daemon/src/handlers/sysinfra/infra.rs',
 };
 
 function main() {
@@ -216,6 +217,16 @@ function checkFiles(root, files) {
       message: 'default MCP config heredoc must not emit duplicate JSON objects',
     });
   }
+
+  requireAll(diagnostics, files.sysinfraInfra, sources.sysinfraInfra, [
+    'is_infra_evidence_line',
+    'is_deploy_drift_anchor_token',
+    'service.manifest.toml',
+    'manifest gate',
+    'canary',
+    'sqlx migrate',
+    'volume override',
+  ]);
 
   requireAll(diagnostics, files.cargoFmtTouched, sources.cargoFmtTouched, [
     'scripts/cargo-fmt-touched.sh --check',
@@ -429,6 +440,9 @@ ready: IPC initialize succeeded
 [wait-smoke]
 socket exists but IPC initialize is not ready yet
 lsof "$SOCK_PATH"
+ready: IPC initialize succeeded
+[wait-smoke]
+socket exists but IPC initialize is not ready yet
 run_mcp_initialize_smoke()
 validate_default_mcp_config
 node -e
@@ -442,6 +456,13 @@ active_release=$RELEASE_ID
 rollback_with_smoke
 rollback-smoke
 rollback attempted
+`);
+
+  writeFixture(root, DEFAULT_FILES.sysinfraInfra, `
+fn is_infra_evidence_line(line: &str) -> bool {
+  "service.manifest.toml"; "manifest gate"; "canary"; "sqlx migrate"; "volume override";
+}
+fn is_deploy_drift_anchor_token(token: &str) -> bool { true }
 `);
 
   writeFixture(root, DEFAULT_FILES.cargoFmtTouched, `
