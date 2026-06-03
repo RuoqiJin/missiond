@@ -820,7 +820,31 @@ assert_active_project_root_can_mutate() {
 }
 
 assert_active_release_owned() {
-  assert_active_project_root_can_mutate "$1"
+  local phase="$1"
+  local active manifest active_owner_root active_project_root expected_root
+  expected_root="${MISSIOND_DEPLOY_EXPECTED_ACTIVE_ROOT:-$DEPLOY_OWNER_ROOT}"
+  if truthy_env_value "$MISSIOND_DEPLOY_ALLOW_PROJECT_ROOT_TAKEOVER"; then
+    log "ownership: active release ownership takeover explicitly allowed phase=$phase expected_active_root=$expected_root deploy_owner_root=$DEPLOY_OWNER_ROOT"
+    return 0
+  fi
+  active="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  if [ -z "$active" ]; then
+    log "ownership: active release ownership guard has no active release phase=$phase"
+    return 1
+  fi
+  manifest="$active/release-manifest.json"
+  if [ ! -f "$manifest" ]; then
+    log "ownership: active release ownership guard missing manifest phase=$phase active=$active"
+    return 1
+  fi
+  active_owner_root="$(json_string_field "$manifest" "release_owner_root" 2>/dev/null || true)"
+  active_project_root="$(json_string_field "$manifest" "launchd_project_root" 2>/dev/null || true)"
+  [ -n "$active_owner_root" ] || active_owner_root="$active_project_root"
+  if [ -n "$active_owner_root" ] && [ "$active_owner_root" != "$expected_root" ]; then
+    log "ownership: active release owner mismatch phase=$phase expected=$expected_root active_owner_root=$active_owner_root active=$active"
+    return 1
+  fi
+  log "ownership: active release ownership guard verified phase=$phase active=$active owner_root=$expected_root"
 }
 
 assert_launchd_runtime_owned() {
