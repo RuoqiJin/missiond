@@ -96,13 +96,16 @@ function main() {
       ['DLQ action replay', /dlq_replay/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-daemon/src/engine/task_completion_evidence.rs', [
-      ['completion evidence writer', /struct\s+TaskCompletionEvidenceWriter/],
+      ['completion evidence input', /struct\s+TaskCompletionEvidenceInput/],
       ['evidence write failed code', /EVIDENCE_WRITE_FAILED/],
       ['evidence write timeout code', /EVIDENCE_WRITE_TIMEOUT/],
       ['shared memory task result put', /task_result_put/],
     ]),
+    ...checkRequiredText(root, 'crates/missiond-daemon/src/engine/control_plane_kernel.rs', [
+      ['completion evidence writer', /write_completion_artifact_command[\s\S]*task_result_put_command[\s\S]*artifact_hash/],
+    ]),
     ...checkRequiredText(root, 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs', [
-      ['mission_execution completion writes evidence', /TaskCompletionEvidenceWriter[\s\S]*task_result_artifact/],
+      ['mission_execution completion writes evidence', /write_completion_artifact[\s\S]*task_result_artifact/],
     ]),
     ...checkRequiredText(root, 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs', [
       ['plan execute contract required', /PLAN_CONTRACT_REQUIRED/],

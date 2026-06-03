@@ -67,6 +67,8 @@ const ALLOW_SQLITE_TOKEN_FILES = new Set([
   'crates/missiond-core/src/types/conversation.rs',
   'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
   'crates/missiond-daemon/src/startup_preflight.rs',
+  'crates/missiond-core/migrations/20260318000000_init.sql',
+  'crates/missiond-core/migrations/20260523003000_codex_replay.sql',
   'crates/missiond-core/migrations/20260525001000_codex_provider_index_state.sql',
   'scripts/audit-codex-history-ingestion.mjs',
   'scripts/check-v3-ops-infra-isomorphism.mjs',
@@ -221,6 +223,11 @@ function isAllowedForbiddenPattern(rel, line, name) {
   }
   if (name === 'SQLite/PostgreSQL dual-engine wording' && rel === 'scripts/check-v3-ops-infra-isomorphism.mjs') {
     return true;
+  }
+  if (rel === 'crates/missiond-core/migrations/20260318000000_init.sql') {
+    return line.includes('1:1 translation from SQLite')
+      || line.includes('tsvector column replaces FTS5 virtual table')
+      || line.includes('replaces SQLite trg_msg_count_insert');
   }
   if (name === 'mission.db runtime path' && line.includes('MissionControl::db')) {
     return true;

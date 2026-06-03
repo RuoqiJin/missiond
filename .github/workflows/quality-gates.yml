@@ -20,8 +20,35 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Checkout semantic-terminal dependency
+        run: git clone --depth 1 --branch main https://github.com/RuoqiJin/semantic-terminal.git ../semantic-terminal
+
+      - name: Checkout jarvis-forge dependency
+        shell: bash
+        env:
+          JARVIS_FORGE_DEPLOY_KEY: ${{ secrets.JARVIS_FORGE_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${JARVIS_FORGE_DEPLOY_KEY}" ]; then
+            echo "::error title=Missing private dependency key::JARVIS_FORGE_DEPLOY_KEY is required to checkout RuoqiJin/jarvis-forge"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${JARVIS_FORGE_DEPLOY_KEY}" > ~/.ssh/missiond_jarvis_forge_deploy_key
+          chmod 600 ~/.ssh/missiond_jarvis_forge_deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/missiond_jarvis_forge_deploy_key -o IdentitiesOnly=yes" \
+            git clone --depth 1 --branch main git@github.com:RuoqiJin/jarvis-forge.git ../jarvis-forge
+
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Install OCaml toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ocaml opam ocaml-dune
+          node scripts/check-ocaml-toolchain.mjs --json
 
       - name: Check storage contract
         run: |

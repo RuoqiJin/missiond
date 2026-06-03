@@ -6,9 +6,7 @@ on:
       - main
     tags:
       - 'v*'
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,6 +52,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout semantic-terminal dependency
+        run: git clone --depth 1 --branch main https://github.com/RuoqiJin/semantic-terminal.git ../semantic-terminal
+
+      - name: Checkout jarvis-forge dependency
+        shell: bash
+        env:
+          JARVIS_FORGE_DEPLOY_KEY: ${{ secrets.JARVIS_FORGE_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${JARVIS_FORGE_DEPLOY_KEY}" ]; then
+            echo "::error title=Missing private dependency key::JARVIS_FORGE_DEPLOY_KEY is required to checkout RuoqiJin/jarvis-forge"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${JARVIS_FORGE_DEPLOY_KEY}" > ~/.ssh/missiond_jarvis_forge_deploy_key
+          chmod 600 ~/.ssh/missiond_jarvis_forge_deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/missiond_jarvis_forge_deploy_key -o IdentitiesOnly=yes" \
+            git clone --depth 1 --branch main git@github.com:RuoqiJin/jarvis-forge.git ../jarvis-forge
+
       # Only install Rust on GitHub-hosted runners
       - name: Install Rust toolchain (GitHub hosted)
         if: ${{ !matrix.self-hosted }}
@@ -84,7 +103,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --target ${{ matrix.target }} -p missiond-daemon --no-default-features
+          cargo build --release --target ${{ matrix.target }} -p missiond-daemon --no-default-features --features postgres
           cargo build --release --target ${{ matrix.target }} -p missiond-mcp
 
       - name: Prepare artifacts (Unix)
