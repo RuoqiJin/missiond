@@ -219,8 +219,9 @@ function checkFiles(root) {
   ]);
   requireAll(diagnostics, FILES.ccController, sources.ccController, [
     'dangerously_skip_permissions: req.skip_permissions',
-    'extra_env: req.env.clone()',
-    'Some(&req.env)',
+    'let mut extra_env = req.env.clone()',
+    'extra_env: extra_env.clone()',
+    'Some(&extra_env)',
   ]);
 
   requireAll(diagnostics, FILES.controlTree, sources.controlTree, [
@@ -879,8 +880,9 @@ canonical_source_for_engine(self.engine);
 TextComplete;`);
   write(root, 'ccController', `
 dangerously_skip_permissions: req.skip_permissions;
-extra_env: req.env.clone();
-Some(&req.env);`);
+let mut extra_env = req.env.clone();
+extra_env: extra_env.clone();
+Some(&extra_env);`);
   write(root, 'spawner', `
 original_slot_env;
 MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS;
