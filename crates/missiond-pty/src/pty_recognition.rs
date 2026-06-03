@@ -582,6 +582,21 @@ fn recognize_codex_with_style(
     let signals = extract_codex_screen_signals_with_style(lines, styled_screen);
     let mcp = extract_codex_mcp_screen(lines);
 
+    if is_codex_rate_limit_model_switch_prompt(&lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Codex,
+            PtyCanonicalState::Blocked,
+            0.94,
+            "codex:rate_limit_model_switch_prompt",
+        )
+        .with_blocked_kind("model_switch_prompt")
+        .with_phase("model_switch")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
+    }
+
     if let Some((kind, reason)) = provider_unavailable_match(&lower) {
         return PtyRecognitionSnapshot::new(
             CliEngine::Codex,
@@ -656,21 +671,6 @@ fn recognize_codex_with_style(
         )
         .with_blocked_kind("approval")
         .with_elapsed(elapsed)
-        .with_screen_identity(identity)
-        .with_screen_signals(signals);
-    }
-
-    if is_codex_rate_limit_model_switch_prompt(&lower) {
-        return PtyRecognitionSnapshot::new(
-            CliEngine::Codex,
-            PtyCanonicalState::Blocked,
-            0.93,
-            "codex:rate_limit_model_switch_prompt",
-        )
-        .with_blocked_kind("model_switch_prompt")
-        .with_phase("model_switch")
-        .with_elapsed(elapsed)
-        .with_source("tui_source_signature")
         .with_screen_identity(identity)
         .with_screen_signals(signals);
     }
@@ -981,10 +981,15 @@ fn is_codex_model_picker(lines: &[String], lower: &str) -> bool {
 }
 
 fn is_codex_rate_limit_model_switch_prompt(lower: &str) -> bool {
-    lower.contains("approaching rate limits")
+    let has_limit_context = lower.contains("approaching rate limits")
+        || lower.contains("usage limit")
+        || lower.contains("rate limit")
+        || lower.contains("credit usage")
+        || lower.contains("remaining usage");
+    has_limit_context
         && lower.contains("switch to")
         && lower.contains("keep current model")
-        && lower.contains("press enter to confirm")
+        && (lower.contains("press enter to confirm") || lower.contains("enter to confirm"))
 }
 
 fn is_codex_permission_picker(lines: &[String], lower: &str) -> bool {
@@ -3446,6 +3451,35 @@ mod tests {
         assert_eq!(result.reason, "codex:rate_limit_model_switch_prompt");
         assert_eq!(result.blocked_kind.as_deref(), Some("model_switch_prompt"));
         assert_eq!(result.phase.as_deref(), Some("model_switch"));
+    }
+
+    #[test]
+    fn codex_usage_limit_model_switch_prompt_preempts_hard_usage_limit_block() {
+        let result = recognize_codex(&lines(&[
+            "Switch to gpt-5.4-mini for lower credit usage?",
+            "Usage limit reminder",
+            "› 1. Switch to gpt-5.4-mini                 Small, fast, and cost-efficient model",
+            "  2. Keep current model",
+            "  3. Keep current model (never show again)  Hide future usage limit reminders",
+            "Press enter to confirm or esc to go back",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "codex:rate_limit_model_switch_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("model_switch_prompt"));
+    }
+
+    #[test]
+    fn codex_hard_usage_limit_without_keep_current_choice_stays_blocked() {
+        let result = recognize_screen(
+            CliEngine::Codex,
+            &lines(&["rate limit exceeded; try again later"]),
+            SessionState::Error,
+        );
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "provider:usage_limit");
+        assert_eq!(result.blocked_kind.as_deref(), Some("usage_limit"));
     }
 
     #[test]
