@@ -1198,6 +1198,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         &source_summaries,
         &deployment_events_summary,
     );
+    let requested_unknowns = args.unknowns.clone();
 
     let sources_used = sources.keys().cloned().collect::<Vec<_>>();
     let runtime_environment = sources
@@ -1223,26 +1224,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         )
     });
     let mut payload = json!({
-            "ok": !diagnostics_have_hard_failures(&diagnostics),
-            "schema": "missiond.context-gather.v1",
-            "query": query,
-            "project_id": effective_project_id.clone(),
-            "requested_project_id": args.project_id.clone(),
-            "skill": args.skill.clone(),
-            "infra_target": args.infra_target.clone(),
-            "task_id": args.task_id.clone(),
-            "source_id": args.source_id.clone(),
-            "conversation_id": args.conversation_id.clone(),
-            "isolation_scope": {
-                "user_id": user_id.clone(),
-                "tenant_id": tenant_id.clone(),
-                "application_id": application_id.clone(),
-                "channel": channel.clone(),
-            },
-            "topic_id": topic_id.clone(),
-            "topic_label": topic_label.clone(),
-            "permission_context": args.permission_context.clone(),
-            "unknowns": args.unknowns.clone(),
+        "ok": !diagnostics_have_hard_failures(&diagnostics),
+        "schema": "missiond.context-gather.v1",
+        "query": query,
+        "project_id": effective_project_id.clone(),
+        "requested_project_id": args.project_id.clone(),
+        "skill": args.skill.clone(),
+        "infra_target": args.infra_target.clone(),
+        "task_id": args.task_id.clone(),
+        "source_id": args.source_id.clone(),
+        "conversation_id": args.conversation_id.clone(),
+        "isolation_scope": {
+            "user_id": user_id.clone(),
+            "tenant_id": tenant_id.clone(),
+            "application_id": application_id.clone(),
+            "channel": channel.clone(),
+        },
+        "topic_id": topic_id.clone(),
+        "topic_label": topic_label.clone(),
+        "permission_context": args.permission_context.clone(),
+        "requested_unknowns": requested_unknowns,
+        "unknowns": unresolved.clone(),
         "sources_used": sources_used,
         "runtime_environment": runtime_environment,
         "sources": response_sources,
@@ -4366,11 +4368,13 @@ fn synthesize_unknowns_with_source_summaries(
     source_summaries: &Value,
     deployment_events_summary: &Value,
 ) -> Vec<Value> {
-    unknowns
+    let mut saw_deployment_event_unknown = false;
+    let mut synthesized = unknowns
         .iter()
         .filter(|unknown| !unknown.trim().is_empty())
         .map(|unknown| {
             if unknown_targets_deployment_events(unknown) {
+                saw_deployment_event_unknown = true;
                 if let Some(synthesized) =
                     synthesize_deployment_event_unknown(unknown, deployment_events_summary)
                 {
@@ -4389,7 +4393,28 @@ fn synthesize_unknowns_with_source_summaries(
                 }
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if !saw_deployment_event_unknown {
+        if let Some(auto) = synthesize_deployment_event_unknown(
+            "Deployment event authority gap: does MissionD have authoritative deploy-center.deploy_events for the resolved project/service?",
+            deployment_events_summary,
+        ) {
+            if auto.get("status").and_then(Value::as_str) == Some("evidence_gap") {
+                let mut auto = auto;
+                if let Some(object) = auto.as_object_mut() {
+                    object.insert(
+                        "unknown_id".to_string(),
+                        Value::String("deployment_events_authority_gap".to_string()),
+                    );
+                    object.insert("auto_synthesized".to_string(), Value::Bool(true));
+                }
+                synthesized.push(auto);
+            }
+        }
+    }
+
+    synthesized
 }
 
 fn unknown_targets_deployment_events(unknown: &str) -> bool {
@@ -6754,6 +6779,62 @@ mod tests {
         assert_eq!(
             synthesized[1].get("status").and_then(Value::as_str),
             Some("needs_synthesis")
+        );
+    }
+
+    #[test]
+    fn deployment_event_gap_is_synthesized_without_explicit_unknowns() {
+        let source = json!({
+            "schema": "missiond.deployment-events-context.v1",
+            "status": "no_matching_deploy_center_events",
+            "authority": "deploy-center ExternalServiceEvent via MissionD EventBridge",
+            "event_count": 0,
+            "observed_candidates": {
+                "candidate_count": 64,
+                "authoritative_deploy_center_candidate_count": 0,
+                "webhook_ingest_probe_candidate_count": 2,
+                "observed_webhook_ingest_probe": true,
+                "observed_authoritative_deploy_center_source": false
+            },
+            "relay_diagnostics": {
+                "inferred_gap": "missiond_webhook_ingest_ok_deploy_center_relay_absent",
+                "next_actions": [
+                    "deploy_events cursor inspection"
+                ]
+            }
+        });
+        let deployment_events_summary = summarize_source("deployment_events", &source);
+        let source_summaries = json!({
+            "deployment_events": deployment_events_summary.clone()
+        });
+
+        let synthesized = synthesize_unknowns_with_source_summaries(
+            &[],
+            &source_summaries,
+            &deployment_events_summary,
+        );
+
+        assert_eq!(synthesized.len(), 1);
+        assert_eq!(
+            synthesized[0].get("unknown_id").and_then(Value::as_str),
+            Some("deployment_events_authority_gap")
+        );
+        assert_eq!(
+            synthesized[0].get("status").and_then(Value::as_str),
+            Some("evidence_gap")
+        );
+        assert_eq!(
+            synthesized[0]
+                .get("auto_synthesized")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            synthesized[0]
+                .get("relay_diagnostics")
+                .and_then(|value| value.get("inferred_gap"))
+                .and_then(Value::as_str),
+            Some("missiond_webhook_ingest_ok_deploy_center_relay_absent")
         );
     }
 
