@@ -3940,6 +3940,9 @@ fn evidence_item_uses_stable_projection_id(source_type: &str) -> bool {
     matches!(
         source_type,
         "runtime_environment"
+            | "project_resolution"
+            | "project_registry"
+            | "ssot"
             | "deploy_center_provenance"
             | "support_catalog"
             | "deployment_closure_policy"
@@ -6115,6 +6118,65 @@ mod tests {
             items[0].summary,
             "fresh deploy_ops projection from this context gather"
         );
+    }
+
+    #[test]
+    fn evidence_items_dedupe_prefers_requested_profile_for_project_summary_projections() {
+        for source_type in ["project_registry", "ssot", "project_resolution"] {
+            let mut stale_profile = missiond_core::types::EvidenceItemInput {
+                id: format!("evi-{source_type}-intent-default"),
+                lane_id: "project_ssot".to_string(),
+                source_type: source_type.to_string(),
+                source_id: Some("asr".to_string()),
+                source_ref: None,
+                project_id: Some("asr".to_string()),
+                task_id: None,
+                title: "Project SSOT".to_string(),
+                summary: "intent_default projection from read model".to_string(),
+                authority_class: "file-first-lisp-and-compiled-project-universe".to_string(),
+                validity: "current_rule".to_string(),
+                privacy_class: "internal".to_string(),
+                freshness: "compiled_runtime_bound".to_string(),
+                score: Some(1.0),
+                raw_policy: "compact_only".to_string(),
+                evidence_refs: json!([]),
+                metadata: json!({
+                    "projection": "mission_context_gather.compact_evidence",
+                    "source_profile": "intent_default"
+                }),
+            };
+            if source_type == "ssot" {
+                stale_profile.source_id = None;
+            }
+            let mut deploy_ops = stale_profile.clone();
+            deploy_ops.id = format!("evi-{source_type}-deploy-ops");
+            deploy_ops.summary = "deploy_ops projection from current context gather".to_string();
+            deploy_ops.score = None;
+            deploy_ops.metadata = json!({
+                "projection": "mission_context_gather.compact_evidence",
+                "source_profile": "deploy_ops"
+            });
+
+            let mut items = vec![stale_profile.clone(), deploy_ops.clone()];
+            dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+            assert_eq!(items.len(), 1, "{source_type}");
+            assert_eq!(items[0].id, deploy_ops.id, "{source_type}");
+            assert_eq!(
+                items[0]
+                    .metadata
+                    .get("source_profile")
+                    .and_then(Value::as_str),
+                Some("deploy_ops"),
+                "{source_type}"
+            );
+
+            let mut items = vec![deploy_ops.clone(), stale_profile];
+            dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+            assert_eq!(items.len(), 1, "{source_type}");
+            assert_eq!(items[0].id, deploy_ops.id, "{source_type}");
+        }
     }
 
     #[test]
