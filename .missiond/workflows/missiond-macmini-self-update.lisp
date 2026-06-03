@@ -13,7 +13,8 @@
              (executor_name macmini)
              (source_sync_provider github)
              (target_root "/Users/rickyhq/Projects/missiond")
-             (deploy_command "scripts/deploy-daemon.sh --debug")
+             (deploy_command "MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1 scripts/deploy-daemon.sh --debug")
+             (commit_regression_override "github-main-source-authority-takeover-after-source-commit-verification")
 	             (slot_ensure_url "http://127.0.0.1:9120/internal/jarvis/slot/ensure")
 	             (monitor_url "http://127.0.0.1:9120/api/monitor/jarvis"))
 
@@ -68,7 +69,7 @@
 
      (step s7 :id blue-green-deploy
     :entry "build succeeded"
-    :core ((step s1 :logic "run scripts/deploy-daemon.sh --debug on Mac mini target")
+    :core ((step s1 :logic "run MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1 scripts/deploy-daemon.sh --debug on Mac mini target only after fetch-source verified GitHub main source_commit")
            (step s2 :logic "deploy script writes release id, active/previous symlink, rollback artifact, launchd kickstart result")
            (step s3 :logic "deploy script must verify generated V3 contracts instead of rewriting tracked generated files on the target")
            (step s4 :logic "failure must rollback or produce rollback_required diagnostic"))
@@ -99,7 +100,8 @@
                (gate g3 :rule "master-not-implementer: resident master only drafts intent/plan and dispatches; deploy-agent executes the build/deploy job")
                (gate g4 :rule "secret-ref-only: tokens for deploy-center/Auth/secret-store are secret refs or target env only; values are never written to Lisp, Board, logs, or artifacts")
                (gate g5 :rule "task-result-artifact-required: completed workflow must produce task-result-artifact; PTY idle and Board note are projections")
-               (gate g6 :rule "rollback-artifact-required: blue-green deploy must publish previous release or rollback marker before final success"))
+               (gate g6 :rule "rollback-artifact-required: blue-green deploy must publish previous release or rollback marker before final success")
+               (gate g7 :rule "github-source-authority-takeover: MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1 is allowed only in this self-update lane after fetch-source verifies GitHub main source_commit and a clean target worktree; ordinary deploy-daemon invocations remain fail-closed"))
 
   :completion ((criterion c1 :rule "local-monitor-ready: Mac mini /api/monitor/jarvis returns overall=ready")
                (criterion c2 :rule "public-jarvis-ready: public /jarvis/api/monitor/jarvis is either ready or returns typed tunnel diagnostic")

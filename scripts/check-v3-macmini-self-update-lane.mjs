@@ -38,7 +38,8 @@ if (diagnostics.length === 0) {
     '(executor_name macmini)',
     '(source_sync_provider github)',
     '(target_root "/Users/rickyhq/Projects/missiond")',
-    '(deploy_command "scripts/deploy-daemon.sh --debug")',
+    '(deploy_command "MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1 scripts/deploy-daemon.sh --debug")',
+    '(commit_regression_override "github-main-source-authority-takeover-after-source-commit-verification")',
     ':id receive-client-objective',
     ':id draft-deployment-plan',
     ':id create-native-workflow-run',
@@ -50,7 +51,8 @@ if (diagnostics.length === 0) {
     ':id publish-provenance',
     'services/deploy-center/scripts/run-missiond-macmini-self-update.sh',
     'git pull --ff-only',
-    'scripts/deploy-daemon.sh --debug',
+    'MISSIOND_DEPLOY_ALLOW_COMMIT_REGRESSION=1 scripts/deploy-daemon.sh --debug',
+    'GitHub main source_commit',
     'verify generated V3 contracts instead of rewriting tracked generated files on the target',
     'git status --short --untracked-files=no remains empty after deploy and smoke',
     'http://127.0.0.1:9120/internal/jarvis/slot/ensure',
@@ -59,6 +61,7 @@ if (diagnostics.length === 0) {
     'client-channel-required',
     'task-result-artifact-required',
     'rollback-artifact-required',
+    'github-source-authority-takeover',
   ]);
 
   requireAll(FILES.infrastructure, sources.infrastructure, [
