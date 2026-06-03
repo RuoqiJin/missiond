@@ -1761,35 +1761,30 @@ impl PTYSession {
 
     /// Poll screen after paste to confirm the CLI has received the pasted text.
     /// Claude Code shows "[Pasted text #N +M lines]" for multi-line pastes.
-    /// Gemini CLI (Ink TUI) handles bracketed paste natively — short settle only.
-    /// Falls back after 10s timeout.
+    /// Other TUIs generally render pasted text in the composer. Waiting for
+    /// that screen transition avoids sending Enter before a large paste lands.
     async fn wait_for_paste_confirmation(&self, pre_paste_prompt: &str) {
         let slot_id = &self.slot_id;
+        let is_claude = self.engine == missiond_shared::CliEngine::ClaudeCode;
+        let initial_delay_ms = if is_claude { 500 } else { 150 };
+        let poll_delay_ms = if is_claude { 250 } else { 100 };
+        let max_attempts = if is_claude { 38 } else { 40 };
 
-        // Gemini/Codex: Ink TUI handles bracketed paste natively, no polling needed.
-        // Just a brief settle for the TUI to process the input.
-        if self.engine != missiond_shared::CliEngine::ClaudeCode {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            tracing::debug!(slot = %slot_id, engine = %self.engine, "Paste settle (non-Claude CLI)");
-            return;
-        }
+        tokio::time::sleep(Duration::from_millis(initial_delay_ms)).await;
 
-        // Claude Code: poll for paste confirmation
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        for attempt in 0..38 {
-            // Poll every 250ms, up to ~10s total (500ms initial + 38*250ms = ~10s)
+        for attempt in 0..max_attempts {
             let screen = self.get_screen_text().await;
 
-            // Check 1: Claude Code shows "[Pasted text #N" for multi-line pastes
+            // Some CLIs summarize multi-line pastes instead of rendering the
+            // full text in the composer.
             if screen.contains("[Pasted text") {
-                tracing::debug!(slot = %slot_id, attempt, "Paste confirmed: [Pasted text] detected");
+                tracing::debug!(slot = %slot_id, attempt, engine = %self.engine, "Paste confirmed: [Pasted text] detected");
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 return;
             }
 
-            // Check 2: the prompt line changed from pre-paste snapshot (single-line paste)
-            // Find the last prompt line (starts with ❯ or >)
+            // The prompt line changing is the only portable signal that the
+            // TUI processed bracketed paste before Enter is sent.
             let current_prompt = screen
                 .lines()
                 .rev()
@@ -1802,6 +1797,7 @@ impl PTYSession {
             if !current_prompt.is_empty() && current_prompt != pre_paste_prompt {
                 tracing::debug!(
                     slot = %slot_id, attempt,
+                    engine = %self.engine,
                     before = %pre_paste_prompt,
                     after = %current_prompt,
                     "Paste confirmed: prompt line changed"
@@ -1810,9 +1806,15 @@ impl PTYSession {
                 return;
             }
 
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(Duration::from_millis(poll_delay_ms)).await;
         }
-        tracing::warn!(slot = %slot_id, "Paste confirmation timed out after 10s, sending Enter anyway");
+        let waited_ms = initial_delay_ms + poll_delay_ms * max_attempts;
+        tracing::warn!(
+            slot = %slot_id,
+            engine = %self.engine,
+            waited_ms,
+            "Paste confirmation timed out, sending Enter anyway"
+        );
     }
 
     /// Capture the current prompt line content (for pre-paste snapshot).

@@ -7545,7 +7545,7 @@ JSON 字段必须是：\n\
         context_sufficiency: Option<&str>,
     ) -> anyhow::Result<JarvisAuthoredPlanDraft> {
         let grounding_report_preview =
-            Self::read_jarvis_grounding_report_preview(grounding_report_file).await;
+            Self::read_jarvis_plan_grounding_report_preview(grounding_report_file).await;
         let prompt = Self::jarvis_codex_plan_prompt(
             config,
             schema,
@@ -8457,6 +8457,12 @@ JSON 字段必须是：\n\
         grounding_report_file: Option<&str>,
     ) -> Option<String> {
         Self::read_jarvis_file_preview(grounding_report_file, 24_000).await
+    }
+
+    async fn read_jarvis_plan_grounding_report_preview(
+        grounding_report_file: Option<&str>,
+    ) -> Option<String> {
+        Self::read_jarvis_file_preview(grounding_report_file, 12_000).await
     }
 
     fn build_jarvis_direct_answer_prompt(

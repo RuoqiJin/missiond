@@ -44,6 +44,7 @@ const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
 const CODEX_STARTUP_READY_WAIT_SECS: u64 = 60;
 const CODEX_TRUST_READY_WAIT_SECS: u64 = 12;
 const CODEX_PROMPT_SEND_READY_WAIT_SECS: u64 = 12;
+const CODEX_PROMPT_ROLLOUT_ACK_WAIT_SECS: u64 = 15;
 const CODEX_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS: u64 = 45;
 const CODEX_DURABLE_FINAL_IDLE_GRACE_MIN_SECS: u64 = 10;
 const CODEX_DURABLE_FINAL_IDLE_GRACE_MAX_SECS: u64 = 300;
@@ -1320,20 +1321,32 @@ impl CodexProviderDriver {
     async fn submit_prompt_step(
         &self,
         result: &mut ProviderBoxResult,
+        request: &ProviderInteractionRequest,
         slot_id: &str,
         prompt: &str,
     ) -> bool {
         let before = self.observe(slot_id).await;
         let send_result = self.pty.send_fire_and_forget(slot_id, prompt).await;
         let after = self.observe_after_action(slot_id).await;
+        let rollout_ack = if send_result.is_ok() {
+            self.wait_for_correlated_rollout_input(
+                &request.correlation_id,
+                Duration::from_secs(CODEX_PROMPT_ROLLOUT_ACK_WAIT_SECS),
+            )
+            .await
+        } else {
+            None
+        };
         let mut action = PtyStepAction::text("<codex prompt paste + enter>");
         action.redacted = true;
         let status = if send_result.is_err() {
             PtyStepVerificationStatus::Failed
+        } else if rollout_ack.is_some() {
+            PtyStepVerificationStatus::Verified
         } else if after.snapshot.state == PtyCanonicalState::Running
             || Self::observations_changed(&before, &after)
         {
-            PtyStepVerificationStatus::Verified
+            PtyStepVerificationStatus::Ambiguous
         } else {
             PtyStepVerificationStatus::Ambiguous
         };
@@ -1353,8 +1366,20 @@ impl CodexProviderDriver {
                     "error": err.to_string(),
                 }),
             ));
+        } else if rollout_ack.is_none() {
+            step.diagnostics.push(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                "Codex prompt submission did not produce a correlated durable rollout user message",
+                json!({
+                    "slot_id": slot_id,
+                    "correlation_id": request.correlation_id,
+                    "codex_home": self.codex_home.display().to_string(),
+                    "ack_wait_secs": CODEX_PROMPT_ROLLOUT_ACK_WAIT_SECS,
+                    "rule": "provider-box requires durable Codex rollout evidence before treating a prompt submission as verified"
+                }),
+            ));
         }
-        let ok = step.verification_status != PtyStepVerificationStatus::Failed;
+        let ok = step.verification_status == PtyStepVerificationStatus::Verified;
         result.record_step(step);
         ok
     }
@@ -2849,6 +2874,46 @@ impl CodexProviderDriver {
         .flatten()
     }
 
+    async fn wait_for_correlated_rollout_input(
+        &self,
+        correlation_id: &str,
+        max_wait: Duration,
+    ) -> Option<String> {
+        let started = Instant::now();
+        loop {
+            if let Some(path) = self.find_correlated_rollout_input(correlation_id).await {
+                return Some(path);
+            }
+            if started.elapsed() >= max_wait {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn find_correlated_rollout_input(&self, correlation_id: &str) -> Option<String> {
+        let roots = [
+            self.codex_home.join("sessions"),
+            self.codex_home.join("archived_sessions"),
+        ];
+        let correlation_id = correlation_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut files = Vec::new();
+            for root in roots {
+                collect_jsonl_files(&root, &mut files);
+            }
+            files.sort_by(|a, b| modified_at(b).cmp(&modified_at(a)));
+            files.truncate(80);
+            files
+                .iter()
+                .find(|path| rollout_contains_correlated_input(path, &correlation_id))
+                .map(|path| path.display().to_string())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     async fn extract_image_generation_from_rollouts(
         &self,
         thread_id: &str,
@@ -3132,7 +3197,7 @@ impl ProviderDriver for CodexProviderDriver {
         }
         let prompt = correlate_prompt(request);
         if !self
-            .submit_prompt_step(&mut result, &slot_id, prompt.as_str())
+            .submit_prompt_step(&mut result, request, &slot_id, prompt.as_str())
             .await
         {
             result.status = ProviderBoxStatus::Failed;
@@ -4621,6 +4686,18 @@ fn modified_at(path: &Path) -> std::time::SystemTime {
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
+fn rollout_contains_correlated_input(path: &Path, correlation_id: &str) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let reader = BufReader::new(file);
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .any(|event| event_contains_text(&event, correlation_id))
+}
+
 fn extract_correlated_rollout(path: &Path, correlation_id: &str) -> Option<CodexTurnFinal> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
@@ -5009,6 +5086,26 @@ mod tests {
         let turn = extract_correlated_rollout(&path, corr).expect("turn");
 
         assert_eq!(turn.final_text, "final from durable rollout");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rollout_ack_detects_correlated_user_message_before_final() {
+        let dir = std::env::temp_dir().join(format!(
+            "missiond-codex-provider-box-ack-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("rollout.jsonl");
+        let corr = "corr-ack-test";
+        let user = json!({
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": format!("MissionD provider-box correlation_id: {corr}")}
+        });
+        fs::write(&path, format!("{user}\n")).expect("write");
+
+        assert!(rollout_contains_correlated_input(&path, corr));
+        assert!(extract_correlated_rollout(&path, corr).is_none());
         let _ = fs::remove_dir_all(dir);
     }
 
