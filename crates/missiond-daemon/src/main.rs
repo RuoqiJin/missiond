@@ -2367,7 +2367,41 @@ async fn main() -> Result<()> {
         let bus = Arc::clone(&bus_services);
         tokio::spawn(async move {
             while let Some(event) = system_webhook_rx.recv().await {
-                let _ = bus.publish_system_webhook(event).await;
+                let webhook_meta = match &event {
+                    missiond_core::event::events::SystemEvent::ExternalServiceEvent {
+                        service_id,
+                        event_id,
+                        event_kind,
+                        ..
+                    } => Some((service_id.clone(), event_id.clone(), event_kind.clone())),
+                    _ => None,
+                };
+                match bus.publish_system_webhook(event).await {
+                    Ok(ack) => {
+                        if let Some((service_id, event_id, event_kind)) = webhook_meta {
+                            info!(
+                                service_id = %service_id,
+                                event_id = %event_id,
+                                event_kind = %event_kind,
+                                seq = ack.seq().0,
+                                "system webhook event committed"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        if let Some((service_id, event_id, event_kind)) = webhook_meta {
+                            warn!(
+                                service_id = %service_id,
+                                event_id = %event_id,
+                                event_kind = %event_kind,
+                                error = %err,
+                                "system webhook event publish failed"
+                            );
+                        } else {
+                            warn!(error = %err, "system webhook event publish failed");
+                        }
+                    }
+                }
             }
         });
     }
