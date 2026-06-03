@@ -962,6 +962,10 @@ fn filter_deployment_closure_policy_evidence_items(
 }
 
 fn evidence_item_has_incomplete_deployment_closure_placeholder(item: &EvidenceItemInput) -> bool {
+    if evidence_item_has_incomplete_support_catalog_placeholder(item) {
+        return true;
+    }
+
     let text = format!("{} {}", item.title, item.summary).to_ascii_lowercase();
     if !text.contains("deployment closure") {
         return false;
@@ -974,6 +978,31 @@ fn evidence_item_has_incomplete_deployment_closure_placeholder(item: &EvidenceIt
     ]
     .iter()
     .any(|marker| text.contains(marker))
+}
+
+fn evidence_item_has_incomplete_support_catalog_placeholder(item: &EvidenceItemInput) -> bool {
+    if item.source_type != "support_catalog" {
+        return false;
+    }
+    if support_catalog_evidence_item_has_identity(item) {
+        return false;
+    }
+    let text = format!("{} {}", item.title, item.summary).to_ascii_lowercase();
+    text.contains("support catalog")
+        || text.contains("domain, service, deploy, endpoint")
+        || text.contains("redacted secret-reference support catalog")
+}
+
+fn support_catalog_evidence_item_has_identity(item: &EvidenceItemInput) -> bool {
+    normalized_scope_value(item.project_id.as_deref()).is_some()
+        || normalized_scope_value(item.source_id.as_deref()).is_some()
+        || normalized_scope_value(item.source_ref.as_deref()).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["project_id"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["projectId"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["service_id"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["serviceId"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["deploy_center_slug"]).is_some()
+        || evidence_ref_text(&item.evidence_refs, &["deployCenterSlug"]).is_some()
 }
 
 fn filter_stale_runtime_environment_evidence_items_with_dir(
@@ -1521,6 +1550,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 
     if selection.include_conversations {
+        let conversation_time_range = args
+            .conversation_time_range
+            .as_deref()
+            .unwrap_or("last_30d")
+            .to_string();
         insert_subcall(
             &mut sources,
             &mut diagnostics,
@@ -1537,15 +1571,21 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         "tenant_id": args.tenant_id.clone(),
                         "application_id": args.application_id.clone(),
                         "channel": args.channel.clone(),
-                        "time_range": args
-                            .conversation_time_range
-                        .as_deref()
-                        .unwrap_or("last_30d"),
+                        "time_range": conversation_time_range.clone(),
                     "query_mode": "hybrid"
                 }),
             )
             .await,
         );
+        if let Some(source) = sources.get_mut("conversation_logs") {
+            attach_conversation_search_context(
+                source,
+                effective_project_id.as_deref(),
+                &conversation_time_range,
+                "hybrid",
+                limit,
+            );
+        }
     }
 
     attach_infra_os_disabled_support_fallback(&mut sources);
@@ -1576,7 +1616,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         args.task_id.as_deref(),
         include_deployment_closure_policy,
     ));
-    dedupe_evidence_items(&mut evidence_item_inputs);
+    dedupe_evidence_items(&mut evidence_item_inputs, profile);
     let evidence_items = serde_json::to_value(&evidence_item_inputs).unwrap_or_else(|_| json!([]));
     let response_sources =
         response_sources(&sources, &source_summaries, selection.include_raw_sources);
@@ -1601,6 +1641,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         &source_summaries,
         &deployment_events_summary,
     );
+    let next_action = context_gather_next_action(profile, &deployment_events_summary, &unresolved);
+    let requested_unknowns = args.unknowns.clone();
 
     let sources_used = sources.keys().cloned().collect::<Vec<_>>();
     let runtime_environment = sources
@@ -1626,26 +1668,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         )
     });
     let mut payload = json!({
-            "ok": !diagnostics_have_hard_failures(&diagnostics),
-            "schema": "missiond.context-gather.v1",
-            "query": query,
-            "project_id": effective_project_id.clone(),
-            "requested_project_id": args.project_id.clone(),
-            "skill": args.skill.clone(),
-            "infra_target": args.infra_target.clone(),
-            "task_id": args.task_id.clone(),
-            "source_id": args.source_id.clone(),
-            "conversation_id": args.conversation_id.clone(),
-            "isolation_scope": {
-                "user_id": user_id.clone(),
-                "tenant_id": tenant_id.clone(),
-                "application_id": application_id.clone(),
-                "channel": channel.clone(),
-            },
-            "topic_id": topic_id.clone(),
-            "topic_label": topic_label.clone(),
-            "permission_context": args.permission_context.clone(),
-            "unknowns": args.unknowns.clone(),
+        "ok": !diagnostics_have_hard_failures(&diagnostics),
+        "schema": "missiond.context-gather.v1",
+        "query": query,
+        "project_id": effective_project_id.clone(),
+        "requested_project_id": args.project_id.clone(),
+        "skill": args.skill.clone(),
+        "infra_target": args.infra_target.clone(),
+        "task_id": args.task_id.clone(),
+        "source_id": args.source_id.clone(),
+        "conversation_id": args.conversation_id.clone(),
+        "isolation_scope": {
+            "user_id": user_id.clone(),
+            "tenant_id": tenant_id.clone(),
+            "application_id": application_id.clone(),
+            "channel": channel.clone(),
+        },
+        "topic_id": topic_id.clone(),
+        "topic_label": topic_label.clone(),
+        "permission_context": args.permission_context.clone(),
+        "requested_unknowns": requested_unknowns,
+        "unknowns": unresolved.clone(),
         "sources_used": sources_used,
         "runtime_environment": runtime_environment,
         "sources": response_sources,
@@ -1671,7 +1714,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "evidence_refs": evidence_refs,
         "unresolved": unresolved,
         "diagnostics": diagnostics,
-        "next_action": "Synthesize grounded intent. If intent is confirmed, assign a plan-authoring worker to compile plan.lisp from the confirmed intent plus tool/resource inventory."
+        "next_action": next_action
     });
 
     payload = redact_context_payload(&payload);
@@ -1878,6 +1921,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     Ok(ToolResult::json_pretty(&payload))
 }
 
+fn attach_conversation_search_context(
+    source: &mut Value,
+    project_id: Option<&str>,
+    time_range: &str,
+    query_mode: &str,
+    limit: usize,
+) {
+    if let Some(object) = source.as_object_mut() {
+        object.insert(
+            "filter_context".to_string(),
+            json!({
+                "project_id": project_id,
+                "time_range": time_range,
+                "query_mode": query_mode,
+                "limit": limit,
+                "filter_before_injection": true
+            }),
+        );
+    }
+}
+
 fn authority_order() -> Value {
     json!([
         "runtime_truth",
@@ -2076,11 +2140,29 @@ fn evidence_source_item_count(key: &str, value: &Value) -> usize {
         "credential_refs" => array_len(value.get("credentialRefs"))
             .max(array_len(value.get("credential_refs")))
             .max(value.as_array().map(Vec::len).unwrap_or(0)),
-        "deployment_events" => array_len(value.get("events")),
+        "deployment_events" => {
+            let summary_count = usize::from(deployment_events_summary_has_content(value));
+            summary_count + array_len(value.get("events"))
+        }
         _ if value.is_null() => 0,
         _ if value.as_object().is_some_and(|object| object.is_empty()) => 0,
         _ => 1,
     }
+}
+
+fn deployment_events_summary_has_content(value: &Value) -> bool {
+    any_field_has_content(
+        value,
+        &[
+            "status",
+            "authority",
+            "candidate_count",
+            "observed_candidates",
+            "relay_diagnostics",
+            "diagnostic",
+            "events",
+        ],
+    )
 }
 
 fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
@@ -2779,6 +2861,7 @@ fn build_evidence_items_with_options(
         project_id,
         task_id,
     );
+    add_deployment_events_summary_item(&mut items, source_summaries, profile, project_id, task_id);
     add_summary_collection_items(
         &mut items,
         source_summaries,
@@ -4086,6 +4169,126 @@ fn add_summary_collection_items(
     }
 }
 
+fn add_deployment_events_summary_item(
+    items: &mut Vec<EvidenceItemInput>,
+    source_summaries: &Value,
+    profile: SourceProfile,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+) {
+    let Some(summary) = source_summaries.get("deployment_events") else {
+        return;
+    };
+    if !deployment_events_summary_has_content(summary) {
+        return;
+    }
+
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_count = summary
+        .get("event_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let inferred_gap = summary
+        .get("relay_diagnostics")
+        .and_then(|value| value.get("inferred_gap"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let title = if status == "ok" || event_count > 0 {
+        "Deployment event provenance"
+    } else if status == "no_matching_deploy_center_events" || inferred_gap != "unknown" {
+        "Deployment event authority gap"
+    } else {
+        "Deployment event diagnostics"
+    };
+    let source_id = deployment_events_summary_source_id(summary);
+    let summary_text = deployment_events_summary_evidence_text(summary);
+    push_evidence_item(
+        items,
+        "runtime_truth",
+        "deploy_center_provenance",
+        source_id.as_deref(),
+        Some("source_summaries.deployment_events"),
+        project_id,
+        task_id,
+        title,
+        &summary_text,
+        summary,
+        profile,
+        None,
+    );
+}
+
+fn deployment_events_summary_source_id(summary: &Value) -> Option<String> {
+    let filters = summary.get("filters");
+    text_from_sources(
+        &[filters, Some(summary)],
+        &[
+            "deploy_center_slug",
+            "deployCenterSlug",
+            "service_id",
+            "serviceId",
+            "project_id",
+            "projectId",
+        ],
+    )
+}
+
+fn deployment_events_summary_evidence_text(summary: &Value) -> String {
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_count = summary
+        .get("event_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let candidate_count = summary
+        .get("candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let dropped_count = summary
+        .get("dropped_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let observed = summary.get("observed_candidates").unwrap_or(&Value::Null);
+    let authoritative_count = observed
+        .get("authoritative_deploy_center_candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let webhook_probe_count = observed
+        .get("webhook_ingest_probe_candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let relay = summary.get("relay_diagnostics").unwrap_or(&Value::Null);
+    let inferred_gap = relay
+        .get("inferred_gap")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let next_actions = relay
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(Value::as_str)
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+
+    compact_text(
+        &format!(
+            "Deploy Center deployment_events status {status}; event_count {event_count}; candidate_count {candidate_count}; dropped_count {dropped_count}; authoritative deploy-center.deploy_events candidates {authoritative_count}; non-authoritative webhook ingest probes {webhook_probe_count}; inferred_gap {inferred_gap}. Webhook probes prove MissionD ingest health only, not Deploy Center release provenance. Next actions: {next_actions}.",
+        ),
+        1200,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_evidence_item(
     items: &mut Vec<EvidenceItemInput>,
@@ -4248,17 +4451,23 @@ fn evidence_item_id(
 fn evidence_item_uses_stable_projection_id(source_type: &str) -> bool {
     matches!(
         source_type,
-        "runtime_environment" | "support_catalog" | "deployment_closure_policy"
+        "runtime_environment"
+            | "project_resolution"
+            | "project_registry"
+            | "ssot"
+            | "deploy_center_provenance"
+            | "support_catalog"
+            | "deployment_closure_policy"
     )
 }
 
-fn dedupe_evidence_items(items: &mut Vec<EvidenceItemInput>) {
+fn dedupe_evidence_items(items: &mut Vec<EvidenceItemInput>, profile: SourceProfile) {
     let mut positions = HashMap::new();
     let mut deduped = Vec::with_capacity(items.len());
     for item in items.drain(..) {
         let key = evidence_item_projection_dedupe_key(&item);
         if let Some(index) = positions.get(&key).copied() {
-            if evidence_item_should_replace_duplicate(&item, &deduped[index]) {
+            if evidence_item_should_replace_duplicate(&item, &deduped[index], profile) {
                 deduped[index] = item;
             }
         } else {
@@ -4279,22 +4488,54 @@ fn evidence_item_projection_dedupe_key(item: &EvidenceItemInput) -> String {
             item.task_id.as_deref().unwrap_or(""),
             item.source_id.as_deref().unwrap_or("")
         )
+    } else if evidence_item_is_current_context_projection(item) {
+        format!(
+            "compact_projection|{}|{}|project:{}|task:{}|source_id:{}|source_ref:{}|title:{}|summary:{}",
+            item.lane_id,
+            item.source_type,
+            item.project_id.as_deref().unwrap_or(""),
+            item.task_id.as_deref().unwrap_or(""),
+            item.source_id.as_deref().unwrap_or(""),
+            item.source_ref.as_deref().unwrap_or(""),
+            evidence_item_compact_dedupe_text(&item.title, 180),
+            evidence_item_compact_dedupe_text(&item.summary, 1200)
+        )
     } else {
         format!("id|{}", item.id)
     }
 }
 
+fn evidence_item_compact_dedupe_text(text: &str, max_chars: usize) -> String {
+    compact_text(text, max_chars).to_ascii_lowercase()
+}
+
 fn evidence_item_should_replace_duplicate(
     candidate: &EvidenceItemInput,
     existing: &EvidenceItemInput,
+    profile: SourceProfile,
 ) -> bool {
-    evidence_item_is_current_context_projection(candidate)
-        && !evidence_item_is_current_context_projection(existing)
+    if !evidence_item_is_current_context_projection(candidate) {
+        return false;
+    }
+    if !evidence_item_is_current_context_projection(existing) {
+        return true;
+    }
+    let requested_profile = Some(profile.as_str());
+    let candidate_matches_request = evidence_item_source_profile(candidate) == requested_profile;
+    let existing_matches_request = evidence_item_source_profile(existing) == requested_profile;
+    if candidate_matches_request != existing_matches_request {
+        return candidate_matches_request;
+    }
+    candidate_matches_request
 }
 
 fn evidence_item_is_current_context_projection(item: &EvidenceItemInput) -> bool {
     item.metadata.get("projection").and_then(Value::as_str)
         == Some("mission_context_gather.compact_evidence")
+}
+
+fn evidence_item_source_profile(item: &EvidenceItemInput) -> Option<&str> {
+    item.metadata.get("source_profile").and_then(Value::as_str)
 }
 
 fn short_sha256(input: &str, hex_chars: usize) -> String {
@@ -4458,6 +4699,8 @@ fn evidence_summary(value: &Value) -> String {
         &[Some(value)],
         &[
             "summary",
+            "matchReason",
+            "match_reason",
             "description",
             "snippet",
             "content",
@@ -4840,16 +5083,82 @@ fn raw_sources_policy(include_raw_sources: bool) -> &'static str {
     }
 }
 
+const CONTEXT_GATHER_DEFAULT_NEXT_ACTION: &str = "Synthesize grounded intent. If intent is confirmed, assign a plan-authoring worker to compile plan.lisp from the confirmed intent plus tool/resource inventory.";
+
+fn context_gather_next_action(
+    profile: SourceProfile,
+    deployment_events_summary: &Value,
+    unresolved: &[Value],
+) -> String {
+    if profile == SourceProfile::DeployOps
+        && (deployment_events_summary_has_authority_gap(deployment_events_summary)
+            || unresolved.iter().any(unresolved_is_deployment_event_gap))
+    {
+        if let Some(first_action) =
+            deployment_events_summary_first_next_action(deployment_events_summary)
+        {
+            return format!(
+                "Resolve Deploy Center deployment_events authority gap before inferring release state: {first_action}. See deployment_events.relay_diagnostics.next_actions for the full checklist."
+            );
+        }
+
+        return "Resolve Deploy Center deployment_events authority gap before inferring release state; inspect deployment_events.relay_diagnostics, observed_candidates, and drop_reason_counts.".to_string();
+    }
+
+    CONTEXT_GATHER_DEFAULT_NEXT_ACTION.to_string()
+}
+
+fn deployment_events_summary_has_authority_gap(summary: &Value) -> bool {
+    let event_count = summary
+        .get("event_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let status = summary.get("status").and_then(Value::as_str).unwrap_or("");
+    let inferred_gap = summary
+        .get("relay_diagnostics")
+        .and_then(|value| value.get("inferred_gap"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    event_count == 0
+        && (status == "no_matching_deploy_center_events"
+            || (!inferred_gap.is_empty() && inferred_gap != "unknown"))
+}
+
+fn deployment_events_summary_first_next_action(summary: &Value) -> Option<&str> {
+    summary
+        .get("relay_diagnostics")
+        .and_then(|value| value.get("next_actions"))
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|item| !item.trim().is_empty())
+        })
+}
+
+fn unresolved_is_deployment_event_gap(value: &Value) -> bool {
+    value.get("unknown_id").and_then(Value::as_str) == Some("deployment_events_authority_gap")
+        || (value.get("status").and_then(Value::as_str) == Some("evidence_gap")
+            && value
+                .get("evidence_ref")
+                .and_then(Value::as_str)
+                .is_some_and(|reference| reference == "source_summaries.deployment_events"))
+}
+
 fn synthesize_unknowns_with_source_summaries(
     unknowns: &[String],
     source_summaries: &Value,
     deployment_events_summary: &Value,
 ) -> Vec<Value> {
-    unknowns
+    let mut saw_deployment_event_unknown = false;
+    let mut synthesized = unknowns
         .iter()
         .filter(|unknown| !unknown.trim().is_empty())
         .map(|unknown| {
             if unknown_targets_deployment_events(unknown) {
+                saw_deployment_event_unknown = true;
                 if let Some(synthesized) =
                     synthesize_deployment_event_unknown(unknown, deployment_events_summary)
                 {
@@ -4868,7 +5177,28 @@ fn synthesize_unknowns_with_source_summaries(
                 }
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if !saw_deployment_event_unknown {
+        if let Some(auto) = synthesize_deployment_event_unknown(
+            "Deployment event authority gap: does MissionD have authoritative deploy-center.deploy_events for the resolved project/service?",
+            deployment_events_summary,
+        ) {
+            if auto.get("status").and_then(Value::as_str) == Some("evidence_gap") {
+                let mut auto = auto;
+                if let Some(object) = auto.as_object_mut() {
+                    object.insert(
+                        "unknown_id".to_string(),
+                        Value::String("deployment_events_authority_gap".to_string()),
+                    );
+                    object.insert("auto_synthesized".to_string(), Value::Bool(true));
+                }
+                synthesized.push(auto);
+            }
+        }
+    }
+
+    synthesized
 }
 
 fn unknown_targets_deployment_events(unknown: &str) -> bool {
@@ -5218,6 +5548,25 @@ fn summarize_array_source(key: &str, value: &Value, limit: usize) -> Value {
 
 fn summarize_conversation_source(key: &str, value: &Value) -> Value {
     let mut map = summary_base(key);
+    for search_key in [
+        "query",
+        "mode",
+        "count",
+        "totalHits",
+        "total_hits",
+        "ftsHits",
+        "fts_hits",
+        "vecHits",
+        "vec_hits",
+        "filteredSemanticHits",
+        "filtered_semantic_hits",
+        "crossProjectDrops",
+        "cross_project_drops",
+    ] {
+        insert_field(&mut map, value, search_key);
+    }
+    insert_conversation_filter_context(&mut map, value, "filter_context");
+    insert_conversation_filter_context(&mut map, value, "filterContext");
     for item_key in ["results", "items", "data"] {
         if value.get(item_key).and_then(Value::as_array).is_some() {
             map.insert(
@@ -5233,10 +5582,19 @@ fn summarize_conversation_source(key: &str, value: &Value) -> Value {
                     insert_field(&mut item_map, item, "session_id");
                     insert_field(&mut item_map, item, "sessionId");
                     insert_field(&mut item_map, item, "project");
+                    insert_field(&mut item_map, item, "status");
                     insert_field(&mut item_map, item, "conversation_type");
+                    insert_field(&mut item_map, item, "conversationType");
+                    insert_field(&mut item_map, item, "message_count");
+                    insert_field(&mut item_map, item, "messageCount");
+                    insert_field(&mut item_map, item, "started_at");
+                    insert_field(&mut item_map, item, "startedAt");
                     insert_field(&mut item_map, item, "timestamp");
+                    insert_field(&mut item_map, item, "cosineSim");
+                    insert_compact_field(&mut item_map, item, "summary", 360);
+                    insert_compact_field(&mut item_map, item, "matchReason", 360);
+                    insert_compact_field(&mut item_map, item, "match_reason", 360);
                     insert_compact_field(&mut item_map, item, "snippet", 260);
-                    insert_compact_field(&mut item_map, item, "content", 260);
                     Value::Object(item_map)
                 }),
             );
@@ -5244,6 +5602,35 @@ fn summarize_conversation_source(key: &str, value: &Value) -> Value {
         }
     }
     summarize_array_source(key, value, 5)
+}
+
+fn insert_conversation_filter_context(
+    map: &mut serde_json::Map<String, Value>,
+    value: &Value,
+    key: &str,
+) {
+    let Some(context) = value.get(key).and_then(Value::as_object) else {
+        return;
+    };
+    let mut compact_context = serde_json::Map::new();
+    for safe_key in [
+        "project_id",
+        "projectId",
+        "time_range",
+        "timeRange",
+        "query_mode",
+        "queryMode",
+        "limit",
+        "filter_before_injection",
+        "filterBeforeInjection",
+    ] {
+        if let Some(field) = context.get(safe_key) {
+            compact_context.insert(safe_key.to_string(), field.clone());
+        }
+    }
+    if !compact_context.is_empty() {
+        map.insert(key.to_string(), Value::Object(compact_context));
+    }
 }
 
 fn summarize_generic_item(item: &Value) -> Value {
@@ -5936,8 +6323,8 @@ mod tests {
     };
 
     use super::{
-        attach_infra_os_disabled_support_fallback, build_evidence_items,
-        build_evidence_items_with_options, build_evidence_lanes,
+        attach_conversation_search_context, attach_infra_os_disabled_support_fallback,
+        build_evidence_items, build_evidence_items_with_options, build_evidence_lanes,
         build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
         build_support_catalog, collect_evidence_refs_from_value, compiled_service_matches_lookup,
         compiled_service_matches_query, context_gather_persist_artifact,
@@ -6461,11 +6848,214 @@ mod tests {
         current.metadata = json!({"projection": "mission_context_gather.compact_evidence"});
 
         let mut items = vec![backfill, current];
-        dedupe_evidence_items(&mut items);
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "evi-current");
         assert_eq!(items[0].summary, "current context projection");
+    }
+
+    #[test]
+    fn evidence_items_dedupe_prefers_requested_profile_projection() {
+        let stale_profile = missiond_core::types::EvidenceItemInput {
+            id: "evi-intent-default".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "deployment_closure_policy".to_string(),
+            source_id: Some("asr".to_string()),
+            source_ref: None,
+            project_id: Some("asr".to_string()),
+            task_id: None,
+            title: "Deployment closure policy".to_string(),
+            summary: "intent_default projection from read model".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: Some(2.0),
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({
+                "projection": "mission_context_gather.compact_evidence",
+                "source_profile": "intent_default"
+            }),
+        };
+        let mut deploy_ops = stale_profile.clone();
+        deploy_ops.id = "evi-deploy-ops".to_string();
+        deploy_ops.summary = "deploy_ops projection from current context gather".to_string();
+        deploy_ops.score = None;
+        deploy_ops.metadata = json!({
+            "projection": "mission_context_gather.compact_evidence",
+            "source_profile": "deploy_ops"
+        });
+
+        let mut items = vec![stale_profile, deploy_ops];
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "evi-deploy-ops");
+        assert_eq!(
+            items[0]
+                .metadata
+                .get("source_profile")
+                .and_then(Value::as_str),
+            Some("deploy_ops")
+        );
+    }
+
+    #[test]
+    fn evidence_items_dedupe_keeps_requested_profile_when_stale_profile_is_later() {
+        let mut deploy_ops = missiond_core::types::EvidenceItemInput {
+            id: "evi-deploy-ops".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "deployment_closure_policy".to_string(),
+            source_id: Some("asr".to_string()),
+            source_ref: None,
+            project_id: Some("asr".to_string()),
+            task_id: None,
+            title: "Deployment closure policy".to_string(),
+            summary: "deploy_ops projection from current context gather".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: None,
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({
+                "projection": "mission_context_gather.compact_evidence",
+                "source_profile": "deploy_ops"
+            }),
+        };
+        let mut stale_profile = deploy_ops.clone();
+        stale_profile.id = "evi-intent-default".to_string();
+        stale_profile.summary = "intent_default projection from read model".to_string();
+        stale_profile.score = Some(2.0);
+        stale_profile.metadata = json!({
+            "projection": "mission_context_gather.compact_evidence",
+            "source_profile": "intent_default"
+        });
+
+        let mut items = vec![deploy_ops.clone(), stale_profile];
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "evi-deploy-ops");
+
+        deploy_ops.id = "evi-deploy-ops-fresh".to_string();
+        deploy_ops.summary = "fresh deploy_ops projection from this context gather".to_string();
+        let mut items = vec![items.remove(0), deploy_ops];
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "evi-deploy-ops-fresh");
+        assert_eq!(
+            items[0].summary,
+            "fresh deploy_ops projection from this context gather"
+        );
+    }
+
+    #[test]
+    fn evidence_items_dedupe_prefers_requested_profile_for_project_summary_projections() {
+        for source_type in ["project_registry", "ssot", "project_resolution"] {
+            let mut stale_profile = missiond_core::types::EvidenceItemInput {
+                id: format!("evi-{source_type}-intent-default"),
+                lane_id: "project_ssot".to_string(),
+                source_type: source_type.to_string(),
+                source_id: Some("asr".to_string()),
+                source_ref: None,
+                project_id: Some("asr".to_string()),
+                task_id: None,
+                title: "Project SSOT".to_string(),
+                summary: "intent_default projection from read model".to_string(),
+                authority_class: "file-first-lisp-and-compiled-project-universe".to_string(),
+                validity: "current_rule".to_string(),
+                privacy_class: "internal".to_string(),
+                freshness: "compiled_runtime_bound".to_string(),
+                score: Some(1.0),
+                raw_policy: "compact_only".to_string(),
+                evidence_refs: json!([]),
+                metadata: json!({
+                    "projection": "mission_context_gather.compact_evidence",
+                    "source_profile": "intent_default"
+                }),
+            };
+            if source_type == "ssot" {
+                stale_profile.source_id = None;
+            }
+            let mut deploy_ops = stale_profile.clone();
+            deploy_ops.id = format!("evi-{source_type}-deploy-ops");
+            deploy_ops.summary = "deploy_ops projection from current context gather".to_string();
+            deploy_ops.score = None;
+            deploy_ops.metadata = json!({
+                "projection": "mission_context_gather.compact_evidence",
+                "source_profile": "deploy_ops"
+            });
+
+            let mut items = vec![stale_profile.clone(), deploy_ops.clone()];
+            dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+            assert_eq!(items.len(), 1, "{source_type}");
+            assert_eq!(items[0].id, deploy_ops.id, "{source_type}");
+            assert_eq!(
+                items[0]
+                    .metadata
+                    .get("source_profile")
+                    .and_then(Value::as_str),
+                Some("deploy_ops"),
+                "{source_type}"
+            );
+
+            let mut items = vec![deploy_ops.clone(), stale_profile];
+            dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+            assert_eq!(items.len(), 1, "{source_type}");
+            assert_eq!(items[0].id, deploy_ops.id, "{source_type}");
+        }
+    }
+
+    #[test]
+    fn evidence_items_dedupe_compact_projection_by_semantic_identity() {
+        let read_model_projection = missiond_core::types::EvidenceItemInput {
+            id: "evi-old-content-hash".to_string(),
+            lane_id: "skill_evidence".to_string(),
+            source_type: "skill_operational_fact".to_string(),
+            source_id: None,
+            source_ref: None,
+            project_id: Some("payments".to_string()),
+            task_id: None,
+            title: "Scoped deployment closure policy".to_string(),
+            summary: "payments deployment closure support: deploy center slug xjp-payments; runtime target gcp-runtime.".to_string(),
+            authority_class: "evidence-only".to_string(),
+            validity: "evidence_only".to_string(),
+            privacy_class: "internal".to_string(),
+            freshness: "version_bound_or_historical".to_string(),
+            score: Some(7.0),
+            raw_policy: "compact_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({
+                "projection": "mission_context_gather.compact_evidence",
+                "source_profile": "deploy_ops"
+            }),
+        };
+        let mut current_projection = read_model_projection.clone();
+        current_projection.id = "evi-current-content-hash".to_string();
+        current_projection.score = None;
+
+        let mut different_summary = current_projection.clone();
+        different_summary.id = "evi-distinct".to_string();
+        different_summary.summary =
+            "payments deploy-center manifest evidence references Secret Store adoption."
+                .to_string();
+
+        let mut items = vec![read_model_projection, current_projection, different_summary];
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+        assert_eq!(items.len(), 2);
+        assert!(items
+            .iter()
+            .any(|item| item.id == "evi-current-content-hash"));
+        assert!(items.iter().any(|item| item.id == "evi-distinct"));
+        assert!(!items.iter().any(|item| item.id == "evi-old-content-hash"));
     }
 
     #[test]
@@ -6619,6 +7209,53 @@ mod tests {
         assert_eq!(filtered_count, 1);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "evi-payments");
+    }
+
+    #[test]
+    fn evidence_search_filters_identity_free_support_catalog_placeholders() {
+        let placeholder = missiond_core::types::EvidenceItemInput {
+            id: "evi-global-support-catalog".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "support_catalog".to_string(),
+            source_id: None,
+            source_ref: None,
+            project_id: None,
+            task_id: None,
+            title: "Support catalog".to_string(),
+            summary: "Domain, service, deploy, endpoint, DB/migration, agent, and redacted secret-reference support catalog.".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: Some(1.0),
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({"projection": "mission_context_gather.compact_evidence"}),
+        };
+        let mut scoped = placeholder.clone();
+        scoped.id = "evi-scoped-support-catalog".to_string();
+        scoped.source_id = Some("asr".to_string());
+        scoped.project_id = Some("asr".to_string());
+        scoped.summary = "Support catalog for asr / xjp-asr.".to_string();
+        let mut ref_scoped = placeholder.clone();
+        ref_scoped.id = "evi-ref-scoped-support-catalog".to_string();
+        ref_scoped.evidence_refs = json!({"deploy_center_slug": "xjp-payments"});
+        ref_scoped.summary = "Support catalog for xjp-payments.".to_string();
+
+        let (items, filtered_count) = filter_incomplete_deployment_closure_evidence_items(vec![
+            placeholder,
+            scoped,
+            ref_scoped,
+        ]);
+
+        assert_eq!(filtered_count, 1);
+        assert_eq!(items.len(), 2);
+        assert!(items
+            .iter()
+            .any(|item| item.id == "evi-scoped-support-catalog"));
+        assert!(items
+            .iter()
+            .any(|item| item.id == "evi-ref-scoped-support-catalog"));
     }
 
     #[test]
@@ -7420,6 +8057,213 @@ mod tests {
     }
 
     #[test]
+    fn deployment_event_gap_is_synthesized_without_explicit_unknowns() {
+        let source = json!({
+            "schema": "missiond.deployment-events-context.v1",
+            "status": "no_matching_deploy_center_events",
+            "authority": "deploy-center ExternalServiceEvent via MissionD EventBridge",
+            "event_count": 0,
+            "observed_candidates": {
+                "candidate_count": 64,
+                "authoritative_deploy_center_candidate_count": 0,
+                "webhook_ingest_probe_candidate_count": 2,
+                "observed_webhook_ingest_probe": true,
+                "observed_authoritative_deploy_center_source": false
+            },
+            "relay_diagnostics": {
+                "inferred_gap": "missiond_webhook_ingest_ok_deploy_center_relay_absent",
+                "next_actions": [
+                    "deploy_events cursor inspection"
+                ]
+            }
+        });
+        let deployment_events_summary = summarize_source("deployment_events", &source);
+        let source_summaries = json!({
+            "deployment_events": deployment_events_summary.clone()
+        });
+
+        let synthesized = synthesize_unknowns_with_source_summaries(
+            &[],
+            &source_summaries,
+            &deployment_events_summary,
+        );
+
+        assert_eq!(synthesized.len(), 1);
+        assert_eq!(
+            synthesized[0].get("unknown_id").and_then(Value::as_str),
+            Some("deployment_events_authority_gap")
+        );
+        assert_eq!(
+            synthesized[0].get("status").and_then(Value::as_str),
+            Some("evidence_gap")
+        );
+        assert_eq!(
+            synthesized[0]
+                .get("auto_synthesized")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            synthesized[0]
+                .get("relay_diagnostics")
+                .and_then(|value| value.get("inferred_gap"))
+                .and_then(Value::as_str),
+            Some("missiond_webhook_ingest_ok_deploy_center_relay_absent")
+        );
+    }
+
+    #[test]
+    fn deploy_ops_next_action_surfaces_deployment_event_gap() {
+        let summary = json!({
+            "kind": "deployment_events",
+            "status": "no_matching_deploy_center_events",
+            "event_count": 0,
+            "relay_diagnostics": {
+                "inferred_gap": "missiond_webhook_ingest_ok_deploy_center_relay_absent",
+                "next_actions": [
+                    "deploy_events cursor inspection",
+                    "deploy_logs-to-deploy_events write-path verification"
+                ]
+            }
+        });
+        let source_summaries = json!({"deployment_events": summary.clone()});
+        let unresolved =
+            synthesize_unknowns_with_source_summaries(&[], &source_summaries, &summary);
+
+        let next_action =
+            context_gather_next_action(SourceProfile::DeployOps, &summary, &unresolved);
+
+        assert!(next_action.contains("deployment_events authority gap"));
+        assert!(next_action.contains("deploy_events cursor inspection"));
+        assert!(next_action.contains("deployment_events.relay_diagnostics.next_actions"));
+        assert!(!next_action.contains("Synthesize grounded intent"));
+    }
+
+    #[test]
+    fn intent_default_next_action_keeps_grounded_intent_hint() {
+        let next_action =
+            context_gather_next_action(SourceProfile::IntentDefault, &Value::Null, &[]);
+
+        assert_eq!(next_action, CONTEXT_GATHER_DEFAULT_NEXT_ACTION);
+    }
+
+    #[test]
+    fn deployment_event_gap_counts_as_runtime_truth_lane_item_without_events() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "deployment_events".to_string(),
+            json!({
+                "schema": "missiond.deployment-events-context.v1",
+                "status": "no_matching_deploy_center_events",
+                "authority": "deploy-center ExternalServiceEvent via MissionD EventBridge",
+                "candidate_count": 64,
+                "dropped_count": 64,
+                "observed_candidates": {
+                    "authoritative_deploy_center_candidate_count": 0,
+                    "webhook_ingest_probe_candidate_count": 2
+                },
+                "relay_diagnostics": {
+                    "inferred_gap": "missiond_webhook_ingest_ok_deploy_center_relay_absent"
+                },
+                "events": []
+            }),
+        );
+
+        let lanes = build_evidence_lanes(&sources);
+        let runtime_lane = lanes
+            .get("lanes")
+            .and_then(|value| value.get("runtime_truth"))
+            .expect("runtime lane");
+        assert_eq!(
+            runtime_lane.get("source_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            runtime_lane.get("item_count").and_then(Value::as_u64),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn deployment_event_gap_projects_stable_runtime_truth_evidence_item() {
+        let source = json!({
+            "schema": "missiond.deployment-events-context.v1",
+            "status": "no_matching_deploy_center_events",
+            "authority": "deploy-center ExternalServiceEvent via MissionD EventBridge",
+            "candidate_count": 64,
+            "dropped_count": 64,
+            "filters": {
+                "project_id": "payments",
+                "service_id": "payments",
+                "deploy_center_slug": "xjp-payments"
+            },
+            "observed_candidates": {
+                "authoritative_deploy_center_candidate_count": 0,
+                "webhook_ingest_probe_candidate_count": 2
+            },
+            "relay_diagnostics": {
+                "inferred_gap": "missiond_webhook_ingest_ok_deploy_center_relay_absent",
+                "next_actions": [
+                    "deploy_events cursor inspection",
+                    "deploy_logs-to-deploy_events write-path verification"
+                ]
+            },
+            "events": []
+        });
+        let mut sources = serde_json::Map::new();
+        sources.insert("deployment_events".to_string(), source.clone());
+        let summaries = build_source_summaries(&sources);
+        let catalog = build_support_catalog(&sources);
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::DeployOps,
+            Some("payments"),
+            None,
+        );
+        let item = items
+            .iter()
+            .find(|item| item.source_type == "deploy_center_provenance")
+            .expect("deployment event provenance item");
+        assert_eq!(item.lane_id, "runtime_truth");
+        assert_eq!(item.title, "Deployment event authority gap");
+        assert_eq!(item.source_id.as_deref(), Some("xjp-payments"));
+        assert_eq!(
+            item.source_ref.as_deref(),
+            Some("source_summaries.deployment_events")
+        );
+        assert!(item
+            .summary
+            .contains("missiond_webhook_ingest_ok_deploy_center_relay_absent"));
+        assert!(item
+            .summary
+            .contains("Webhook probes prove MissionD ingest"));
+        let item_id = item.id.clone();
+
+        let mut changed_source = source;
+        changed_source
+            .as_object_mut()
+            .expect("deployment event source object")
+            .insert("candidate_count".to_string(), json!(65));
+        sources.insert("deployment_events".to_string(), changed_source);
+        let summaries = build_source_summaries(&sources);
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::DeployOps,
+            Some("payments"),
+            None,
+        );
+        let changed_item = items
+            .iter()
+            .find(|item| item.source_type == "deploy_center_provenance")
+            .expect("changed deployment event provenance item");
+        assert_eq!(changed_item.id, item_id);
+    }
+
+    #[test]
     fn infra_os_disabled_diagnostics_are_not_hard_context_failures() {
         assert!(!diagnostics_have_hard_failures(&[
             optional_infra_os_disabled_diagnostic("infra"),
@@ -7785,6 +8629,138 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(1)
         );
+    }
+
+    #[test]
+    fn conversation_summary_keeps_session_evidence_without_raw_content() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "conversation_logs".to_string(),
+            json!({
+                "results": [{
+                    "sessionId": "conv-1",
+                    "project": "payments",
+                    "conversationType": "codex_chat",
+                    "status": "active",
+                    "summary": "Payment deploy discussion reached a relay diagnostics hypothesis.",
+                    "matchReason": "[assistant] Deploy Center relay emitted no durable deploy_events rows.",
+                    "content": "raw message body must stay out of compact context evidence",
+                    "rawContent": "raw provider envelope must stay out too",
+                    "messageCount": 42,
+                    "startedAt": "2026-06-03T04:00:00Z"
+                }]
+            }),
+        );
+
+        let summaries = build_source_summaries(&sources);
+        let conversation_item = summaries
+            .get("conversation_logs")
+            .and_then(|value| value.get("items"))
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .expect("summarized conversation item");
+
+        assert_eq!(
+            conversation_item.get("summary").and_then(Value::as_str),
+            Some("Payment deploy discussion reached a relay diagnostics hypothesis.")
+        );
+        assert_eq!(
+            conversation_item.get("matchReason").and_then(Value::as_str),
+            Some("[assistant] Deploy Center relay emitted no durable deploy_events rows.")
+        );
+        assert!(conversation_item.get("content").is_none());
+        assert!(conversation_item.get("rawContent").is_none());
+
+        let catalog = build_support_catalog(&sources);
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::ConversationAudit,
+            Some("payments"),
+            None,
+        );
+        let conversation_evidence = items
+            .iter()
+            .find(|item| item.lane_id == "conversation_audit")
+            .expect("conversation evidence item");
+
+        assert_eq!(conversation_evidence.source_id.as_deref(), Some("conv-1"));
+        assert_eq!(
+            conversation_evidence.summary,
+            "Payment deploy discussion reached a relay diagnostics hypothesis."
+        );
+        assert!(!conversation_evidence
+            .evidence_refs
+            .to_string()
+            .contains("raw message body"));
+    }
+
+    #[test]
+    fn conversation_summary_preserves_search_diagnostics_without_raw_content() {
+        let mut source = json!({
+            "results": [],
+            "count": 0,
+            "totalHits": 0,
+            "query": "payments deploy center relay",
+            "mode": "hybrid",
+            "ftsHits": 0,
+            "vecHits": 3,
+            "filteredSemanticHits": 3,
+            "content": "raw source content must not appear in compact conversation summary",
+            "rawContent": "raw provider envelope must not appear either"
+        });
+        attach_conversation_search_context(&mut source, Some("payments"), "last_30d", "hybrid", 8);
+        if let Some(context) = source
+            .get_mut("filter_context")
+            .and_then(Value::as_object_mut)
+        {
+            context.insert(
+                "content".to_string(),
+                json!("raw nested filter content must not appear"),
+            );
+            context.insert(
+                "rawContent".to_string(),
+                json!("raw nested filter envelope must not appear"),
+            );
+        }
+
+        let summary = summarize_source("conversation_logs", &source);
+
+        assert_eq!(summary.get("item_count").and_then(Value::as_u64), Some(0));
+        assert_eq!(
+            summary.get("query").and_then(Value::as_str),
+            Some("payments deploy center relay")
+        );
+        assert_eq!(summary.get("mode").and_then(Value::as_str), Some("hybrid"));
+        assert_eq!(
+            summary.get("filteredSemanticHits").and_then(Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            summary
+                .get("filter_context")
+                .and_then(|value| value.get("project_id"))
+                .and_then(Value::as_str),
+            Some("payments")
+        );
+        assert_eq!(
+            summary
+                .get("filter_context")
+                .and_then(|value| value.get("time_range"))
+                .and_then(Value::as_str),
+            Some("last_30d")
+        );
+        assert!(summary
+            .get("filter_context")
+            .and_then(|value| value.get("content"))
+            .is_none());
+        assert!(summary
+            .get("filter_context")
+            .and_then(|value| value.get("rawContent"))
+            .is_none());
+        assert!(summary.get("content").is_none());
+        assert!(summary.get("rawContent").is_none());
     }
 
     #[test]

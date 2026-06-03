@@ -235,6 +235,10 @@ function checkFiles(root, files) {
     'mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes',
     'mission_context_gather(persist_read_model=true, the default) MUST persist context_gather_runs metrics and evidence_items compact projections',
     'persist=true additionally creates the context-pack artifact/capsule and forces read-model persistence',
+    'mission_context_gather conversation_logs compact summaries MUST preserve conversation/session summaries and bounded match reason previews',
+    'mission_context_gather conversation_logs compact summaries MUST preserve non-raw search diagnostics',
+    'context_gather filter_context project/time_range/query_mode/limit',
+    'raw message content/content/rawContent/message payload fields',
     'mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors',
     'skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor',
     'mission_context_gather evidence_lanes.skill_evidence.item_count MUST count compact injectable skill metadata/project links/infra items',
@@ -281,6 +285,7 @@ function checkFiles(root, files) {
     'source_summaries.deployment_events.status',
     'top-level deployment_events summary alias',
     'deployment-event unknowns synthesize evidence_gap',
+    'source_profile=deploy_ops top-level next_action MUST surface deployment_events authority gap remediation',
     'never fall back to conversation/tool timeline hits for deploy evidence',
     'source_summaries.infra.status=feature_disabled',
     'fallback_status=support_catalog_available',
@@ -295,7 +300,9 @@ function checkFiles(root, files) {
     'freshness_filtered_count',
     'compiled_policy_filtered_count',
     'runtime_environment_filtered_count',
-    'mission_context_gather MUST assign stable evidence_item IDs for volatile compact projections runtime_environment, support_catalog, and deployment_closure_policy',
+    'mission_context_gather MUST dedupe compact evidence_items from current context projections and persisted read-model projections by semantic projection identity',
+    'duplicate summaries differ only by score, id, or read-model age',
+    'mission_context_gather MUST assign stable evidence_item IDs for volatile compact projections runtime_environment, project_resolution, project_registry, ssot, support_catalog, and deployment_closure_policy',
     'mission_context_gather MUST filter persisted generic deploy-closure compact evidence that lacks project/service/deploy-center/runtime identity',
     'incomplete_filtered_count',
     'return a configuration snapshot by default; use bounded direct HTTP loopback transport for xjp-memory provider calls and only probe /v1/memory/provider_status when probe=true',
@@ -366,6 +373,8 @@ function checkFiles(root, files) {
     'deployment_event_relay_diagnostics',
     'deployment_event_relay_local_config_probe',
     'deployment_event_relay_next_actions',
+    'context_gather_next_action',
+    'deploy_ops_next_action_surfaces_deployment_event_gap',
     'deployment_event_relay_manifest_required_secret_store_keys',
     'deploy_center_repo_root_from_service_root',
     'local_config_probe',
@@ -421,6 +430,15 @@ function checkFiles(root, files) {
     'deduplicated_count',
     'truncated_count',
     'build_evidence_items',
+    'summarize_conversation_source',
+    'matchReason',
+    'match_reason',
+    'rawContent',
+    'conversation_summary_keeps_session_evidence_without_raw_content',
+    'attach_conversation_search_context',
+    'conversation_summary_preserves_search_diagnostics_without_raw_content',
+    'evidence_item_compact_dedupe_text',
+    'evidence_items_dedupe_compact_projection_by_semantic_identity',
     'persist_evidence_lane_projection',
     'context_gather_persist_read_model',
     'persistReadModel',
@@ -1161,7 +1179,10 @@ function buildFixture() {
 		                 "Worker context packs MUST include evidence_lanes, evidence_items, and support_catalog lane summaries by default and omit raw sources"
 		                 "mission_context_gather MUST normalize legacy source calls into typed EvidenceItem lanes"
 		                 "mission_context_gather(persist_read_model=true, the default) MUST persist context_gather_runs metrics and evidence_items compact projections"
-		                 "persist=true additionally creates the context-pack artifact/capsule and forces read-model persistence"
+                         "persist=true additionally creates the context-pack artifact/capsule and forces read-model persistence"
+                         "mission_context_gather conversation_logs compact summaries MUST preserve conversation/session summaries and bounded match reason previews, but MUST NOT copy raw message content/content/rawContent/message payload fields into compact evidence_items or source_summaries; full raw conversation payloads require include_raw_sources=true or source_profile=full_debug."
+                         "mission_context_gather conversation_logs compact summaries MUST preserve non-raw search diagnostics"
+                         "context_gather filter_context project/time_range/query_mode/limit"
                          "mission_context_gather source_profile=deploy_ops infra skill_evidence MUST recognize deployment-closure evidence anchors"
                          "skill-file context fallback may admit sibling evidence only when the returned line itself carries a strong closure anchor"
                          "mission_context_gather evidence_lanes.skill_evidence.item_count MUST count compact injectable skill metadata/project links/infra items"
@@ -1208,6 +1229,7 @@ function buildFixture() {
                          "source_summaries.deployment_events.status"
                          "top-level deployment_events summary alias"
                          "deployment-event unknowns synthesize evidence_gap"
+                         "source_profile=deploy_ops top-level next_action MUST surface deployment_events authority gap remediation"
                          "never fall back to conversation/tool timeline hits for deploy evidence"
 		                 "source_summaries.infra.status=feature_disabled"
                      "fallback_status=support_catalog_available"
@@ -1222,7 +1244,8 @@ function buildFixture() {
                          "freshness_filtered_count"
                          "compiled_policy_filtered_count"
                          "runtime_environment_filtered_count"
-                         "mission_context_gather MUST assign stable evidence_item IDs for volatile compact projections runtime_environment, support_catalog, and deployment_closure_policy"
+                         "mission_context_gather MUST dedupe compact evidence_items from current context projections and persisted read-model projections by semantic projection identity for raw-source-derived skill/conversation/support evidence, not only by legacy content-hash id; requested source_profile current projections win when duplicate summaries differ only by score, id, or read-model age."
+                         "mission_context_gather MUST assign stable evidence_item IDs for volatile compact projections runtime_environment, project_resolution, project_registry, ssot, support_catalog, and deployment_closure_policy"
                          "mission_context_gather MUST filter persisted generic deploy-closure compact evidence that lacks project/service/deploy-center/runtime identity"
                          "incomplete_filtered_count"
 			                 "return a configuration snapshot by default; use bounded direct HTTP loopback transport for xjp-memory provider calls and only probe /v1/memory/provider_status when probe=true"
@@ -1362,7 +1385,7 @@ CREATE TABLE IF NOT EXISTS skill_evidence_items;
   writeFixture(root, DEFAULT_FILES.contextGather, `
 SourceProfile; source_profile; source_selection; include_credentials; include_raw_sources; persist_read_model; persistReadModel; context_gather_persist_read_model;
 include_board; include_conversations; conversation_time_range;
-	evidence_lanes; evidence_items; support_catalog; deployment_closure; deployment_closure_policy; deployment_events; deploy_center_event; deployment_events_source; deployment_event_filter_timeline_row; DeploymentEventFilterResult; deployment_event_drop_sample; deployment_event_drop_reason_is_sample_worthy; deployment_event_item_from_timeline_row; deployment_event_matches_scope; workflow_job_succeeded; artifact_recorded; DEPLOYMENT_EVENT_RELEVANT_KINDS; deployment_event_observed_candidate_summary; deployment_event_relay_diagnostics; deployment_event_relay_local_config_probe; deployment_event_relay_next_actions; deployment_event_relay_manifest_required_secret_store_keys; deploy_center_repo_root_from_service_root; local_config_probe; secret_store_key_probe; manifest_secret_store_env; required_key_names; xjp-deploy-center; checked_missing_relay_env_names; DEPLOY_EVENT_RELAY_ENABLED; MISSIOND_DEPLOY_EVENT_WEBHOOK_URL; MISSIOND_EVENTBRIDGE_URL; MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN; MISSIOND_EXTERNAL_WEBHOOK_TOKEN; DEPLOY_EVENT_RELAY_ENABLED/MISSIOND_EVENTBRIDGE_URL/MISSIOND_EXTERNAL_WEBHOOK_TOKEN; Secret Store key adoption; next_actions; Only env variable names and file presence are reported; Secret values are not read or emitted; runtime env values; reachable from the Deploy Center runtime; without printing values; accepted_event_kinds; observed_candidates; relay_diagnostics; deploy_center_relay_absent_or_disabled; drop_reason_counts; drop_sample_omitted_counts; sample_dropped_events; system::external_service_event; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; support_catalog_response_view; compact_support_catalog_response; deployment_closure_omitted; support_catalog_has_content; support_refs_compact_item_count; deployment_closure_support_allowed; deployment_closure_query_has_anchor; deployment_closure_has_identity_content; attach_infra_os_disabled_support_fallback; infra_os_disabled_support_fallback_items; support_catalog_available; dedupe_evidence_search_items; evidence_search_dedupe_key; filter_incomplete_deployment_closure_evidence_items; filter_deployment_closure_policy_evidence_items; evidence_item_has_incomplete_deployment_closure_placeholder; filter_stale_runtime_environment_evidence_items; evidence_item_has_stale_runtime_environment_ref; evidence_item_runtime_environment_compiled_dir; evidence_item_uses_stable_projection_id; evidence_item_read_model_scope_allows_search; scope_skipped; raw_hit_count; incomplete_filtered_count; deployment_closure_profile_filtered_count; deduplicated_count; truncated_count; operational_fact_count; build_evidence_items; build_evidence_items_with_options; build_deployment_closure_support; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
+	evidence_lanes; evidence_items; support_catalog; deployment_closure; deployment_closure_policy; deployment_events; deploy_center_event; deployment_events_source; deployment_event_filter_timeline_row; DeploymentEventFilterResult; deployment_event_drop_sample; deployment_event_drop_reason_is_sample_worthy; deployment_event_item_from_timeline_row; deployment_event_matches_scope; workflow_job_succeeded; artifact_recorded; DEPLOYMENT_EVENT_RELEVANT_KINDS; deployment_event_observed_candidate_summary; deployment_event_relay_diagnostics; deployment_event_relay_local_config_probe; deployment_event_relay_next_actions; context_gather_next_action; deploy_ops_next_action_surfaces_deployment_event_gap; deployment_event_relay_manifest_required_secret_store_keys; deploy_center_repo_root_from_service_root; local_config_probe; secret_store_key_probe; manifest_secret_store_env; required_key_names; xjp-deploy-center; checked_missing_relay_env_names; DEPLOY_EVENT_RELAY_ENABLED; MISSIOND_DEPLOY_EVENT_WEBHOOK_URL; MISSIOND_EVENTBRIDGE_URL; MISSIOND_DEPLOY_EVENT_WEBHOOK_TOKEN; MISSIOND_EXTERNAL_WEBHOOK_TOKEN; DEPLOY_EVENT_RELAY_ENABLED/MISSIOND_EVENTBRIDGE_URL/MISSIOND_EXTERNAL_WEBHOOK_TOKEN; Secret Store key adoption; next_actions; Only env variable names and file presence are reported; Secret values are not read or emitted; runtime env values; reachable from the Deploy Center runtime; without printing values; accepted_event_kinds; observed_candidates; relay_diagnostics; deploy_center_relay_absent_or_disabled; missiond_webhook_ingest_ok_deploy_center_relay_absent; observed_webhook_ingest_probe; observed_authoritative_deploy_center_source; webhook_ingest_probe_candidate_count; authoritative_deploy_center_candidate_count; ingest_health; manual_probe; codex-local-probe; deploy-center.deploy_events; deploy_events cursor inspection; deploy_logs-to-deploy_events write-path verification; drop_reason_counts; drop_sample_omitted_counts; sample_dropped_events; system::external_service_event; authority_order; noise_diagnostics; context_noise_metrics; build_support_catalog; support_catalog_response_view; compact_support_catalog_response; deployment_closure_omitted; support_catalog_has_content; support_refs_compact_item_count; deployment_closure_support_allowed; deployment_closure_query_has_anchor; deployment_closure_has_identity_content; attach_infra_os_disabled_support_fallback; infra_os_disabled_support_fallback_items; support_catalog_available; dedupe_evidence_search_items; evidence_search_dedupe_key; filter_incomplete_deployment_closure_evidence_items; filter_deployment_closure_policy_evidence_items; evidence_item_has_incomplete_deployment_closure_placeholder; filter_stale_runtime_environment_evidence_items; evidence_item_has_stale_runtime_environment_ref; evidence_item_runtime_environment_compiled_dir; evidence_item_uses_stable_projection_id; evidence_item_read_model_scope_allows_search; scope_skipped; raw_hit_count; incomplete_filtered_count; deployment_closure_profile_filtered_count; deduplicated_count; truncated_count; operational_fact_count; build_evidence_items; build_evidence_items_with_options; summarize_conversation_source; matchReason; match_reason; rawContent; conversation_summary_keeps_session_evidence_without_raw_content; attach_conversation_search_context; conversation_summary_preserves_search_diagnostics_without_raw_content; evidence_item_compact_dedupe_text; evidence_items_dedupe_compact_projection_by_semantic_identity; build_deployment_closure_support; persist_evidence_lane_projection; record_context_gather_run; upsert_evidence_items; runtime_truth; project_ssot; reviewed_kb; active_board; skill_evidence; conversation_audit; cold_archive; support_refs; context_pack_artifact_payload;
 load_compiled_project_universe; compiled_service_runtime_payload_for_project; supportCatalog; compiled_deployment_policy_for_service;
 credential_lane_opt_in; selection.include_credentials; selection.include_raw_sources; raw_sources_omitted;
 "board_tasks"; "conversation_logs"; "credential_refs"; "mission_board_query"; "mission_conversation_query"; "scope": "active"; "time_range"; last_30d;

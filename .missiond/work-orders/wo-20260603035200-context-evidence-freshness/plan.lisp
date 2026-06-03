@@ -8,6 +8,8 @@
        :accepted_shard_id "wo-20260603035200-context-evidence-freshness-shard-default"
        :read_scope ["."]
        :write_scope [".missiond/v3/shards/request-runtime.lisp"
+                     ".missiond/work-orders/wo-20260603035200-context-evidence-freshness/plan.lisp"
+                     "crates/missiond-core/src/v3_contracts.rs"
                      "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
                      "scripts/check-v3-memory-kb-isomorphism.mjs"
                      "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
