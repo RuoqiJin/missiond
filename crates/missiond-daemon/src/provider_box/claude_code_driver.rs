@@ -3386,8 +3386,20 @@ fn claude_code_composer_text(observation: &ClaudeCodeObservation) -> Option<Stri
         let rest = trimmed
             .strip_prefix('❯')
             .or_else(|| trimmed.strip_prefix('>'))?;
-        Some(rest.trim().to_string())
+        let text = rest.trim();
+        if is_claude_code_placeholder_text(text) {
+            Some(String::new())
+        } else {
+            Some(text.to_string())
+        }
     })
+}
+
+fn is_claude_code_placeholder_text(text: &str) -> bool {
+    let text = text.trim();
+    text == "Try \"edit <filepath> to...\""
+        || text == "Try \"edit <filepath> to...\"."
+        || text.starts_with("Try \"edit <filepath> to")
 }
 
 fn claude_code_staged_command_matches(observation: &ClaudeCodeObservation, command: &str) -> bool {
@@ -3839,13 +3851,14 @@ mod tests {
 
     use super::{
         analyze_claude_code_jsonl_after_cursor, claude_code_analysis_line_count_advanced,
-        claude_code_jsonl_cursor_for_session, claude_code_jsonl_event_is_text_only_violation,
-        claude_code_mcp_detail_action_positions, claude_code_mcp_reconnect_action_selected,
-        claude_code_mcp_reconnect_action_visible, claude_code_mcp_reconnect_line,
-        claude_code_mcp_reconnect_outcome, claude_code_mcp_status_value,
-        claude_code_observation_is_auto_confirming, claude_code_observation_is_terminal_idle,
-        claude_code_permission_cycle_steps, claude_code_provider_capabilities,
-        claude_code_staged_command_matches, durable_final_missing_idle_grace_elapsed,
+        claude_code_composer_text, claude_code_jsonl_cursor_for_session,
+        claude_code_jsonl_event_is_text_only_violation, claude_code_mcp_detail_action_positions,
+        claude_code_mcp_reconnect_action_selected, claude_code_mcp_reconnect_action_visible,
+        claude_code_mcp_reconnect_line, claude_code_mcp_reconnect_outcome,
+        claude_code_mcp_status_value, claude_code_observation_is_auto_confirming,
+        claude_code_observation_is_terminal_idle, claude_code_permission_cycle_steps,
+        claude_code_provider_capabilities, claude_code_staged_command_matches,
+        durable_final_missing_idle_grace_elapsed,
         extract_claude_code_mcp_server_entries_from_screen, find_claude_code_session_jsonl,
         is_claude_code_logout_success, normalize_claude_code_model_target,
         normalize_claude_code_permission_mode, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,
@@ -3871,6 +3884,39 @@ mod tests {
             session_state,
             snapshot: recognize_screen(CliEngine::ClaudeCode, &owned, session_state),
         }
+    }
+
+    #[test]
+    fn claude_code_placeholder_composer_is_treated_as_empty_input() {
+        let observation = observation(&[
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+            "────────────────────────────────────────────────────────────────",
+            "❯ Try \"edit <filepath> to...\"",
+            "────────────────────────────────────────────────────────────────",
+            "  ▘▘ ▝▝    ~/.xjp-mission/releases/current/source",
+            "▝▜█████▛▘  Opus 4.8 (1M context) · Claude Max",
+            " ▐▛███▜▌   Claude Code v2.1.161",
+        ]);
+
+        assert_eq!(claude_code_composer_text(&observation).as_deref(), Some(""));
+        assert!(!claude_code_staged_command_matches(&observation, "/mcp"));
+    }
+
+    #[test]
+    fn claude_code_real_composer_text_is_preserved() {
+        let observation = observation(&[
+            " ▐▛███▜▌   Claude Code v2.1.161",
+            "▝▜█████▛▘  Opus 4.8 (1M context) · Claude Max",
+            "  ▘▘ ▝▝    ~/Projects/missiond",
+            "❯ /mcp",
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+        ]);
+
+        assert_eq!(
+            claude_code_composer_text(&observation).as_deref(),
+            Some("/mcp")
+        );
+        assert!(claude_code_staged_command_matches(&observation, "/mcp"));
     }
 
     #[test]
