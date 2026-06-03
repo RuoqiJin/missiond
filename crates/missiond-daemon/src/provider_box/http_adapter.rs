@@ -23,14 +23,21 @@ const CODEX_USAGE_PROBE_SLOT: &str = "slot-codex-usage-probe";
 const CODEX_RESEARCH_PROVIDER: &str = "codex_research";
 const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
 const CLAUDE_CODE_TEXT_PROVIDER: &str = "claude_code_text";
+const CLAUDE_CODE_DEEP_RESEARCH_PROVIDER: &str = "claude_code_deep_research";
 const CODEX_RESEARCH_PROMPT_PREFIX: &str = "帮我在互联网上进行详细调研以下问题：";
 const CODEX_IMAGE_PROMPT_PREFIX: &str = "帮我生成一张图片，要求如下：";
 const CODEX_IMAGE_STABLE_PROMPT_SUFFIX: &str = "执行要求：请直接调用并使用 imagegen 生成图片，必须实际产出图片文件，不要只描述图片或给出提示词。图片是预览用途，保留在 Codex 默认 generated_images 路径即可；不要复制、移动或写入当前工作区。生成完成后只回复 IMAGE_DONE。";
+const CLAUDE_CODE_DEEP_RESEARCH_PROMPT_PREFIX: &str =
+    "请调用 deep-research skill，并运行 deep-research workflow。不要只做普通回答。调研问题如下：";
 const CODEX_TASK_MODEL: &str = "gpt-5.5";
+const CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID: &str = "claude-code-deep-research-opus-4-8-xhigh";
+const CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL: &str = "claude-opus-4-8";
+const CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE: &str = "xhigh";
 const CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT: usize = 4;
 const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
 const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
 const CLAUDE_CODE_TEXT_MAX_CONCURRENT: usize = 1;
+const CLAUDE_CODE_DEEP_RESEARCH_MAX_CONCURRENT: usize = 1;
 const MODEL_CATALOG_LIVE_TIMEOUT_SECS: u64 = 20;
 const STATIC_AGY_TEXT_MODELS: &[&str] = &[
     "Gemini 3.5 Flash (Medium)",
@@ -221,7 +228,18 @@ impl ProviderBoxHttpAdapter {
             ("POST", "/provider-box/v1/research")
             | ("POST", "/provider-box/v1/research/completions")
             | ("POST", "/provider-box/v1/research/chat/completions") => {
-                self.handle_codex_task_completion(request, BoxCommand::Research)
+                if is_claude_code_deep_research_body(&request.body) {
+                    self.handle_claude_code_deep_research_completion(request)
+                        .await
+                } else {
+                    self.handle_codex_task_completion(request, BoxCommand::Research)
+                        .await
+                }
+            }
+            ("POST", "/provider-box/v1/claude-code/deep-research")
+            | ("POST", "/provider-box/v1/claude-code/deep-research/completions")
+            | ("POST", "/provider-box/v1/claude-code/deep-research/chat/completions") => {
+                self.handle_claude_code_deep_research_completion(request)
                     .await
             }
             ("POST", "/provider-box/v1/image")
@@ -1132,6 +1150,42 @@ impl ProviderBoxHttpAdapter {
         Ok(result_response(result))
     }
 
+    async fn handle_claude_code_deep_research_completion(
+        &self,
+        request: ProviderBoxHttpRequest,
+    ) -> Result<ProviderBoxHttpResponse, String> {
+        let Some(interaction) = claude_code_deep_research_interaction_from_body(&request.body)
+        else {
+            let mut result = ProviderBoxResult::base(
+                &ProviderInteractionRequest::new(BoxCommand::Research, CliEngine::ClaudeCode),
+                ProviderBoxStatus::Failed,
+            );
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "Invalid provider-box ClaudeCode deep-research request",
+                json!({
+                    "schema": request.body.get("schema"),
+                    "required": [
+                        "provider=claude_code_deep_research",
+                        "engine=claude_code",
+                        "messages[] or prompt",
+                        "no external tools/files/attachments"
+                    ],
+                    "route": "/provider-box/v1/claude-code/deep-research/completions",
+                }),
+            ));
+            return Ok(result_response(result));
+        };
+
+        let mut result = self
+            .boxed
+            .execute(interaction)
+            .await
+            .map_err(|err| err.to_string())?;
+        redact_private_claude_code_task_details(&mut result);
+        Ok(result_response(result))
+    }
+
     async fn next_private_agy_slot_for_model(&self, model: &str) -> String {
         self.next_private_agy_slot_for_model_and_lane(model, None)
             .await
@@ -1365,6 +1419,99 @@ fn codex_task_interaction_from_body(
         "no_file_access": true,
     }));
     Some(interaction)
+}
+
+fn claude_code_deep_research_interaction_from_body(
+    body: &Value,
+) -> Option<ProviderInteractionRequest> {
+    if matches_forbidden_codex_task_fields(body) {
+        return None;
+    }
+    let engine = if body.get("engine").is_none() && body.get("provider").is_none() {
+        CliEngine::ClaudeCode
+    } else {
+        engine_from_body(body)
+    };
+    if engine != CliEngine::ClaudeCode {
+        return None;
+    }
+    let provider = string_field(body, "provider")
+        .unwrap_or_else(|| CLAUDE_CODE_DEEP_RESEARCH_PROVIDER.to_string());
+    if !provider.eq_ignore_ascii_case(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER)
+        && !provider.eq_ignore_ascii_case("claude-code-deep-research")
+    {
+        return None;
+    }
+    if string_field(body, "slot_id").is_some() {
+        return None;
+    }
+    let user_prompt = codex_task_user_prompt_from_body(body)?;
+    let correlation_id = string_field(body, "correlation_id")
+        .unwrap_or_else(|| format!("router-{}", uuid::Uuid::new_v4().simple()));
+    let requested_model = string_field(body, "model")
+        .unwrap_or_else(|| CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID.to_string());
+    if !claude_code_deep_research_model_ref_matches(&requested_model) {
+        return None;
+    }
+    let requested_profile = string_field(body, "model_profile")
+        .or_else(|| string_field(body, "reasoning_effort"))
+        .or_else(|| string_field(body, "model_reasoning_effort"));
+    if requested_profile.as_deref().is_some_and(|profile| {
+        !profile.eq_ignore_ascii_case(CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE)
+    }) {
+        return None;
+    }
+
+    let mut interaction =
+        ProviderInteractionRequest::new(BoxCommand::Research, CliEngine::ClaudeCode);
+    interaction.schema = "missiond.provider-interaction-request.v1".to_string();
+    interaction.provider = Some(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER.to_string());
+    interaction.model = Some(CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID.to_string());
+    interaction.model_profile = Some(CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE.to_string());
+    interaction.prompt = Some(format!(
+        "{CLAUDE_CODE_DEEP_RESEARCH_PROMPT_PREFIX}\n\ncall deep-research:\n\n{}",
+        user_prompt.trim()
+    ));
+    interaction.correlation_id = correlation_id;
+    interaction.timeout_secs = body
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .or(Some(1_800));
+    interaction.no_tools = false;
+    interaction.no_mcp = false;
+    interaction.no_shell = false;
+    interaction.no_file_access = false;
+    interaction.output_contract = Some(json!({
+        "media_type": "text/markdown",
+        "single_turn": false,
+        "durable_source": "claude_code_deep_research_workflow_journal",
+        "workflow": "deep-research"
+    }));
+    interaction.tool_policy = Some(json!({
+        "provider_task_kind": "deep_research",
+        "allowed_tools": ["Skill", "Workflow"],
+        "workflow": "deep-research",
+        "workflow_required": true,
+        "background_workflow_allowed": true,
+        "durable_journal_required": true,
+        "external_tool_schemas_allowed": false,
+        "external_files_allowed": false
+    }));
+    interaction.desired_worker = Some(json!({
+        "provider_session_id": uuid::Uuid::new_v4().to_string(),
+        "spawn_if_missing": true,
+        "private_ephemeral_slot": true,
+        "provider_box_managed": true,
+        "workflow": "deep-research"
+    }));
+    Some(interaction)
+}
+
+fn is_claude_code_deep_research_body(body: &Value) -> bool {
+    string_field(body, "provider").is_some_and(|provider| {
+        provider.eq_ignore_ascii_case(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER)
+            || provider.eq_ignore_ascii_case("claude-code-deep-research")
+    }) || engine_from_body(body) == CliEngine::ClaudeCode
 }
 
 fn codex_task_user_prompt_from_body(body: &Value) -> Option<String> {
@@ -1867,6 +2014,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             append_codex_exec_text_exports(&mut body);
             append_codex_task_exports(&mut body);
             append_claude_code_text_exports(&mut body);
+            append_claude_code_task_exports(&mut body);
             body["model_export"] = json!({
                 "schema": "missiond.provider-box.model-export.v1",
                 "provider": catalog.provider.clone(),
@@ -1893,6 +2041,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                 "codex_exec_text_sources": "exported_guarded_static_sources",
                 "codex_task_sources": "exported_guarded_static_sources",
                 "claude_code_text_sources": "exported_guarded_static_sources",
+                "claude_code_task_sources": "exported_guarded_static_sources",
                 "pure_text_guard": {
                     "prompt_instruction": false,
                     "sidecar_correlation": true,
@@ -1916,6 +2065,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             append_codex_exec_router_sources(&mut body);
             append_codex_task_router_sources(&mut body);
             append_claude_code_text_router_sources(&mut body);
+            append_claude_code_task_router_sources(&mut body);
         }
         body
     } else {
@@ -2442,6 +2592,30 @@ fn append_claude_code_text_router_sources(body: &mut Value) {
     }
 }
 
+fn append_claude_code_task_exports(body: &mut Value) {
+    if let Some(data) = body.get_mut("data").and_then(Value::as_array_mut) {
+        data.extend(claude_code_task_openai_model_data());
+    }
+    if body.get("provider_task_sources").is_none() {
+        body["provider_task_sources"] = json!([]);
+    }
+    if let Some(sources) = body
+        .get_mut("provider_task_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(claude_code_task_sources());
+    }
+}
+
+fn append_claude_code_task_router_sources(body: &mut Value) {
+    if let Some(sources) = body
+        .get_mut("router_model_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(claude_code_task_router_sources());
+    }
+}
+
 fn codex_exec_openai_model_data() -> Vec<Value> {
     codex_exec_text_source_defs()
         .into_iter()
@@ -2843,8 +3017,128 @@ fn claude_code_text_router_sources() -> Vec<Value> {
         .collect()
 }
 
+fn claude_code_task_openai_model_data() -> Vec<Value> {
+    vec![json!({
+        "id": CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID,
+        "object": "model",
+        "created": 0,
+        "owned_by": "missiond/claude-code-task",
+        "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+        "source_id": "missiond/claude-code-deep-research/opus-4-8-xhigh",
+        "display_name": "ClaudeCode Deep Research Opus 4.8 (xhigh)",
+        "provider_model_id": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL,
+        "model": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL,
+        "model_profile": CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE,
+        "capabilities": claude_code_deep_research_capabilities(),
+        "pure_text": false,
+        "task_source": true,
+        "task_kind": "deep_research",
+        "routeable_default": true,
+        "routeable_status": "durable_workflow_journal_guarded",
+        "guarded": true
+    })]
+}
+
+fn claude_code_task_sources() -> Vec<Value> {
+    vec![json!({
+        "schema": "missiond.provider-task-source.v1",
+        "source_id": "missiond/claude-code-deep-research/opus-4-8-xhigh",
+        "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+        "engine": "claude_code",
+        "model_id": CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID,
+        "provider_model_id": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL,
+        "model": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL,
+        "display_name": "ClaudeCode Deep Research Opus 4.8 (xhigh)",
+        "model_profile": CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE,
+        "task_kind": "deep_research",
+        "completion_endpoint": "/provider-box/v1/claude-code/deep-research/completions",
+        "routeable": true,
+        "routeable_status": "durable_workflow_journal_guarded",
+        "request_template": {
+            "schema": "missiond.provider-box.claude-code-deep-research-request.v1",
+            "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+            "engine": "claude_code",
+            "model": CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID,
+            "model_profile": CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE,
+            "messages": [{
+                "role": "user",
+                "content": "<research question>"
+            }]
+        },
+        "prompt_prefix": CLAUDE_CODE_DEEP_RESEARCH_PROMPT_PREFIX,
+        "capabilities": claude_code_deep_research_capabilities(),
+        "guard": {
+            "interactive_pty": true,
+            "uses_print_mode": false,
+            "per_request_session_id": true,
+            "private_ephemeral_slot": true,
+            "skill_required": "deep-research",
+            "workflow_required": "deep-research",
+            "durable_jsonl_cursor": true,
+            "durable_workflow_journal_required": true,
+            "rejects_external_tool_schemas": true,
+            "rejects_file_attachments": true,
+            "private_slot_exposed": false
+        },
+        "queue": {
+            "owner": "provider-box",
+            "key": claude_code_deep_research_queue_key(),
+            "max_concurrent": CLAUDE_CODE_DEEP_RESEARCH_MAX_CONCURRENT,
+            "policy": "per_logical_claude_code_deep_research_source"
+        },
+        "slot_policy": {
+            "kind": "provider_box_managed_ephemeral_private_slot",
+            "public_max_concurrent": 1,
+            "private_slot_exposed": false,
+            "restart_after_request": true,
+            "queue_owner": "provider-box"
+        }
+    })]
+}
+
+fn claude_code_task_router_sources() -> Vec<Value> {
+    vec![json!({
+        "model_id": CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID,
+        "display_name": "ClaudeCode Deep Research Opus 4.8 (xhigh)",
+        "routeable": true,
+        "routeable_status": "durable_workflow_journal_guarded",
+        "route": {
+            "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+            "provider_model_id": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL,
+            "model_profile": CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE,
+            "completion_endpoint": "/provider-box/v1/claude-code/deep-research/completions",
+            "task_kind": "deep_research"
+        },
+        "blocked_reason": Value::Null,
+        "task_source": claude_code_task_sources()
+            .into_iter()
+            .find(|source| source.get("model_id") == Some(&json!(CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID)))
+    })]
+}
+
+fn claude_code_deep_research_capabilities() -> Value {
+    json!({
+        "text": true,
+        "tools": true,
+        "tool_allowlist": ["Skill", "Workflow"],
+        "workflow": true,
+        "workflow_name": "deep-research",
+        "web_search": true,
+        "image_generation": false,
+        "vision": false,
+        "files": false,
+        "mcp": false,
+        "shell": false,
+        "external_tools": false
+    })
+}
+
 fn claude_code_text_queue_key(model_id: &str) -> String {
     format!("{CLAUDE_CODE_TEXT_PROVIDER}:{model_id}")
+}
+
+fn claude_code_deep_research_queue_key() -> String {
+    format!("{CLAUDE_CODE_DEEP_RESEARCH_PROVIDER}:{CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID}")
 }
 
 fn is_exported_claude_code_text_model(model_id: &str, model_profile: Option<&str>) -> bool {
@@ -2855,6 +3149,14 @@ fn is_exported_claude_code_text_model(model_id: &str, model_profile: Option<&str
                 .map(|profile| profile.trim().eq_ignore_ascii_case(def.model_profile))
                 .unwrap_or(true)
     })
+}
+
+fn claude_code_deep_research_model_ref_matches(model_id: &str) -> bool {
+    let normalized = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    normalized == CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID
+        || normalized == CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL
+        || normalized == "claude-code-deep-research-opus-48-xhigh"
+        || normalized == "claude-code-deep-research"
 }
 
 #[derive(Clone, Copy)]
@@ -3098,8 +3400,12 @@ fn redact_private_claude_code_text_details(result: &mut ProviderBoxResult) {
     result.slot_id = None;
     result.slot_status = None;
     result.step_records.clear();
+    result.provider_conversation_id = None;
     if let Some(identity) = result.provider_session_identity.as_mut() {
         identity.slot_id = None;
+        identity.provider_session_id = None;
+        identity.provider_session_ref = None;
+        identity.resume_command = None;
         identity.durable_source = Some("claude_code_session_jsonl_cursor".to_string());
         identity.workspace = None;
     }
@@ -3109,6 +3415,16 @@ fn redact_private_claude_code_text_details(result: &mut ProviderBoxResult) {
     for diagnostic in &mut result.diagnostics {
         diagnostic.details =
             redact_private_paths_in_value(redact_slot_ids_in_value(diagnostic.details.clone()));
+    }
+}
+
+fn redact_private_claude_code_task_details(result: &mut ProviderBoxResult) {
+    redact_private_claude_code_text_details(result);
+    if let Some(identity) = result.provider_session_identity.as_mut() {
+        identity.durable_source = Some("claude_code_deep_research_workflow_journal".to_string());
+    }
+    if result.durable_source.is_some() {
+        result.durable_source = Some("claude_code_deep_research_workflow_journal".to_string());
     }
 }
 
@@ -3139,6 +3455,13 @@ fn redact_private_paths_in_value(value: Value) -> Value {
                             | "workspace"
                             | "runtime_dir"
                             | "mcp_config"
+                            | "private_slot_id"
+                            | "session_id"
+                            | "provider_session_id"
+                            | "provider_session_ref"
+                            | "transcript_dir"
+                            | "script_path"
+                            | "journal_path"
                             | "path"
                             | "file"
                     )
@@ -3330,7 +3653,7 @@ fn provider_box_internal_token() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::provider_box::types::DIAG_PROVIDER_UPSTREAM_UNAVAILABLE;
+    use crate::provider_box::types::{ProviderSessionIdentity, DIAG_PROVIDER_UPSTREAM_UNAVAILABLE};
 
     use super::*;
 
@@ -3532,6 +3855,145 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_deep_research_body_builds_workflow_task_request() {
+        let body = json!({
+            "schema": "missiond.provider-box.claude-code-deep-research-request.v1",
+            "provider": "claude_code_deep_research",
+            "engine": "claude_code",
+            "model": "claude-code-deep-research-opus-4-8-xhigh",
+            "model_profile": "xhigh",
+            "correlation_id": "corr-claude-research",
+            "messages": [{"role": "user", "content": "调研 macOS OCR 方案"}]
+        });
+
+        let request =
+            claude_code_deep_research_interaction_from_body(&body).expect("research request");
+
+        assert_eq!(request.engine, CliEngine::ClaudeCode);
+        assert_eq!(request.command, BoxCommand::Research);
+        assert_eq!(
+            request.provider.as_deref(),
+            Some(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER)
+        );
+        assert_eq!(
+            request.model.as_deref(),
+            Some(CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID)
+        );
+        assert_eq!(
+            request.model_profile.as_deref(),
+            Some(CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE)
+        );
+        let prompt = request.prompt.as_deref().expect("prompt");
+        assert!(prompt.starts_with(CLAUDE_CODE_DEEP_RESEARCH_PROMPT_PREFIX));
+        assert!(prompt.contains("call deep-research:"));
+        assert!(prompt.contains("调研 macOS OCR 方案"));
+        assert!(!request.no_tools);
+        assert_eq!(
+            request.tool_policy.as_ref().unwrap()["allowed_tools"],
+            json!(["Skill", "Workflow"])
+        );
+        assert_eq!(
+            request.output_contract.as_ref().unwrap()["durable_source"],
+            "claude_code_deep_research_workflow_journal"
+        );
+        assert!(request.slot_id.is_none());
+        assert!(request
+            .desired_worker
+            .as_ref()
+            .unwrap()
+            .get("provider_session_id")
+            .is_some());
+    }
+
+    #[test]
+    fn claude_code_deep_research_body_rejects_external_slot_and_tools() {
+        let with_slot = json!({
+            "provider": "claude_code_deep_research",
+            "engine": "claude_code",
+            "prompt": "查资料",
+            "slot_id": "slot-claude-code-default"
+        });
+        assert!(claude_code_deep_research_interaction_from_body(&with_slot).is_none());
+
+        let with_tools = json!({
+            "provider": "claude_code_deep_research",
+            "engine": "claude_code",
+            "prompt": "查资料",
+            "tools": [{"type": "function", "function": {"name": "do_anything"}}]
+        });
+        assert!(claude_code_deep_research_interaction_from_body(&with_tools).is_none());
+    }
+
+    #[test]
+    fn claude_code_deep_research_redaction_hides_private_runtime_details() {
+        let request = ProviderInteractionRequest::new(BoxCommand::Research, CliEngine::ClaudeCode);
+        let mut result = ProviderBoxResult::base(&request, ProviderBoxStatus::Completed);
+        result.slot_id = Some("slot-claude-code-deep-research-private".to_string());
+        result.slot_status = Some(json!({
+            "private_slot_id": "slot-claude-code-deep-research-private",
+            "session_id": "019e82f0-private",
+            "transcript_dir": "/Users/jinchen/.claude/projects/private/subagents/workflows/wf"
+        }));
+        result.provider_conversation_id = Some("019e82f0-private".to_string());
+        result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+            Some(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER.to_string()),
+            CliEngine::ClaudeCode,
+            Some("slot-claude-code-deep-research-private".to_string()),
+            "019e82f0-private".to_string(),
+            "claude_code_deep_research_workflow_journal",
+            Some("/Users/jinchen/.claude/projects/private/journal.jsonl".to_string()),
+            Some("/Users/jinchen/.missiond/runtime/claude-code-deep-research".to_string()),
+            "durable_workflow_report",
+        ));
+        result.durable_source =
+            Some("/Users/jinchen/.claude/projects/private/journal.jsonl".to_string());
+        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+            "TEST_PRIVATE_DIAGNOSTIC",
+            "private detail fixture",
+            json!({
+                "session_id": "019e82f0-private",
+                "provider_session_id": "019e82f0-private",
+                "private_slot_id": "slot-claude-code-deep-research-private",
+                "journal_path": "/Users/jinchen/.claude/projects/private/journal.jsonl",
+                "nested": {
+                    "transcript_dir": "/Users/jinchen/.claude/projects/private/subagents/workflows/wf",
+                    "script_path": "/Users/jinchen/.claude/projects/private/workflows/scripts/deep-research.js",
+                    "ok": true
+                }
+            }),
+        ));
+
+        redact_private_claude_code_task_details(&mut result);
+
+        assert!(result.slot_id.is_none());
+        assert!(result.slot_status.is_none());
+        assert!(result.step_records.is_empty());
+        assert!(result.provider_conversation_id.is_none());
+        let identity = result.provider_session_identity.as_ref().expect("identity");
+        assert!(identity.slot_id.is_none());
+        assert!(identity.provider_session_id.is_none());
+        assert!(identity.provider_session_ref.is_none());
+        assert!(identity.resume_command.is_none());
+        assert!(identity.workspace.is_none());
+        assert_eq!(
+            identity.durable_source.as_deref(),
+            Some("claude_code_deep_research_workflow_journal")
+        );
+        assert_eq!(
+            result.durable_source.as_deref(),
+            Some("claude_code_deep_research_workflow_journal")
+        );
+        let details = &result.diagnostics[0].details;
+        assert!(details.get("session_id").is_none());
+        assert!(details.get("provider_session_id").is_none());
+        assert!(details.get("private_slot_id").is_none());
+        assert!(details.get("journal_path").is_none());
+        assert!(details["nested"].get("transcript_dir").is_none());
+        assert!(details["nested"].get("script_path").is_none());
+        assert_eq!(details["nested"]["ok"], true);
+    }
+
+    #[test]
     fn image_generation_body_builds_prefixed_codex_task_request() {
         let body = json!({
             "schema": "missiond.provider-box.image-generation-completion-request.v1",
@@ -3622,6 +4084,8 @@ mod tests {
         append_codex_exec_router_sources(&mut body);
         append_codex_task_exports(&mut body);
         append_codex_task_router_sources(&mut body);
+        append_claude_code_task_exports(&mut body);
+        append_claude_code_task_router_sources(&mut body);
 
         assert!(body["data"]
             .as_array()
@@ -3668,6 +4132,12 @@ mod tests {
             == "codex-image-generation-gpt-55-default"
             && entry["routeable"] == true
             && entry["routeable_status"] == "live_smoke_passed"));
+        assert!(router_sources.iter().any(|entry| entry["model_id"]
+            == CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID
+            && entry["routeable"] == true
+            && entry["route"]["provider"] == CLAUDE_CODE_DEEP_RESEARCH_PROVIDER
+            && entry["route"]["completion_endpoint"]
+                == "/provider-box/v1/claude-code/deep-research/completions"));
         assert!(body["provider_task_sources"]
             .as_array()
             .expect("task sources")
@@ -3685,6 +4155,17 @@ mod tests {
                 && entry["queue"]["key"] == "codex_image_generation:gpt-5.5:default"
                 && entry["queue"]["max_concurrent"] == 1
                 && entry["guard"]["ignore_user_config"] == false));
+        assert!(body["provider_task_sources"]
+            .as_array()
+            .expect("task sources")
+            .iter()
+            .any(
+                |entry| entry["provider"] == CLAUDE_CODE_DEEP_RESEARCH_PROVIDER
+                    && entry["capabilities"]["workflow"] == true
+                    && entry["guard"]["workflow_required"] == "deep-research"
+                    && entry["queue"]["key"] == claude_code_deep_research_queue_key()
+                    && entry["queue"]["max_concurrent"] == 1
+            ));
     }
 
     #[test]

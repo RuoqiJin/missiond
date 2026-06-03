@@ -27,12 +27,20 @@ use super::types::{
 
 const DEFAULT_CLAUDE_CODE_SLOT: &str = "slot-claude-code-default";
 const CLAUDE_CODE_TEXT_PROVIDER: &str = "claude_code_text";
+const CLAUDE_CODE_DEEP_RESEARCH_PROVIDER: &str = "claude_code_deep_research";
+const CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID: &str = "claude-code-deep-research-opus-4-8-xhigh";
+const CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL: &str = "claude-opus-4-8";
+const CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE: &str = "xhigh";
 const CLAUDE_CODE_TEXT_RUNTIME_DIR: &str = ".missiond/runtime/claude-code-text-only";
+const CLAUDE_CODE_DEEP_RESEARCH_RUNTIME_DIR: &str = ".missiond/runtime/claude-code-deep-research";
 const CLAUDE_CODE_TEXT_EMPTY_MCP_CONFIG: &str = "empty-mcp-config.json";
 const CLAUDE_CODE_TEXT_MAX_CONCURRENT: usize = 1;
+const CLAUDE_CODE_DEEP_RESEARCH_MAX_CONCURRENT: usize = 1;
 const OBSERVE_SETTLE_MS: u64 = 350;
 const OBSERVE_STABLE_POLL_MS: u64 = 120;
 const OBSERVE_STABLE_MAX_MS: u64 = 1_000;
+const DURABLE_FINAL_IDLE_GRACE_SECS: u64 = 4;
+const PROMPT_SUBMISSION_IDLE_GRACE_SECS: u64 = 30;
 
 #[derive(Clone)]
 pub(crate) struct ClaudeCodeProviderDriver {
@@ -81,6 +89,29 @@ struct ClaudeCodeJsonlAnalysis {
     final_text: Option<String>,
     violation: Option<Value>,
     upstream_error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ClaudeCodeDeepResearchAnalysis {
+    jsonl_path: Option<PathBuf>,
+    line_count: usize,
+    launch: Option<ClaudeCodeWorkflowLaunch>,
+    upstream_error: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeCodeWorkflowLaunch {
+    task_id: Option<String>,
+    run_id: String,
+    transcript_dir: PathBuf,
+    script_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ClaudeCodeWorkflowJournalReport {
+    journal_path: Option<PathBuf>,
+    line_count: usize,
+    report: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +525,78 @@ impl ClaudeCodeProviderDriver {
         };
 
         Some(def)
+    }
+
+    fn request_is_deep_research(request: &ProviderInteractionRequest) -> bool {
+        request.command == super::types::BoxCommand::Research
+            && request.provider.as_deref().is_some_and(|provider| {
+                provider.eq_ignore_ascii_case(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER)
+                    || provider.eq_ignore_ascii_case("claude-code-deep-research")
+            })
+    }
+
+    fn validate_deep_research_request(
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+    ) -> bool {
+        let provider = request
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER);
+        if !provider.eq_ignore_ascii_case(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER)
+            && !provider.eq_ignore_ascii_case("claude-code-deep-research")
+        {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode deep-research export requires provider=claude_code_deep_research",
+                json!({
+                    "provider": provider,
+                    "allowed_provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+                }),
+            ));
+            return false;
+        }
+        if request.slot_id.is_some() {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode deep-research export does not accept external slot_id",
+                json!({
+                    "rule": "provider-box generates a private ephemeral PTY slot and hides it from callers",
+                }),
+            ));
+            return false;
+        }
+        if request
+            .prompt
+            .as_ref()
+            .is_none_or(|prompt| prompt.trim().is_empty())
+        {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode deep-research export requires a non-empty research prompt",
+                json!({
+                    "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+                }),
+            ));
+            return false;
+        }
+        if !request.attachments.is_empty() {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode deep-research export does not accept attachments",
+                json!({
+                    "attachments": request.attachments.len(),
+                }),
+            ));
+            return false;
+        }
+        true
     }
 
     fn request_permission_mode(
@@ -1761,6 +1864,33 @@ impl ClaudeCodeProviderDriver {
         Some((runtime_dir, mcp_config))
     }
 
+    async fn ensure_deep_research_runtime(
+        &self,
+        result: &mut ProviderBoxResult,
+    ) -> Option<PathBuf> {
+        let runtime_dir = claude_code_deep_research_runtime_dir();
+        if let Err(err) = tokio::fs::create_dir_all(&runtime_dir).await {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode deep-research runtime directory could not be created",
+                json!({
+                    "runtime_dir": runtime_dir.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            ));
+            return None;
+        }
+
+        let readme = runtime_dir.join("README.missiond-claude-code-deep-research.txt");
+        let _ = tokio::fs::write(
+            &readme,
+            "MissionD provider-box ClaudeCode deep-research runtime.\nThis directory is fixed and pre-trusted; each request uses an independent ClaudeCode --session-id and a private ephemeral PTY.\n",
+        )
+        .await;
+        Some(runtime_dir)
+    }
+
     async fn accept_workspace_trust_locked(
         &self,
         result: &mut ProviderBoxResult,
@@ -2132,6 +2262,7 @@ impl ClaudeCodeProviderDriver {
     ) -> ProviderBoxResult {
         let timeout_secs = request.timeout_secs.unwrap_or(300).clamp(10, 7_200);
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let monitor_started_at = Instant::now();
         let mut idle_seen_at: Option<Instant> = None;
 
         loop {
@@ -2226,7 +2357,10 @@ impl ClaudeCodeProviderDriver {
                 PtyCanonicalState::Idle | PtyCanonicalState::Complete
             ) {
                 if let Some(seen_at) = idle_seen_at {
-                    if seen_at.elapsed() >= Duration::from_secs(4) {
+                    if durable_final_missing_idle_grace_elapsed(
+                        seen_at.elapsed(),
+                        monitor_started_at.elapsed(),
+                    ) {
                         result.status = ProviderBoxStatus::Failed;
                         result.add_diagnostic(ProviderBoxDiagnostic::error(
                             DIAG_PROVIDER_DURABLE_FINAL_MISSING,
@@ -2267,13 +2401,14 @@ impl ClaudeCodeProviderDriver {
         }
     }
 
-    async fn submit_text_only_prompt(
+    async fn submit_redacted_prompt(
         &self,
         result: &mut ProviderBoxResult,
         slot_id: &str,
         prompt: &str,
+        label: &str,
     ) -> bool {
-        let mut action = PtyStepAction::text("<claude-code text-only prompt>");
+        let mut action = PtyStepAction::text(label.to_string());
         action.redacted = true;
         let _ = self
             .write_step(
@@ -2281,7 +2416,7 @@ impl ClaudeCodeProviderDriver {
                 slot_id,
                 action,
                 prompt,
-                Some("write ClaudeCode text-only prompt into composer".to_string()),
+                Some("write ClaudeCode prompt into composer".to_string()),
             )
             .await;
         let _ = self
@@ -2290,13 +2425,23 @@ impl ClaudeCodeProviderDriver {
                 slot_id,
                 PtyStepAction::key("enter"),
                 "\r",
-                Some("submit ClaudeCode text-only prompt".to_string()),
+                Some("submit ClaudeCode prompt".to_string()),
             )
             .await;
         !result
             .step_records
             .last()
             .is_some_and(|step| step.verification_status == PtyStepVerificationStatus::Failed)
+    }
+
+    async fn submit_text_only_prompt(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        prompt: &str,
+    ) -> bool {
+        self.submit_redacted_prompt(result, slot_id, prompt, "<claude-code text-only prompt>")
+            .await
     }
 
     async fn monitor_text_only_turn(
@@ -2312,6 +2457,7 @@ impl ClaudeCodeProviderDriver {
     ) -> bool {
         let timeout_secs = request.timeout_secs.unwrap_or(180).clamp(10, 7_200);
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let monitor_started_at = Instant::now();
         let mut idle_seen_at: Option<Instant> = None;
 
         loop {
@@ -2433,7 +2579,10 @@ impl ClaudeCodeProviderDriver {
                 PtyCanonicalState::Idle | PtyCanonicalState::Complete
             ) {
                 if let Some(seen_at) = idle_seen_at {
-                    if seen_at.elapsed() >= Duration::from_secs(4) {
+                    if durable_final_missing_idle_grace_elapsed(
+                        seen_at.elapsed(),
+                        monitor_started_at.elapsed(),
+                    ) {
                         result.status = ProviderBoxStatus::Failed;
                         result.add_diagnostic(ProviderBoxDiagnostic::error(
                             DIAG_PROVIDER_DURABLE_FINAL_MISSING,
@@ -2631,6 +2780,297 @@ impl ClaudeCodeProviderDriver {
         )
         .await
     }
+
+    async fn run_deep_research_source(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+    ) -> bool {
+        if !Self::validate_deep_research_request(request, result) {
+            return false;
+        }
+
+        let queue_key =
+            format!("{CLAUDE_CODE_DEEP_RESEARCH_PROVIDER}:{CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID}");
+        let queue_semaphore = self.text_lane_semaphore(&queue_key).await;
+        let queued_at = Instant::now();
+        let Ok(_queue_guard) = queue_semaphore.acquire_owned().await else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode deep-research queue is unavailable",
+                json!({
+                    "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+                    "queue": {
+                        "key": queue_key,
+                        "max_concurrent": CLAUDE_CODE_DEEP_RESEARCH_MAX_CONCURRENT,
+                    },
+                }),
+            ));
+            return false;
+        };
+        let queue_wait_ms = u64::try_from(queued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        let Some(runtime_dir) = self.ensure_deep_research_runtime(result).await else {
+            return false;
+        };
+
+        let session_id = Self::request_provider_session_id(request)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let slot_id = format!("slot-claude-code-deep-research-{}", &session_id[..8]);
+        let slot = PTYSlot {
+            id: slot_id.clone(),
+            role: "provider-box-claude-code-deep-research".to_string(),
+            cwd: Some(runtime_dir.clone()),
+            engine: CliEngine::ClaudeCode,
+        };
+        self.pty.init_slot(&slot).await;
+
+        let mut extra_env = HashMap::new();
+        extra_env.insert(
+            "MISSIOND_PROVIDER_BOX_TASK".to_string(),
+            "deep_research".to_string(),
+        );
+        extra_env.insert(
+            "MISSIOND_PROVIDER_BOX_TASK_PROVIDER".to_string(),
+            CLAUDE_CODE_DEEP_RESEARCH_PROVIDER.to_string(),
+        );
+
+        let options = PTYSpawnOptions {
+            auto_restart: false,
+            wait_for_idle: false,
+            timeout_secs: Some(90),
+            mcp_config: None,
+            dangerously_skip_permissions: false,
+            model: Some(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL.to_string()),
+            reasoning_effort: Some(CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE.to_string()),
+            search_enabled: true,
+            sandbox: None,
+            approval_policy: None,
+            tool_policy_path: None,
+            claude_code_tools: None,
+            claude_code_strict_mcp_config: false,
+            claude_code_disable_slash_commands: false,
+            provider_session_id: Some(session_id.clone()),
+            extra_env,
+            initial_prompt: None,
+            command_override: None,
+        };
+
+        if let Err(err) = self.pty.spawn(&slot, options).await {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode deep-research PTY could not be spawned",
+                json!({
+                    "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+                    "error": err.to_string(),
+                }),
+            ));
+            let _ = self.pty.force_kill(&slot_id).await;
+            return false;
+        }
+
+        let ok = self
+            .run_spawned_deep_research_source(
+                request,
+                result,
+                &slot_id,
+                &session_id,
+                &queue_key,
+                queue_wait_ms,
+            )
+            .await;
+        let _ = self.pty.force_kill(&slot_id).await;
+        ok
+    }
+
+    async fn run_spawned_deep_research_source(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        session_id: &str,
+        queue_key: &str,
+        queue_wait_ms: u64,
+    ) -> bool {
+        if !self
+            .ensure_ready_for_prompt_turn(result, slot_id, Duration::from_secs(90))
+            .await
+        {
+            return false;
+        }
+
+        let cursor = claude_code_jsonl_cursor_for_session(&self.claude_home, session_id);
+        let prompt = request.prompt.as_deref().unwrap_or_default();
+        if !self
+            .submit_redacted_prompt(
+                result,
+                slot_id,
+                prompt,
+                "<claude-code deep-research prompt>",
+            )
+            .await
+        {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode deep-research prompt submission failed",
+                json!({
+                    "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+                }),
+            ));
+            return false;
+        }
+
+        self.monitor_deep_research_turn(
+            request,
+            result,
+            slot_id,
+            session_id,
+            cursor,
+            queue_key,
+            queue_wait_ms,
+        )
+        .await
+    }
+
+    async fn monitor_deep_research_turn(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        session_id: &str,
+        cursor: ClaudeCodeJsonlCursor,
+        queue_key: &str,
+        queue_wait_ms: u64,
+    ) -> bool {
+        let timeout_secs = request.timeout_secs.unwrap_or(1_800).clamp(60, 14_400);
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let mut launch: Option<ClaudeCodeWorkflowLaunch> = None;
+
+        loop {
+            if launch.is_none() {
+                let analysis = analyze_claude_code_deep_research_after_cursor(
+                    &self.claude_home,
+                    session_id,
+                    &cursor,
+                );
+                if let Some(upstream_error) = analysis.upstream_error {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_UPSTREAM_UNAVAILABLE,
+                        "ClaudeCode upstream provider returned an API error before launching deep-research workflow",
+                        json!({
+                            "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+                            "session_id": session_id,
+                            "event": upstream_error,
+                            "line_count": analysis.line_count,
+                        }),
+                    ));
+                    return false;
+                }
+                launch = analysis.launch;
+                if let Some(path) = analysis.jsonl_path {
+                    result.durable_source = Some(path.display().to_string());
+                }
+            }
+
+            if let Some(workflow) = launch.as_ref() {
+                let report = read_claude_code_workflow_journal_report(&workflow.transcript_dir);
+                if let Some(report_json) = report.report {
+                    let final_text = claude_code_deep_research_report_to_markdown(&report_json);
+                    result.status = ProviderBoxStatus::Completed;
+                    result.provider = Some(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER.to_string());
+                    result.model = Some(CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID.to_string());
+                    result.model_profile =
+                        Some(CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE.to_string());
+                    result.provider_conversation_id = Some(session_id.to_string());
+                    result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                        Some(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER.to_string()),
+                        CliEngine::ClaudeCode,
+                        Some(slot_id.to_string()),
+                        session_id.to_string(),
+                        "claude_code_deep_research_workflow_journal",
+                        report
+                            .journal_path
+                            .as_ref()
+                            .map(|path| path.display().to_string()),
+                        Some(
+                            claude_code_deep_research_runtime_dir()
+                                .display()
+                                .to_string(),
+                        ),
+                        "durable_workflow_report",
+                    ));
+                    result.durable_source = report
+                        .journal_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .or_else(|| Some("claude_code_deep_research_workflow_journal".to_string()));
+                    result.slot_status = Some(json!({
+                        "kind": "claude_code_deep_research",
+                        "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+                        "private_slot_id": slot_id,
+                        "session_id": session_id,
+                        "workflow": "deep-research",
+                        "task_id": workflow.task_id,
+                        "run_id": workflow.run_id,
+                        "journal_line_count": report.line_count,
+                        "queue": {
+                            "owner": "provider-box",
+                            "key": queue_key,
+                            "max_concurrent": CLAUDE_CODE_DEEP_RESEARCH_MAX_CONCURRENT,
+                            "wait_ms": queue_wait_ms,
+                            "policy": "per_logical_claude_code_deep_research_source"
+                        }
+                    }));
+                    result.final_text = Some(final_text);
+                    return true;
+                }
+            }
+
+            let observation = self.observe(slot_id).await;
+            if observation.snapshot.state == PtyCanonicalState::Blocked {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "ClaudeCode deep-research turn entered a blocked provider surface",
+                    json!({
+                        "slot_id": slot_id,
+                        "reason": observation.snapshot.reason,
+                        "blocked_kind": observation.snapshot.blocked_kind,
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return false;
+            }
+
+            if Instant::now() >= deadline {
+                let _ = self.pty.write(slot_id, "\x1b").await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                    "ClaudeCode deep-research workflow timed out before durable journal report appeared",
+                    json!({
+                        "provider": CLAUDE_CODE_DEEP_RESEARCH_PROVIDER,
+                        "session_id": session_id,
+                        "workflow_launch": launch.as_ref().map(|workflow| json!({
+                            "task_id": workflow.task_id,
+                            "run_id": workflow.run_id,
+                        })),
+                        "timeout_secs": timeout_secs,
+                    }),
+                ));
+                return false;
+            }
+
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -2645,6 +3085,13 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
 
     async fn submit_turn(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
         let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        if Self::request_is_deep_research(request) {
+            result.provider = Some(CLAUDE_CODE_DEEP_RESEARCH_PROVIDER.to_string());
+            result.model = Some("claude-code-deep-research-opus-4-8-xhigh".to_string());
+            result.model_profile = Some("xhigh".to_string());
+            self.run_deep_research_source(request, &mut result).await;
+            return result;
+        }
         if !Self::validate_prompt_turn(request, &mut result) {
             return result;
         }
@@ -3452,6 +3899,18 @@ fn claude_code_text_runtime_dir() -> PathBuf {
         .join(CLAUDE_CODE_TEXT_RUNTIME_DIR)
 }
 
+fn claude_code_deep_research_runtime_dir() -> PathBuf {
+    if let Ok(root) = std::env::var("MISSIOND_RUNTIME_DIR") {
+        let root = root.trim();
+        if !root.is_empty() {
+            return PathBuf::from(root).join("claude-code-deep-research");
+        }
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(CLAUDE_CODE_DEEP_RESEARCH_RUNTIME_DIR)
+}
+
 fn default_claude_home() -> PathBuf {
     if let Ok(root) = std::env::var("CLAUDE_CONFIG_DIR") {
         let root = root.trim();
@@ -3569,6 +4028,251 @@ fn analyze_claude_code_jsonl_after_cursor(
         }
     }
     analysis
+}
+
+fn analyze_claude_code_deep_research_after_cursor(
+    claude_home: &Path,
+    session_id: &str,
+    cursor: &ClaudeCodeJsonlCursor,
+) -> ClaudeCodeDeepResearchAnalysis {
+    let path = cursor
+        .path
+        .clone()
+        .filter(|path| path.exists())
+        .or_else(|| find_claude_code_session_jsonl(claude_home, session_id));
+    let Some(path) = path else {
+        return ClaudeCodeDeepResearchAnalysis::default();
+    };
+
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(_) => return ClaudeCodeDeepResearchAnalysis::default(),
+    };
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let offset = if cursor
+        .path
+        .as_ref()
+        .is_some_and(|cursor_path| cursor_path == &path)
+        && cursor.offset <= len
+    {
+        cursor.offset
+    } else {
+        0
+    };
+    if offset > 0 {
+        let _ = file.seek(SeekFrom::Start(offset));
+    }
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return ClaudeCodeDeepResearchAnalysis::default();
+    }
+
+    let mut analysis = ClaudeCodeDeepResearchAnalysis {
+        jsonl_path: Some(path),
+        ..Default::default()
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        analysis.line_count += 1;
+        if analysis.upstream_error.is_none() {
+            if let Some(upstream_error) = claude_code_jsonl_event_upstream_error(&event) {
+                analysis.upstream_error = Some(upstream_error);
+                continue;
+            }
+        }
+        if analysis.launch.is_none() {
+            analysis.launch = claude_code_workflow_launch_from_event(&event);
+        }
+    }
+    analysis
+}
+
+fn claude_code_workflow_launch_from_event(event: &Value) -> Option<ClaudeCodeWorkflowLaunch> {
+    let launch = find_workflow_launch_value(event)?;
+    let status = launch.get("status").and_then(Value::as_str)?;
+    if status != "async_launched" {
+        return None;
+    }
+    if !claude_code_workflow_launch_is_deep_research(launch) {
+        return None;
+    }
+    let run_id = launch
+        .get("runId")
+        .or_else(|| launch.get("run_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let transcript_dir = launch
+        .get("transcriptDir")
+        .or_else(|| launch.get("transcript_dir"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)?;
+    let task_id = launch
+        .get("taskId")
+        .or_else(|| launch.get("task_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let script_path = launch
+        .get("scriptPath")
+        .or_else(|| launch.get("script_path"))
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
+    Some(ClaudeCodeWorkflowLaunch {
+        task_id,
+        run_id,
+        transcript_dir,
+        script_path,
+    })
+}
+
+fn claude_code_workflow_launch_is_deep_research(launch: &Value) -> bool {
+    let mut haystack = String::new();
+    for key in [
+        "name",
+        "workflow",
+        "summary",
+        "description",
+        "scriptPath",
+        "script_path",
+    ] {
+        if let Some(value) = launch.get(key).and_then(Value::as_str) {
+            haystack.push_str(value);
+            haystack.push('\n');
+        }
+    }
+    let normalized = haystack.to_ascii_lowercase();
+    normalized.contains("deep-research") || normalized.contains("deep research")
+}
+
+fn find_workflow_launch_value(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) => {
+            if map
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status == "async_launched")
+                && (map.get("runId").is_some() || map.get("run_id").is_some())
+                && (map.get("transcriptDir").is_some() || map.get("transcript_dir").is_some())
+            {
+                return Some(value);
+            }
+            for (key, child) in map {
+                if key == "toolUseResult" {
+                    if let Some(found) = find_workflow_launch_value(child) {
+                        return Some(found);
+                    }
+                }
+            }
+            map.values().find_map(find_workflow_launch_value)
+        }
+        Value::Array(items) => items.iter().find_map(find_workflow_launch_value),
+        _ => None,
+    }
+}
+
+fn read_claude_code_workflow_journal_report(
+    transcript_dir: &Path,
+) -> ClaudeCodeWorkflowJournalReport {
+    let journal_path = transcript_dir.join("journal.jsonl");
+    let Ok(text) = fs::read_to_string(&journal_path) else {
+        return ClaudeCodeWorkflowJournalReport::default();
+    };
+    let mut report = ClaudeCodeWorkflowJournalReport {
+        journal_path: Some(journal_path),
+        ..Default::default()
+    };
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        report.line_count += 1;
+        if event.get("type").and_then(Value::as_str) != Some("result") {
+            continue;
+        }
+        let Some(result) = event.get("result") else {
+            continue;
+        };
+        let has_report_shape = result.get("summary").is_some()
+            && result
+                .get("findings")
+                .and_then(Value::as_array)
+                .is_some_and(|findings| !findings.is_empty())
+            && result.get("caveats").is_some();
+        if has_report_shape {
+            report.report = Some(result.clone());
+        }
+    }
+    report
+}
+
+fn claude_code_deep_research_report_to_markdown(report: &Value) -> String {
+    let mut rendered = Vec::new();
+    if let Some(summary) = report.get("summary").and_then(Value::as_str) {
+        rendered.push("## Summary".to_string());
+        rendered.push(summary.trim().to_string());
+    }
+
+    if let Some(findings) = report.get("findings").and_then(Value::as_array) {
+        rendered.push("## Findings".to_string());
+        for (index, finding) in findings.iter().enumerate() {
+            let claim = finding
+                .get("claim")
+                .and_then(Value::as_str)
+                .unwrap_or("Untitled finding")
+                .trim();
+            let confidence = finding
+                .get("confidence")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .trim();
+            rendered.push(format!("{}. **{}** ({})", index + 1, claim, confidence));
+            if let Some(evidence) = finding.get("evidence").and_then(Value::as_str) {
+                rendered.push(format!("Evidence: {}", evidence.trim()));
+            }
+            if let Some(vote) = finding.get("vote").and_then(Value::as_str) {
+                rendered.push(format!("Vote: {}", vote.trim()));
+            }
+            if let Some(sources) = finding.get("sources").and_then(Value::as_array) {
+                let urls = sources
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>();
+                if !urls.is_empty() {
+                    rendered.push(format!("Sources: {}", urls.join(", ")));
+                }
+            }
+        }
+    }
+
+    if let Some(caveats) = report.get("caveats").and_then(Value::as_str) {
+        rendered.push("## Caveats".to_string());
+        rendered.push(caveats.trim().to_string());
+    }
+
+    if let Some(open_questions) = report.get("openQuestions").and_then(Value::as_array) {
+        let questions = open_questions
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if !questions.is_empty() {
+            rendered.push("## Open Questions".to_string());
+            for question in questions {
+                rendered.push(format!("- {question}"));
+            }
+        }
+    }
+
+    rendered.join("\n\n")
 }
 
 fn find_claude_code_session_jsonl(claude_home: &Path, session_id: &str) -> Option<PathBuf> {
@@ -3729,6 +4433,14 @@ fn json_value_has_signal(value: &Value) -> bool {
     }
 }
 
+fn durable_final_missing_idle_grace_elapsed(
+    idle_elapsed: Duration,
+    monitor_elapsed: Duration,
+) -> bool {
+    idle_elapsed >= Duration::from_secs(DURABLE_FINAL_IDLE_GRACE_SECS)
+        && monitor_elapsed >= Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS)
+}
+
 fn claude_code_assistant_end_turn_text(event: &Value) -> Option<String> {
     let message = event.get("message")?;
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -3765,6 +4477,7 @@ fn claude_code_message_content_text(content: &Value) -> Option<String> {
 mod tests {
     use std::fs;
     use std::io::Write;
+    use std::time::Duration;
 
     use missiond_core::pty::recognize_screen;
     use missiond_core::types::CliEngine;
@@ -3773,16 +4486,19 @@ mod tests {
     use crate::provider_box::types::{BoxCommand, ProviderInteractionRequest};
 
     use super::{
-        analyze_claude_code_jsonl_after_cursor, claude_code_jsonl_cursor_for_session,
-        claude_code_jsonl_event_is_text_only_violation, claude_code_mcp_detail_action_positions,
-        claude_code_mcp_reconnect_action_selected, claude_code_mcp_reconnect_action_visible,
-        claude_code_mcp_reconnect_line, claude_code_mcp_reconnect_outcome,
-        claude_code_mcp_status_value, claude_code_permission_cycle_steps,
-        claude_code_provider_capabilities, claude_code_staged_command_matches,
+        analyze_claude_code_jsonl_after_cursor, claude_code_deep_research_report_to_markdown,
+        claude_code_jsonl_cursor_for_session, claude_code_jsonl_event_is_text_only_violation,
+        claude_code_mcp_detail_action_positions, claude_code_mcp_reconnect_action_selected,
+        claude_code_mcp_reconnect_action_visible, claude_code_mcp_reconnect_line,
+        claude_code_mcp_reconnect_outcome, claude_code_mcp_status_value,
+        claude_code_permission_cycle_steps, claude_code_provider_capabilities,
+        claude_code_staged_command_matches, claude_code_workflow_launch_from_event,
+        durable_final_missing_idle_grace_elapsed,
         extract_claude_code_mcp_server_entries_from_screen, find_claude_code_session_jsonl,
         is_claude_code_logout_success, normalize_claude_code_model_target,
-        normalize_claude_code_permission_mode, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,
-        ClaudeCodeObservation, ClaudeCodePermissionMode,
+        normalize_claude_code_permission_mode, read_claude_code_workflow_journal_report,
+        ClaudeCodeJsonlCursor, ClaudeCodeModelTarget, ClaudeCodeObservation,
+        ClaudeCodePermissionMode, DURABLE_FINAL_IDLE_GRACE_SECS, PROMPT_SUBMISSION_IDLE_GRACE_SECS,
     };
 
     fn observation(lines: &[&str]) -> ClaudeCodeObservation {
@@ -4115,6 +4831,80 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_workflow_launch_is_extracted_from_tool_result_event() {
+        let event = serde_json::json!({
+            "type": "user",
+            "toolUseResult": {
+                "status": "async_launched",
+                "taskId": "w82yur346",
+                "runId": "wf_7d30c912-5c6",
+                "summary": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report.",
+                "transcriptDir": "/tmp/session/subagents/workflows/wf_7d30c912-5c6",
+                "scriptPath": "/tmp/session/workflows/scripts/deep-research.js"
+            }
+        });
+
+        let launch = claude_code_workflow_launch_from_event(&event).expect("launch");
+
+        assert_eq!(launch.task_id.as_deref(), Some("w82yur346"));
+        assert_eq!(launch.run_id, "wf_7d30c912-5c6");
+        assert_eq!(
+            launch.transcript_dir,
+            std::path::PathBuf::from("/tmp/session/subagents/workflows/wf_7d30c912-5c6")
+        );
+        assert_eq!(
+            launch.script_path.as_deref(),
+            Some(std::path::Path::new(
+                "/tmp/session/workflows/scripts/deep-research.js"
+            ))
+        );
+    }
+
+    #[test]
+    fn claude_code_workflow_launch_ignores_non_deep_research_workflow() {
+        let event = serde_json::json!({
+            "type": "user",
+            "toolUseResult": {
+                "status": "async_launched",
+                "taskId": "w-other",
+                "runId": "wf_other",
+                "summary": "Generic implementation workflow",
+                "transcriptDir": "/tmp/session/subagents/workflows/wf_other",
+                "scriptPath": "/tmp/session/workflows/scripts/implementation.js"
+            }
+        });
+
+        assert!(claude_code_workflow_launch_from_event(&event).is_none());
+    }
+
+    #[test]
+    fn claude_code_workflow_journal_report_extracts_final_synthesis_report() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workflow_dir = temp.path().join("wf_test");
+        fs::create_dir_all(&workflow_dir).expect("workflow dir");
+        fs::write(
+            workflow_dir.join("journal.jsonl"),
+            concat!(
+                "{\"type\":\"result\",\"agentId\":\"scope\",\"result\":{\"summary\":\"scope only\",\"findings\":[]}}\n",
+                "{\"type\":\"result\",\"agentId\":\"synth\",\"result\":{\"summary\":\"final summary\",\"findings\":[{\"claim\":\"claim one\",\"confidence\":\"high\",\"evidence\":\"evidence one\",\"sources\":[\"https://example.com/a\"],\"vote\":\"3-0\"}],\"caveats\":\"mind caveats\",\"openQuestions\":[\"what next?\"]}}\n"
+            ),
+        )
+        .expect("journal");
+
+        let report = read_claude_code_workflow_journal_report(&workflow_dir);
+        let report_json = report.report.expect("report json");
+        let markdown = claude_code_deep_research_report_to_markdown(&report_json);
+
+        assert_eq!(report.line_count, 2);
+        assert!(markdown.contains("## Summary"));
+        assert!(markdown.contains("final summary"));
+        assert!(markdown.contains("claim one"));
+        assert!(markdown.contains("https://example.com/a"));
+        assert!(markdown.contains("## Caveats"));
+        assert!(markdown.contains("what next?"));
+    }
+
+    #[test]
     fn claude_code_jsonl_scanner_finds_session_file_without_cwd_encoding() {
         let temp = tempfile::tempdir().expect("tempdir");
         let session_id = "019e82f0-0000-7000-8000-000000000002";
@@ -4189,6 +4979,18 @@ mod tests {
         });
 
         assert!(!claude_code_jsonl_event_is_text_only_violation(&event));
+    }
+
+    #[test]
+    fn durable_final_missing_idle_grace_ignores_initial_submission_idle() {
+        assert!(!durable_final_missing_idle_grace_elapsed(
+            Duration::from_secs(DURABLE_FINAL_IDLE_GRACE_SECS),
+            Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS - 1),
+        ));
+        assert!(durable_final_missing_idle_grace_elapsed(
+            Duration::from_secs(DURABLE_FINAL_IDLE_GRACE_SECS),
+            Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS),
+        ));
     }
 
     #[test]
