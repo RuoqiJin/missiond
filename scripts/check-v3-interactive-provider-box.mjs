@@ -195,6 +195,8 @@ function main() {
       'usage-probe',
       'model-catalog',
       'interactive /model picker',
+      'AGY 1.0.5 help confirms --model',
+      'request.model maps to agy --model',
       'MissionDAgy',
       'self-built proxy deployment program',
       'pure-text-guard',
@@ -286,6 +288,8 @@ function main() {
     requireAll(diagnostics, FILES.session, sources.session, [
       'CliEngine::Agy',
       '"agy".to_string()',
+      'Agy CLI: model override',
+      ' --model ',
       'Codex CLI: workspace root override',
       'Gemini CLI: plan/read-only approval mode enabled',
     ]);
@@ -418,6 +422,9 @@ function main() {
       '"prompt_authorization"',
       '"allowlist"',
       '"observe-act-observe selected option before Enter"',
+      '"model_launch_selector"',
+      '"supported": true',
+      '"flag": "--model"',
     ]);
     requireAll(diagnostics, FILES.aggregate, sources.aggregate, [
       'scripts/check-v3-interactive-provider-box.mjs',

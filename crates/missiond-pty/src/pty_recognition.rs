@@ -4137,6 +4137,7 @@ mod tests {
                 "  --dangerously-skip-permissions  Auto-approve all tool permission requests without prompting",
                 "  -i                              Short alias for --prompt-interactive",
                 "  --log-file                      Override CLI log file path",
+                "  --model                         Model for the current CLI session",
                 "  -p                              Short alias for --print",
                 "  --print                         Run a single prompt non-interactively and print the response",
                 "  --print-timeout                 Timeout for print mode wait (default 5m0s)",

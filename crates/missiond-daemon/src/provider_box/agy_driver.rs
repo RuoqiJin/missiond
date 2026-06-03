@@ -455,6 +455,7 @@ impl AgyProviderDriver {
         slot_id: &str,
     ) -> PTYSpawnOptions {
         let mut options = Self::spawn_options();
+        options.model = request.model.clone();
         if request.dangerously_bypass_approvals_and_sandbox {
             options.dangerously_skip_permissions = true;
             options.extra_env.insert(
@@ -5829,7 +5830,7 @@ mod tests {
     }
 
     #[test]
-    fn agy_spawn_options_project_provider_box_bypass_without_model_launch() {
+    fn agy_spawn_options_project_provider_box_bypass_and_model_launch() {
         let mut request = ProviderInteractionRequest::new(BoxCommand::Status, CliEngine::Agy);
         request.model = Some("Gemini 3.1 Pro (High)".to_string());
         let baseline = AgyProviderDriver::spawn_options_for_request(
@@ -5837,7 +5838,7 @@ mod tests {
             "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
         );
         assert!(!baseline.dangerously_skip_permissions);
-        assert!(baseline.model.is_none());
+        assert_eq!(baseline.model.as_deref(), Some("Gemini 3.1 Pro (High)"));
 
         request.dangerously_bypass_approvals_and_sandbox = true;
         let bypass = AgyProviderDriver::spawn_options_for_request(
@@ -5845,7 +5846,7 @@ mod tests {
             "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
         );
         assert!(bypass.dangerously_skip_permissions);
-        assert!(bypass.model.is_none());
+        assert_eq!(bypass.model.as_deref(), Some("Gemini 3.1 Pro (High)"));
         assert_eq!(
             bypass
                 .extra_env

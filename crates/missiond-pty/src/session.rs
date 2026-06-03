@@ -602,14 +602,12 @@ fn build_cli_command_with_claude_options(
         CliEngine::Agy => {
             // Antigravity (`agy`) CLI: bare invocation opens the interactive
             // TUI. `--prompt-interactive` currently requires an argument and
-            // exits before MissionD can attach the worker PTY. AGY 1.0.4 help
-            // also exposes print and prompt one-shot modes;
-            // provider-box lanes must not use those non-interactive modes.
+            // exits before MissionD can attach the worker PTY. AGY one-shot
+            // print/prompt modes remain forbidden for provider-box lanes.
             let mut parts = "agy".to_string();
             if let Some(m) = model {
-                // Current agy help does not advertise a model flag. Keep the
-                // value visible in logs so model-profile drift is diagnosable.
-                info!(model = %m, "Agy CLI: model override ignored (no stable flag)");
+                parts.push_str(&format!(" --model {}", shell_quote(m)));
+                info!(model = %m, "Agy CLI: model override");
             }
             if dangerously_skip_permissions {
                 parts.push_str(" --dangerously-skip-permissions");
@@ -3460,21 +3458,24 @@ Some prose.
             None,
             None,
         );
-        assert_eq!(baseline, "agy");
+        assert_eq!(baseline, "agy --model 'Gemini 3.5 Flash (High)'");
 
         let privileged = build_cli_command(
             CliEngine::Agy,
             std::path::Path::new("/tmp/project"),
             None,
             true,
-            None,
+            Some("Gemini 3.1 Pro (High)"),
             None,
             false,
             Some("restricted"),
             None,
             None,
         );
-        assert_eq!(privileged, "agy --dangerously-skip-permissions --sandbox");
+        assert_eq!(
+            privileged,
+            "agy --model 'Gemini 3.1 Pro (High)' --dangerously-skip-permissions --sandbox"
+        );
         assert!(!privileged.contains(&format!("--{}", "print")));
         assert!(!privileged.contains(&format!(" -{}", "p")));
         assert!(!privileged.contains(&format!("--{}", "prompt")));
