@@ -8,9 +8,11 @@
        :accepted_shard_id "wo-20260603010344-Jarvis-MCP-grounding-gate-and-Ma-shard-default"
        :read_scope ["."]
        :write_scope [".missiond/v3/shards/request-runtime.lisp"
+                     ".missiond/v3/shards/memory-knowledge-runtime.lisp"
                      ".missiond/v3/shards/workstation-runtime.lisp"
                      "crates/missiond-core/src/lib.rs"
                      "crates/missiond-core/src/v3_contracts.rs"
+                     "crates/missiond-core/src/ws/mod.rs"
                      "crates/missiond-core/src/ws/server.rs"
                      "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
                      "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"

@@ -1028,6 +1028,35 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "provider_authorization_allowlist": []
       },
       {
+        "id": "agy-gemini-communicator",
+        "engine": "agy",
+        "role": "communicator",
+        "slot_id": "slot-agy-gemini-communicator",
+        "task_type": "jarvis_communicator",
+        "model_profile": null,
+        "model": "gemini-3.1-pro-preview",
+        "task_classes": [
+          "user-communication",
+          "result-summary",
+          "plan-status"
+        ],
+        "capabilities": [
+          "read-only",
+          "user-facing-summary",
+          "evidence-bound-summary"
+        ],
+        "max_concurrency": 1,
+        "timeout_secs": 120,
+        "default_use": "jarvis-communication-officer",
+        "accepts_boardtask": false,
+        "write_allowed": false,
+        "reasoning_effort": null,
+        "search_enabled": false,
+        "sandbox": null,
+        "approval_policy": null,
+        "tool_policy_path": null
+      },
+      {
         "id": "codex-code-worker",
         "engine": "codex",
         "role": "coder",
@@ -1153,6 +1182,35 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "tool_policy_path": null,
         "skip_permissions": false,
         "provider_authorization_allowlist": []
+      },
+      {
+        "id": "codex-key-judgment-author",
+        "engine": "codex",
+        "role": "key-judgment-author",
+        "slot_id": "slot-codex-key-judgment-author",
+        "task_type": "codex_key_judgment_author",
+        "model_profile": "codex-master-gpt-5-5-xhigh",
+        "model": null,
+        "task_classes": [
+          "key-judgment-authoring",
+          "planning-premise"
+        ],
+        "capabilities": [
+          "judgment",
+          "evidence-review",
+          "code-read",
+          "search"
+        ],
+        "max_concurrency": 1,
+        "timeout_secs": 180,
+        "default_use": "jarvis-key-judgment-authoring",
+        "accepts_boardtask": false,
+        "write_allowed": false,
+        "reasoning_effort": "xhigh",
+        "search_enabled": true,
+        "sandbox": "read-only",
+        "approval_policy": "never",
+        "tool_policy_path": null
       },
       {
         "id": "codex-plan-author",
