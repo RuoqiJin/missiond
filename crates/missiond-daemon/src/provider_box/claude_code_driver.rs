@@ -52,6 +52,7 @@ pub(crate) struct ClaudeCodeProviderDriver {
 struct ClaudeCodeObservation {
     lines: Vec<String>,
     text: String,
+    session_state: SessionState,
     snapshot: missiond_core::pty::PtyRecognitionSnapshot,
 }
 
@@ -690,6 +691,7 @@ impl ClaudeCodeProviderDriver {
         ClaudeCodeObservation {
             lines,
             text,
+            session_state: state,
             snapshot,
         }
     }
@@ -699,6 +701,7 @@ impl ClaudeCodeProviderDriver {
         right: &ClaudeCodeObservation,
     ) -> bool {
         left.text == right.text
+            && left.session_state == right.session_state
             && left.snapshot.state == right.snapshot.state
             && left.snapshot.reason == right.snapshot.reason
             && left.snapshot.blocked_kind == right.snapshot.blocked_kind
@@ -2136,10 +2139,17 @@ impl ClaudeCodeProviderDriver {
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         let monitor_started_at = Instant::now();
         let mut idle_seen_at: Option<Instant> = None;
+        let mut last_analysis_line_count = 0usize;
 
         loop {
             let analysis =
                 analyze_claude_code_jsonl_after_cursor(&self.claude_home, session_id, &cursor);
+            if claude_code_analysis_line_count_advanced(
+                analysis.line_count,
+                &mut last_analysis_line_count,
+            ) {
+                idle_seen_at = None;
+            }
             if let Some(upstream_error) = analysis.upstream_error {
                 let status = upstream_error
                     .pointer("/error/status")
@@ -2207,27 +2217,28 @@ impl ClaudeCodeProviderDriver {
 
             let observation = self.observe(slot_id).await;
             if observation.snapshot.state == PtyCanonicalState::Blocked {
-                result.status = ProviderBoxStatus::Blocked;
-                result.add_diagnostic(ProviderBoxDiagnostic::error(
-                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-                    "ClaudeCode provider-box turn entered a blocked provider surface",
-                    json!({
-                        "slot_id": slot_id,
-                        "reason": observation.snapshot.reason,
-                        "blocked_kind": observation.snapshot.blocked_kind,
-                        "screen_excerpt": bounded_text_excerpt(&observation.text, 1200),
-                    }),
-                ));
-                let status = self.pty.get_status(slot_id).await;
-                result.slot_status =
-                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
-                return result.clone();
+                if claude_code_observation_is_auto_confirming(&observation) {
+                    idle_seen_at = None;
+                } else {
+                    result.status = ProviderBoxStatus::Blocked;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                        "ClaudeCode provider-box turn entered a blocked provider surface",
+                        json!({
+                            "slot_id": slot_id,
+                            "reason": observation.snapshot.reason,
+                            "blocked_kind": observation.snapshot.blocked_kind,
+                            "screen_excerpt": bounded_text_excerpt(&observation.text, 1200),
+                        }),
+                    ));
+                    let status = self.pty.get_status(slot_id).await;
+                    result.slot_status =
+                        Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                    return result.clone();
+                }
             }
 
-            if matches!(
-                observation.snapshot.state,
-                PtyCanonicalState::Idle | PtyCanonicalState::Complete
-            ) {
+            if claude_code_observation_is_terminal_idle(&observation) {
                 if let Some(seen_at) = idle_seen_at {
                     if durable_final_missing_idle_grace_elapsed(
                         seen_at.elapsed(),
@@ -2320,10 +2331,17 @@ impl ClaudeCodeProviderDriver {
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         let monitor_started_at = Instant::now();
         let mut idle_seen_at: Option<Instant> = None;
+        let mut last_analysis_line_count = 0usize;
 
         loop {
             let analysis =
                 analyze_claude_code_jsonl_after_cursor(&self.claude_home, session_id, &cursor);
+            if claude_code_analysis_line_count_advanced(
+                analysis.line_count,
+                &mut last_analysis_line_count,
+            ) {
+                idle_seen_at = None;
+            }
             if let Some(violation) = analysis.violation {
                 result.status = ProviderBoxStatus::Failed;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -2419,26 +2437,27 @@ impl ClaudeCodeProviderDriver {
 
             let observation = self.observe(slot_id).await;
             if observation.snapshot.state == PtyCanonicalState::Blocked {
-                result.status = ProviderBoxStatus::Blocked;
-                result.add_diagnostic(ProviderBoxDiagnostic::error(
-                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
-                    "ClaudeCode text-only turn entered a blocked provider surface",
-                    json!({
-                        "slot_id": slot_id,
-                        "reason": observation.snapshot.reason,
-                        "blocked_kind": observation.snapshot.blocked_kind,
-                    }),
-                ));
-                let status = self.pty.get_status(slot_id).await;
-                result.slot_status =
-                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
-                return false;
+                if claude_code_observation_is_auto_confirming(&observation) {
+                    idle_seen_at = None;
+                } else {
+                    result.status = ProviderBoxStatus::Blocked;
+                    result.add_diagnostic(ProviderBoxDiagnostic::error(
+                        DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                        "ClaudeCode text-only turn entered a blocked provider surface",
+                        json!({
+                            "slot_id": slot_id,
+                            "reason": observation.snapshot.reason,
+                            "blocked_kind": observation.snapshot.blocked_kind,
+                        }),
+                    ));
+                    let status = self.pty.get_status(slot_id).await;
+                    result.slot_status =
+                        Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                    return false;
+                }
             }
 
-            if matches!(
-                observation.snapshot.state,
-                PtyCanonicalState::Idle | PtyCanonicalState::Complete
-            ) {
+            if claude_code_observation_is_terminal_idle(&observation) {
                 if let Some(seen_at) = idle_seen_at {
                     if durable_final_missing_idle_grace_elapsed(
                         seen_at.elapsed(),
@@ -3292,6 +3311,21 @@ fn is_ready_for_claude_code_text(observation: &ClaudeCodeObservation) -> bool {
         && observation.snapshot.reason != "session_state:Exited"
 }
 
+fn claude_code_observation_is_terminal_idle(observation: &ClaudeCodeObservation) -> bool {
+    matches!(
+        observation.snapshot.state,
+        PtyCanonicalState::Idle | PtyCanonicalState::Complete
+    ) && matches!(
+        observation.session_state,
+        SessionState::Idle | SessionState::Exited
+    )
+}
+
+fn claude_code_observation_is_auto_confirming(observation: &ClaudeCodeObservation) -> bool {
+    observation.snapshot.state == PtyCanonicalState::Blocked
+        && observation.session_state == SessionState::Confirming
+}
+
 fn is_claude_code_logout_success(observation: &ClaudeCodeObservation) -> bool {
     matches!(
         observation.snapshot.blocked_kind.as_deref(),
@@ -3747,6 +3781,18 @@ fn durable_final_missing_idle_grace_elapsed(
         && monitor_elapsed >= Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS)
 }
 
+fn claude_code_analysis_line_count_advanced(
+    line_count: usize,
+    last_seen_line_count: &mut usize,
+) -> bool {
+    if line_count > *last_seen_line_count {
+        *last_seen_line_count = line_count;
+        true
+    } else {
+        false
+    }
+}
+
 fn claude_code_assistant_end_turn_text(event: &Value) -> Option<String> {
     let message = event.get("message")?;
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -3785,20 +3831,21 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
-    use missiond_core::pty::recognize_screen;
+    use missiond_core::pty::{recognize_screen, PtyCanonicalState};
     use missiond_core::types::CliEngine;
     use missiond_core::SessionState;
 
     use crate::provider_box::types::{BoxCommand, ProviderInteractionRequest};
 
     use super::{
-        analyze_claude_code_jsonl_after_cursor, claude_code_jsonl_cursor_for_session,
-        claude_code_jsonl_event_is_text_only_violation, claude_code_mcp_detail_action_positions,
-        claude_code_mcp_reconnect_action_selected, claude_code_mcp_reconnect_action_visible,
-        claude_code_mcp_reconnect_line, claude_code_mcp_reconnect_outcome,
-        claude_code_mcp_status_value, claude_code_permission_cycle_steps,
-        claude_code_provider_capabilities, claude_code_staged_command_matches,
-        durable_final_missing_idle_grace_elapsed,
+        analyze_claude_code_jsonl_after_cursor, claude_code_analysis_line_count_advanced,
+        claude_code_jsonl_cursor_for_session, claude_code_jsonl_event_is_text_only_violation,
+        claude_code_mcp_detail_action_positions, claude_code_mcp_reconnect_action_selected,
+        claude_code_mcp_reconnect_action_visible, claude_code_mcp_reconnect_line,
+        claude_code_mcp_reconnect_outcome, claude_code_mcp_status_value,
+        claude_code_observation_is_auto_confirming, claude_code_observation_is_terminal_idle,
+        claude_code_permission_cycle_steps, claude_code_provider_capabilities,
+        claude_code_staged_command_matches, durable_final_missing_idle_grace_elapsed,
         extract_claude_code_mcp_server_entries_from_screen, find_claude_code_session_jsonl,
         is_claude_code_logout_success, normalize_claude_code_model_target,
         normalize_claude_code_permission_mode, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,
@@ -3807,6 +3854,13 @@ mod tests {
     };
 
     fn observation(lines: &[&str]) -> ClaudeCodeObservation {
+        observation_with_session_state(lines, SessionState::Idle)
+    }
+
+    fn observation_with_session_state(
+        lines: &[&str],
+        session_state: SessionState,
+    ) -> ClaudeCodeObservation {
         let owned = lines
             .iter()
             .map(|line| line.to_string())
@@ -3814,7 +3868,8 @@ mod tests {
         ClaudeCodeObservation {
             lines: owned.clone(),
             text: owned.join("\n"),
-            snapshot: recognize_screen(CliEngine::ClaudeCode, &owned, SessionState::Idle),
+            session_state,
+            snapshot: recognize_screen(CliEngine::ClaudeCode, &owned, session_state),
         }
     }
 
@@ -4222,6 +4277,49 @@ mod tests {
             Duration::from_secs(DURABLE_FINAL_IDLE_GRACE_SECS),
             Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS),
         ));
+    }
+
+    #[test]
+    fn durable_final_missing_idle_requires_terminal_session_state() {
+        let idle = observation(&[
+            "Claude Code v2.1.160",
+            "Sonnet 4.6 with high effort · Claude Max",
+            "❯",
+            "⏵⏵ auto mode on (shift+tab to cycle)",
+        ]);
+        assert!(claude_code_observation_is_terminal_idle(&idle));
+
+        let thinking = observation_with_session_state(
+            &[
+                "Claude Code v2.1.160",
+                "Sonnet 4.6 with high effort · Claude Max",
+                "❯",
+                "⏵⏵ auto mode on (shift+tab to cycle)",
+            ],
+            SessionState::Thinking,
+        );
+        assert!(!claude_code_observation_is_terminal_idle(&thinking));
+    }
+
+    #[test]
+    fn durable_final_missing_idle_resets_on_jsonl_growth() {
+        let mut last_seen = 0usize;
+        assert!(!claude_code_analysis_line_count_advanced(0, &mut last_seen));
+        assert!(claude_code_analysis_line_count_advanced(3, &mut last_seen));
+        assert_eq!(last_seen, 3);
+        assert!(!claude_code_analysis_line_count_advanced(3, &mut last_seen));
+        assert!(claude_code_analysis_line_count_advanced(4, &mut last_seen));
+    }
+
+    #[test]
+    fn claude_code_confirming_blocked_surface_is_active_turn() {
+        let mut obs = observation_with_session_state(
+            &["Claude Code wants to use Bash", "❯ 1. Yes", "  2. No"],
+            SessionState::Confirming,
+        );
+        obs.snapshot.state = PtyCanonicalState::Blocked;
+        assert!(claude_code_observation_is_auto_confirming(&obs));
+        assert!(!claude_code_observation_is_terminal_idle(&obs));
     }
 
     #[test]
