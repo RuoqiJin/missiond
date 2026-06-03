@@ -660,6 +660,21 @@ fn recognize_codex_with_style(
         .with_screen_signals(signals);
     }
 
+    if is_codex_rate_limit_model_switch_prompt(&lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Codex,
+            PtyCanonicalState::Blocked,
+            0.93,
+            "codex:rate_limit_model_switch_prompt",
+        )
+        .with_blocked_kind("model_switch_prompt")
+        .with_phase("model_switch")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature")
+        .with_screen_identity(identity)
+        .with_screen_signals(signals);
+    }
+
     if is_codex_model_picker(lines, &lower) {
         return PtyRecognitionSnapshot::new(
             CliEngine::Codex,
@@ -963,6 +978,13 @@ fn is_codex_model_picker(lines: &[String], lower: &str) -> bool {
         && lower.contains("press enter to confirm or esc to go back"))
         || (lower.contains("access legacy models by running codex -m")
             && codex_model_picker_rows(lines).len() >= 2)
+}
+
+fn is_codex_rate_limit_model_switch_prompt(lower: &str) -> bool {
+    lower.contains("approaching rate limits")
+        && lower.contains("switch to")
+        && lower.contains("keep current model")
+        && lower.contains("press enter to confirm")
 }
 
 fn is_codex_permission_picker(lines: &[String], lower: &str) -> bool {
@@ -2722,6 +2744,7 @@ fn snapshot_to_detection(snapshot: PtyRecognitionSnapshot) -> Option<StateDetect
             snapshot.blocked_kind.as_deref(),
             Some(
                 "model_picker"
+                    | "model_switch_prompt"
                     | "permission_picker"
                     | "slash_command_menu"
                     | "slash_command_input"
@@ -3349,6 +3372,23 @@ mod tests {
         .expect("detection");
 
         assert_eq!(result.state, State::SlashMenu);
+    }
+
+    #[test]
+    fn codex_rate_limit_model_switch_prompt_is_blocked() {
+        let result = recognize_codex(&lines(&[
+            "Switch to gpt-5.4-mini for lower credit usage?",
+            "Approaching rate limits",
+            "› 1. Switch to gpt-5.4-mini                 Small, fast, and cost-efficient model",
+            "  2. Keep current model",
+            "  3. Keep current model (never show again)  Hide future rate limit reminders about this model",
+            "Press enter to confirm or esc to go back",
+        ]));
+
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "codex:rate_limit_model_switch_prompt");
+        assert_eq!(result.blocked_kind.as_deref(), Some("model_switch_prompt"));
+        assert_eq!(result.phase.as_deref(), Some("model_switch"));
     }
 
     #[test]

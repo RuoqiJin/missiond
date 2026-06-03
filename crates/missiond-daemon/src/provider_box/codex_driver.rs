@@ -175,6 +175,12 @@ enum CodexTrustSelection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodexRateLimitPromptSelection {
+    selected_index: usize,
+    target_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexPermissionMode {
     Default,
     AutoReview,
@@ -1081,18 +1087,36 @@ impl CodexProviderDriver {
                 slot_id,
                 Duration::from_secs(CODEX_STARTUP_READY_WAIT_SECS),
                 Some("wait for Codex startup surface".to_string()),
-                |obs| is_ready_for_codex_text(obs) || is_codex_workspace_trust_prompt(obs),
+                |obs| {
+                    is_ready_for_codex_text(obs)
+                        || is_codex_workspace_trust_prompt(obs)
+                        || is_codex_rate_limit_model_switch_prompt(obs)
+                },
             )
             .await;
 
-        if is_codex_workspace_trust_prompt(&observation) {
-            observation = match self
-                .accept_workspace_trust_locked(result, slot_id, observation)
-                .await
-            {
-                Some(observation) => observation,
-                None => return CodexStartupOutcome::Failed,
-            };
+        loop {
+            if is_codex_workspace_trust_prompt(&observation) {
+                observation = match self
+                    .accept_workspace_trust_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return CodexStartupOutcome::Failed,
+                };
+                continue;
+            }
+            if is_codex_rate_limit_model_switch_prompt(&observation) {
+                observation = match self
+                    .dismiss_rate_limit_model_switch_prompt_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return CodexStartupOutcome::Failed,
+                };
+                continue;
+            }
+            break;
         }
 
         if is_ready_for_codex_text(&observation) {
@@ -1203,6 +1227,91 @@ impl CodexProviderDriver {
         }
     }
 
+    async fn dismiss_rate_limit_model_switch_prompt_locked(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        mut observation: CodexObservation,
+    ) -> Option<CodexObservation> {
+        let Some(selection) = codex_rate_limit_prompt_selection(&observation) else {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex rate-limit model switch prompt was visible but its selection was not recognizable",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "rule": "provider-box must keep the requested model and dismiss the prompt before submitting work"
+                }),
+            ));
+            return None;
+        };
+
+        let (key_name, bytes, steps) = if selection.target_index >= selection.selected_index {
+            (
+                "down",
+                "\x1b[B",
+                selection.target_index - selection.selected_index,
+            )
+        } else {
+            (
+                "up",
+                "\x1b[A",
+                selection.selected_index - selection.target_index,
+            )
+        };
+
+        for _ in 0..steps {
+            let _ = self
+                .write_step(
+                    result,
+                    slot_id,
+                    PtyStepAction::key(key_name),
+                    bytes,
+                    Some("move Codex rate-limit prompt to keep current model".to_string()),
+                )
+                .await;
+        }
+
+        observation = self
+            .write_step(
+                result,
+                slot_id,
+                PtyStepAction::key("enter"),
+                "\r",
+                Some("dismiss Codex rate-limit prompt without switching model".to_string()),
+            )
+            .await;
+        if !is_codex_ready_for_prompt_send(&observation) {
+            observation = self
+                .wait_step_until(
+                    result,
+                    slot_id,
+                    Duration::from_secs(5),
+                    Some("wait for Codex composer after rate-limit prompt dismissal".to_string()),
+                    is_codex_ready_for_prompt_send,
+                )
+                .await;
+        }
+
+        if is_codex_ready_for_prompt_send(&observation) {
+            Some(observation)
+        } else {
+            result.status = ProviderBoxStatus::Blocked;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_CONTROL_ACTION_UNVERIFIED,
+                "Codex rate-limit prompt dismissal did not reach a ready composer",
+                json!({
+                    "slot_id": slot_id,
+                    "reason": observation.snapshot.reason,
+                    "blocked_kind": observation.snapshot.blocked_kind,
+                    "session_state": observation.session_state,
+                }),
+            ));
+            None
+        }
+    }
+
     async fn ensure_ready_for_prompt(&self, result: &mut ProviderBoxResult, slot_id: &str) -> bool {
         let started = Instant::now();
         loop {
@@ -1210,6 +1319,15 @@ impl CodexProviderDriver {
             if is_codex_workspace_trust_prompt(&observation) {
                 observation = match self
                     .accept_workspace_trust_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return false,
+                };
+            }
+            if is_codex_rate_limit_model_switch_prompt(&observation) {
+                observation = match self
+                    .dismiss_rate_limit_model_switch_prompt_locked(result, slot_id, observation)
                     .await
                 {
                     Some(observation) => observation,
@@ -1421,6 +1539,19 @@ impl CodexProviderDriver {
             }
 
             let observation = self.observe(slot_id).await;
+            if is_codex_rate_limit_model_switch_prompt(&observation) {
+                if self
+                    .dismiss_rate_limit_model_switch_prompt_locked(result, slot_id, observation)
+                    .await
+                    .is_none()
+                {
+                    result.status = ProviderBoxStatus::Failed;
+                    result.slot_id = Some(slot_id.to_string());
+                    return result.clone();
+                }
+                idle_seen_at = None;
+                continue;
+            }
             if observation.snapshot.state == PtyCanonicalState::Blocked {
                 let mut failed = ProviderBoxResult::base(request, ProviderBoxStatus::Blocked);
                 failed.slot_id = Some(slot_id.to_string());
@@ -3696,6 +3827,7 @@ fn codex_status_field(text: &str, field: &str) -> Option<String> {
 
 fn should_resolve_codex_startup_surface(observation: &CodexObservation) -> bool {
     is_codex_workspace_trust_prompt(observation)
+        || is_codex_rate_limit_model_switch_prompt(observation)
         || observation.snapshot.reason == "codex:mcp_startup_running"
         || observation.snapshot.state == PtyCanonicalState::Unknown
 }
@@ -3736,6 +3868,64 @@ fn is_codex_workspace_trust_prompt(observation: &CodexObservation) -> bool {
                 && lower.contains("no, quit")
                 && lower.contains("press enter to continue")
         }
+}
+
+fn is_codex_rate_limit_model_switch_prompt(observation: &CodexObservation) -> bool {
+    observation.snapshot.reason == "codex:rate_limit_model_switch_prompt"
+        || observation.snapshot.blocked_kind.as_deref() == Some("model_switch_prompt")
+        || {
+            let lower = observation.text.to_ascii_lowercase();
+            lower.contains("approaching rate limits")
+                && lower.contains("switch to")
+                && lower.contains("keep current model")
+                && lower.contains("press enter to confirm")
+        }
+}
+
+fn codex_rate_limit_prompt_selection(
+    observation: &CodexObservation,
+) -> Option<CodexRateLimitPromptSelection> {
+    if !is_codex_rate_limit_model_switch_prompt(observation) {
+        return None;
+    }
+
+    let mut selected_index: Option<usize> = None;
+    let mut first_keep_index: Option<usize> = None;
+    let mut never_show_index: Option<usize> = None;
+    let mut row_index = 0usize;
+
+    for line in &observation.lines {
+        let trimmed = line.trim_start();
+        let selected =
+            trimmed.starts_with('›') || trimmed.starts_with('>') || trimmed.starts_with('❯');
+        let body = trimmed
+            .trim_start_matches(|ch| matches!(ch, '›' | '>' | '❯'))
+            .trim_start();
+        let Some((number, label)) = body.split_once('.') else {
+            continue;
+        };
+        if number.trim().parse::<usize>().is_err() {
+            continue;
+        }
+
+        if selected {
+            selected_index = Some(row_index);
+        }
+        let label_lower = label.to_ascii_lowercase();
+        if label_lower.contains("keep current model") {
+            first_keep_index.get_or_insert(row_index);
+            if label_lower.contains("never show again") {
+                never_show_index = Some(row_index);
+            }
+        }
+        row_index += 1;
+    }
+
+    let target_index = never_show_index.or(first_keep_index)?;
+    Some(CodexRateLimitPromptSelection {
+        selected_index: selected_index.unwrap_or(0),
+        target_index,
+    })
 }
 
 fn selected_codex_workspace_trust_option(observation: &CodexObservation) -> CodexTrustSelection {
@@ -5384,6 +5574,36 @@ mod tests {
         assert!(is_ready_for_codex_text(&observation));
         assert!(!is_codex_ready_for_prompt_send(&observation));
         assert!(is_codex_ready_screen_with_busy_session(&observation));
+    }
+
+    #[test]
+    fn codex_rate_limit_prompt_selection_prefers_keep_current_never_show() {
+        let lines = vec![
+            "Switch to gpt-5.4-mini for lower credit usage?".to_string(),
+            "Approaching rate limits".to_string(),
+            "› 1. Switch to gpt-5.4-mini                 Small, fast, and cost-efficient model"
+                .to_string(),
+            "  2. Keep current model".to_string(),
+            "  3. Keep current model (never show again)  Hide future rate limit reminders"
+                .to_string(),
+            "Press enter to confirm or esc to go back".to_string(),
+        ];
+        let snapshot = recognize_screen(CliEngine::Codex, &lines, SessionState::Idle);
+        let observation = CodexObservation {
+            text: lines.join("\n"),
+            lines,
+            session_state: SessionState::Idle,
+            snapshot,
+        };
+
+        assert!(is_codex_rate_limit_model_switch_prompt(&observation));
+        assert_eq!(
+            codex_rate_limit_prompt_selection(&observation),
+            Some(CodexRateLimitPromptSelection {
+                selected_index: 0,
+                target_index: 2,
+            })
+        );
     }
 
     #[test]
