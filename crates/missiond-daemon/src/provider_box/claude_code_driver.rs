@@ -33,6 +33,8 @@ const CLAUDE_CODE_TEXT_MAX_CONCURRENT: usize = 1;
 const OBSERVE_SETTLE_MS: u64 = 350;
 const OBSERVE_STABLE_POLL_MS: u64 = 120;
 const OBSERVE_STABLE_MAX_MS: u64 = 1_000;
+const DURABLE_FINAL_IDLE_GRACE_SECS: u64 = 4;
+const PROMPT_SUBMISSION_IDLE_GRACE_SECS: u64 = 30;
 
 #[derive(Clone)]
 pub(crate) struct ClaudeCodeProviderDriver {
@@ -2132,6 +2134,7 @@ impl ClaudeCodeProviderDriver {
     ) -> ProviderBoxResult {
         let timeout_secs = request.timeout_secs.unwrap_or(300).clamp(10, 7_200);
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let monitor_started_at = Instant::now();
         let mut idle_seen_at: Option<Instant> = None;
 
         loop {
@@ -2226,7 +2229,10 @@ impl ClaudeCodeProviderDriver {
                 PtyCanonicalState::Idle | PtyCanonicalState::Complete
             ) {
                 if let Some(seen_at) = idle_seen_at {
-                    if seen_at.elapsed() >= Duration::from_secs(4) {
+                    if durable_final_missing_idle_grace_elapsed(
+                        seen_at.elapsed(),
+                        monitor_started_at.elapsed(),
+                    ) {
                         result.status = ProviderBoxStatus::Failed;
                         result.add_diagnostic(ProviderBoxDiagnostic::error(
                             DIAG_PROVIDER_DURABLE_FINAL_MISSING,
@@ -2312,6 +2318,7 @@ impl ClaudeCodeProviderDriver {
     ) -> bool {
         let timeout_secs = request.timeout_secs.unwrap_or(180).clamp(10, 7_200);
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let monitor_started_at = Instant::now();
         let mut idle_seen_at: Option<Instant> = None;
 
         loop {
@@ -2433,7 +2440,10 @@ impl ClaudeCodeProviderDriver {
                 PtyCanonicalState::Idle | PtyCanonicalState::Complete
             ) {
                 if let Some(seen_at) = idle_seen_at {
-                    if seen_at.elapsed() >= Duration::from_secs(4) {
+                    if durable_final_missing_idle_grace_elapsed(
+                        seen_at.elapsed(),
+                        monitor_started_at.elapsed(),
+                    ) {
                         result.status = ProviderBoxStatus::Failed;
                         result.add_diagnostic(ProviderBoxDiagnostic::error(
                             DIAG_PROVIDER_DURABLE_FINAL_MISSING,
@@ -3729,6 +3739,14 @@ fn json_value_has_signal(value: &Value) -> bool {
     }
 }
 
+fn durable_final_missing_idle_grace_elapsed(
+    idle_elapsed: Duration,
+    monitor_elapsed: Duration,
+) -> bool {
+    idle_elapsed >= Duration::from_secs(DURABLE_FINAL_IDLE_GRACE_SECS)
+        && monitor_elapsed >= Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS)
+}
+
 fn claude_code_assistant_end_turn_text(event: &Value) -> Option<String> {
     let message = event.get("message")?;
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -3765,6 +3783,7 @@ fn claude_code_message_content_text(content: &Value) -> Option<String> {
 mod tests {
     use std::fs;
     use std::io::Write;
+    use std::time::Duration;
 
     use missiond_core::pty::recognize_screen;
     use missiond_core::types::CliEngine;
@@ -3779,10 +3798,12 @@ mod tests {
         claude_code_mcp_reconnect_line, claude_code_mcp_reconnect_outcome,
         claude_code_mcp_status_value, claude_code_permission_cycle_steps,
         claude_code_provider_capabilities, claude_code_staged_command_matches,
+        durable_final_missing_idle_grace_elapsed,
         extract_claude_code_mcp_server_entries_from_screen, find_claude_code_session_jsonl,
         is_claude_code_logout_success, normalize_claude_code_model_target,
         normalize_claude_code_permission_mode, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,
-        ClaudeCodeObservation, ClaudeCodePermissionMode,
+        ClaudeCodeObservation, ClaudeCodePermissionMode, DURABLE_FINAL_IDLE_GRACE_SECS,
+        PROMPT_SUBMISSION_IDLE_GRACE_SECS,
     };
 
     fn observation(lines: &[&str]) -> ClaudeCodeObservation {
@@ -4189,6 +4210,18 @@ mod tests {
         });
 
         assert!(!claude_code_jsonl_event_is_text_only_violation(&event));
+    }
+
+    #[test]
+    fn durable_final_missing_idle_grace_ignores_initial_submission_idle() {
+        assert!(!durable_final_missing_idle_grace_elapsed(
+            Duration::from_secs(DURABLE_FINAL_IDLE_GRACE_SECS),
+            Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS - 1),
+        ));
+        assert!(durable_final_missing_idle_grace_elapsed(
+            Duration::from_secs(DURABLE_FINAL_IDLE_GRACE_SECS),
+            Duration::from_secs(PROMPT_SUBMISSION_IDLE_GRACE_SECS),
+        ));
     }
 
     #[test]

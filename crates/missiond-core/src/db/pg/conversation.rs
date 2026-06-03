@@ -1298,7 +1298,18 @@ impl ConversationStore for PgMissionStore {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT c.id FROM conversations c
              WHERE c.status = 'active'
-               AND (SELECT MAX(m.timestamp::timestamptz) FROM conversation_messages m WHERE m.session_id = c.id) < $1::timestamptz"
+               AND (
+                 SELECT MAX(
+                   CASE
+                     WHEN m.timestamp ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+                      AND substring(m.timestamp from 1 for 4)::int BETWEEN 1970 AND 2100
+                     THEN m.timestamp::timestamptz
+                     ELSE NULL
+                   END
+                 )
+                 FROM conversation_messages m
+                 WHERE m.session_id = c.id
+               ) < $1::timestamptz",
         )
         .bind(cutoff)
         .fetch_all(&self.pool)
