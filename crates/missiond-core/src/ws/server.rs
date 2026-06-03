@@ -6050,7 +6050,7 @@ impl PTYWebSocketServer {
             return slot_id.to_string();
         }
         match provider {
-            "agy" | "agy_cli" | "agy-cli" => "slot-agy-research".to_string(),
+            "agy" | "agy_cli" | "agy-cli" => "slot-agy-gemini-31-pro-high".to_string(),
             "claude_code" | "claude-code" | "claude" => "slot-claude-code-default".to_string(),
             "gemini" | "gemini_cli" | "gemini-cli" => "slot-gemini-fast-survey".to_string(),
             _ => default_slot.to_string(),
@@ -8056,6 +8056,14 @@ JSON 字段必须是：\n\
             "error": {"message": message},
             "next_action": "Fix the missing runtime capability instead of falling back to direct PTY execution."
         });
+        Self::persist_interaction_event(
+            db,
+            conversation_id,
+            interaction_id,
+            "diagnostic",
+            &diagnostic,
+        )
+        .await;
         Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
         Self::write_sse_openai_text_and_persist(
             stream,
@@ -8327,11 +8335,15 @@ JSON 字段必须是：\n\
     }
 
     fn jarvis_direct_answer_provider() -> String {
+        Self::jarvis_direct_answer_provider_override()
+            .unwrap_or_else(|| Self::jarvis_communicator_provider())
+    }
+
+    fn jarvis_direct_answer_provider_override() -> Option<String> {
         std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| Self::jarvis_communicator_provider())
     }
 
     fn provider_box_engine_for_provider(provider: &str) -> anyhow::Result<&'static str> {
@@ -8364,12 +8376,59 @@ JSON 字段必须是：\n\
         )
     }
 
-    fn jarvis_communicator_model() -> Option<String> {
+    fn jarvis_default_text_only_model(provider: &str) -> Option<String> {
+        match provider {
+            "agy" | "agy_cli" | "agy-cli" => Some("Gemini 3.1 Pro (High)".to_string()),
+            "codex" | "codex_cli" | "codex-cli" => Some("gpt-5.5".to_string()),
+            _ => None,
+        }
+    }
+
+    fn jarvis_communicator_model_for_provider(provider: &str) -> Option<String> {
         std::env::var("MISSIOND_JARVIS_COMMUNICATOR_MODEL")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .or_else(|| Some("gemini-3.1-pro-preview".to_string()))
+            .or_else(|| Self::jarvis_default_text_only_model(provider))
+    }
+
+    fn jarvis_communicator_model() -> Option<String> {
+        let provider = Self::jarvis_communicator_provider();
+        Self::jarvis_communicator_model_for_provider(provider.as_str())
+    }
+
+    fn jarvis_direct_answer_slot_id(provider: &str) -> String {
+        if let Some(slot_id) = std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return slot_id;
+        }
+        if Self::jarvis_direct_answer_provider_override().is_none() {
+            if let Some(slot_id) = std::env::var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                return slot_id;
+            }
+        }
+        Self::jarvis_text_only_slot_id(provider, None, "slot-codex-provider-box")
+    }
+
+    fn jarvis_direct_answer_model(provider: &str) -> Option<String> {
+        if let Some(model) = std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Some(model);
+        }
+        if Self::jarvis_direct_answer_provider_override().is_some() {
+            return Self::jarvis_default_text_only_model(provider);
+        }
+        Self::jarvis_communicator_model_for_provider(provider)
     }
 
     fn jarvis_communicator_timeout_secs() -> u64 {
@@ -8694,23 +8753,14 @@ JSON 字段必须是：\n\
         } else {
             "grounded-direct-answer"
         };
-        let slot_id = Self::jarvis_text_only_slot_id(
-            provider.as_str(),
-            std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
-                .ok()
-                .or_else(|| std::env::var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID").ok())
-                .as_deref(),
-            "slot-agy-gemini-communicator",
-        );
+        let slot_id = Self::jarvis_direct_answer_slot_id(provider.as_str());
         let body = serde_json::json!({
             "schema": "missiond.provider-interaction-request.v1",
             "command": command,
             "provider": &provider,
             "engine": engine,
             "prompt": prompt,
-            "model": std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_MODEL")
-                .ok()
-                .or_else(Self::jarvis_communicator_model),
+            "model": Self::jarvis_direct_answer_model(provider.as_str()),
             "timeout_secs": timeout_secs,
             "correlation_id": correlation_id,
             "slot_id": slot_id,
@@ -14456,6 +14506,51 @@ mod tests {
         assert_eq!(clamp_jarvis_visible_heartbeat_secs(Some(1)), 3);
         assert_eq!(clamp_jarvis_visible_heartbeat_secs(Some(12)), 12);
         assert_eq!(clamp_jarvis_visible_heartbeat_secs(Some(90)), 30);
+    }
+
+    #[test]
+    fn jarvis_direct_answer_codex_override_uses_codex_slot_and_model() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        std::env::set_var("MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER", "codex_cli");
+        std::env::remove_var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID");
+        std::env::remove_var("MISSIOND_JARVIS_DIRECT_ANSWER_MODEL");
+        std::env::set_var(
+            "MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID",
+            "slot-agy-gemini-communicator",
+        );
+        std::env::set_var(
+            "MISSIOND_JARVIS_COMMUNICATOR_MODEL",
+            "Gemini 3.1 Pro (High)",
+        );
+
+        assert_eq!(
+            PTYWebSocketServer::jarvis_direct_answer_slot_id("codex_cli"),
+            "slot-codex-provider-box"
+        );
+        assert_eq!(
+            PTYWebSocketServer::jarvis_direct_answer_model("codex_cli"),
+            Some("gpt-5.5".to_string())
+        );
+
+        std::env::remove_var("MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER");
+        std::env::remove_var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID");
+        std::env::remove_var("MISSIOND_JARVIS_COMMUNICATOR_MODEL");
+    }
+
+    #[test]
+    fn jarvis_communicator_agy_defaults_to_private_text_slot() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        std::env::remove_var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID");
+        std::env::remove_var("MISSIOND_JARVIS_COMMUNICATOR_MODEL");
+
+        assert_eq!(
+            PTYWebSocketServer::jarvis_communicator_slot_id("agy"),
+            "slot-agy-gemini-31-pro-high"
+        );
+        assert_eq!(
+            PTYWebSocketServer::jarvis_communicator_model_for_provider("agy"),
+            Some("Gemini 3.1 Pro (High)".to_string())
+        );
     }
 
     #[test]
