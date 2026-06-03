@@ -602,7 +602,7 @@ fn build_cli_command_with_claude_options(
         CliEngine::Agy => {
             // Antigravity (`agy`) CLI: bare invocation opens the interactive
             // TUI. `--prompt-interactive` currently requires an argument and
-            // exits before MissionD can attach the worker PTY. AGY 1.0.3 help
+            // exits before MissionD can attach the worker PTY. AGY 1.0.4 help
             // also exposes print and prompt one-shot modes;
             // provider-box lanes must not use those non-interactive modes.
             let mut parts = "agy".to_string();

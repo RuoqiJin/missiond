@@ -3981,6 +3981,14 @@ fn is_ready_for_codex_text(observation: &CodexObservation) -> bool {
         && observation.snapshot.reason != "session_state:Exited"
 }
 
+fn is_codex_ready_for_prompt_send(observation: &CodexObservation) -> bool {
+    is_ready_for_codex_text(observation) && observation.session_state == SessionState::Idle
+}
+
+fn is_codex_ready_screen_with_busy_session(observation: &CodexObservation) -> bool {
+    is_ready_for_codex_text(observation) && observation.session_state.is_processing()
+}
+
 fn codex_prompt_submission_observed(
     request: &ProviderInteractionRequest,
     observation: &CodexObservation,
@@ -5772,6 +5780,7 @@ mod tests {
         let observation = CodexObservation {
             text: lines.join("\n"),
             lines,
+            session_state: SessionState::Idle,
             snapshot,
         };
 
@@ -6124,6 +6133,7 @@ Weekly limit:                [████████████████�
         let observation = CodexObservation {
             text: lines.join("\n"),
             lines,
+            session_state: SessionState::Idle,
             snapshot,
         };
 

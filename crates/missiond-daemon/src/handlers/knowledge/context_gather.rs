@@ -4889,6 +4889,7 @@ fn context_noise_metrics(
         "raw_sources_in_response": selection.include_raw_sources,
         "raw_sources_omitted": !selection.include_raw_sources,
         "filtered_semantic_conversation_hits": filtered_semantic_conversation_hits(sources),
+        "conversation_project_diagnostics": conversation_project_diagnostics,
         "conversation_cross_project_drops": conversation_cross_project_drops(sources),
         "skill_low_confidence_drops": skill_low_confidence_drops(sources),
         "conversation_filtering": "conversation search owns project/time/type filter metrics; context-gather records whether the lane was enabled."
@@ -4927,6 +4928,44 @@ fn conversation_cross_project_drops(sources: &serde_json::Map<String, Value>) ->
         })
         .cloned()
         .unwrap_or(Value::Null)
+}
+
+fn conversation_project_diagnostics(sources: &serde_json::Map<String, Value>) -> Value {
+    let cross_project_drops = conversation_cross_project_drops(sources);
+    let warning = if diagnostic_value_has_content(&cross_project_drops) {
+        Value::String(
+            "Conversation lane filtered cross-project matches; inspect conversation_cross_project_drops before treating conversation context as complete.".to_string(),
+        )
+    } else {
+        Value::Null
+    };
+
+    json!({
+        "schema": "missiond.conversation-project-diagnostics.v1",
+        "cross_project_drops": cross_project_drops,
+        "warning": warning,
+    })
+}
+
+fn conversation_project_diagnostic_field(
+    sources: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Value {
+    conversation_project_diagnostics(sources)
+        .get(field)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn diagnostic_value_has_content(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_u64().is_some_and(|count| count > 0),
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(object) => !object.is_empty(),
+    }
 }
 
 fn skill_low_confidence_drops(sources: &serde_json::Map<String, Value>) -> Value {
@@ -6473,14 +6512,14 @@ mod tests {
         build_evidence_items, build_evidence_items_with_options, build_evidence_lanes,
         build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
         build_support_catalog, collect_evidence_refs_from_value, compiled_service_matches_lookup,
-        compiled_service_matches_query, context_gather_persist_artifact,
-        context_gather_persist_read_model, context_gather_worker_visible_dir_for,
-        context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_items,
-        dedupe_evidence_search_items, deployment_event_drop_reason_is_sample_worthy,
-        deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
-        deployment_event_observed_candidate_summary, deployment_event_relay_diagnostics,
-        deployment_event_relay_local_config_probe, deployment_event_relay_next_actions,
-        diagnostics_have_hard_failures, evidence_item_id,
+        compiled_service_matches_query, context_gather_next_action,
+        context_gather_persist_artifact, context_gather_persist_read_model,
+        context_gather_worker_visible_dir_for, context_noise_metrics,
+        context_pack_artifact_payload, dedupe_evidence_items, dedupe_evidence_search_items,
+        deployment_event_drop_reason_is_sample_worthy, deployment_event_filter_timeline_row,
+        deployment_event_item_from_timeline_row, deployment_event_observed_candidate_summary,
+        deployment_event_relay_diagnostics, deployment_event_relay_local_config_probe,
+        deployment_event_relay_next_actions, diagnostics_have_hard_failures, evidence_item_id,
         evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
         filter_deployment_closure_policy_evidence_items,
         filter_incomplete_deployment_closure_evidence_items,
@@ -6491,7 +6530,8 @@ mod tests {
         source_selection, summarize_source, support_catalog_has_content,
         support_catalog_response_view, synthesize_unknowns_with_source_summaries,
         CompiledDeploymentPolicyFingerprint, ContextGatherArgs, DeploymentEventFilterResult,
-        RepoSearchArgs, SourceProfile, DEPLOYMENT_EVENT_RELEVANT_KINDS,
+        RepoSearchArgs, SourceProfile, CONTEXT_GATHER_DEFAULT_NEXT_ACTION,
+        DEPLOYMENT_EVENT_RELEVANT_KINDS,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {

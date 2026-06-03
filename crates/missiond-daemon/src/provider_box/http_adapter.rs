@@ -2329,6 +2329,21 @@ fn provider_slot_capabilities_value(
             "usage_refresh": true,
             "mcp_status": true,
             "mcp_reconnect": driver.mcp_reconnect,
+            "dangerously_skip_permissions": {
+                "supported": true,
+                "launch_command": "agy --dangerously-skip-permissions",
+                "request_fields": [
+                    "dangerously_skip_permissions",
+                    "dangerously_bypass",
+                    "dangerously_bypass_approvals_and_sandbox",
+                    "bypass_mode"
+                ],
+                "scope": "provider-box AGY PTY spawn/restart only"
+            },
+            "model_launch_selector": {
+                "supported": false,
+                "reason": "AGY 1.0.4 help exposes no stable --model/-m launch flag; provider-box pins models with /model observe-act-observe after spawn."
+            },
             "switch_model": driver.switch_model,
             "model_catalog": driver.model_catalog
         }),
@@ -5038,6 +5053,41 @@ mod tests {
             engine_from_body_or_slot(&json!({}), "slot-cc-research"),
             CliEngine::ClaudeCode
         );
+    }
+
+    #[test]
+    fn agy_slot_capabilities_expose_bypass_but_no_launch_model_selector() {
+        let caps = provider_slot_capabilities_value(
+            CliEngine::Agy,
+            &ProviderDriverCapabilities {
+                submit_turn: true,
+                switch_model: true,
+                usage_probe: true,
+                model_catalog: true,
+                pure_text_guard: true,
+                control_action: true,
+                pty_step: true,
+                status: true,
+                mcp_status: true,
+                mcp_reconnect: true,
+                prompt_authorization: false,
+            },
+        );
+
+        assert_eq!(
+            caps["slot_controls"]["dangerously_skip_permissions"]["supported"],
+            true
+        );
+        assert_eq!(
+            caps["slot_controls"]["dangerously_skip_permissions"]["launch_command"],
+            "agy --dangerously-skip-permissions"
+        );
+        assert_eq!(
+            caps["slot_controls"]["model_launch_selector"]["supported"],
+            false
+        );
+        assert_eq!(caps["slot_controls"]["switch_model"], true);
+        assert_eq!(caps["slot_controls"]["model_catalog"], true);
     }
 
     #[test]

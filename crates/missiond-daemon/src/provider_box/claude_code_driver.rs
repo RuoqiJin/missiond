@@ -2472,6 +2472,7 @@ impl ClaudeCodeProviderDriver {
         let mut output_contract_file_seen: Option<(u64, Instant)> = None;
         let mut output_contract_file_idle_seen_at: Option<Instant> = None;
         let mut output_contract_file_continue_attempts: usize = 0;
+        let mut last_analysis_line_count = 0usize;
 
         loop {
             if let Some(path) = output_contract_file.as_ref() {
@@ -4225,7 +4226,7 @@ fn claude_code_composer_text(observation: &ClaudeCodeObservation) -> Option<Stri
             .or_else(|| trimmed.strip_prefix('›'))
             .or_else(|| trimmed.strip_prefix('>'))?;
         let text = rest.trim();
-        if is_claude_code_placeholder_text(text) {
+        if is_known_claude_code_placeholder_text(&normalize_claude_code_placeholder_text(text)) {
             Some(String::new())
         } else {
             Some(text.to_string())
@@ -4285,6 +4286,18 @@ fn is_known_claude_code_placeholder_text(normalized: &str) -> bool {
         normalized,
         "try \"fix lint errors\"" | "try \"how does <filepath> work?\""
     )
+}
+
+fn claude_code_analysis_line_count_advanced(
+    line_count: usize,
+    last_line_count: &mut usize,
+) -> bool {
+    if line_count > *last_line_count {
+        *last_line_count = line_count;
+        true
+    } else {
+        false
+    }
 }
 
 fn claude_code_staged_command_matches(observation: &ClaudeCodeObservation, command: &str) -> bool {
@@ -5217,14 +5230,15 @@ mod tests {
 
     use super::{
         analyze_claude_code_jsonl_after_cursor, claude_code_composer_blocking_text,
-        claude_code_deep_research_report_to_markdown, claude_code_jsonl_cursor_for_session,
-        claude_code_jsonl_event_is_text_only_violation, claude_code_mcp_detail_action_positions,
-        claude_code_mcp_reconnect_action_selected, claude_code_mcp_reconnect_action_visible,
-        claude_code_mcp_reconnect_line, claude_code_mcp_reconnect_outcome,
-        claude_code_mcp_status_value, claude_code_permission_cycle_steps,
-        claude_code_prompt_authorization_allowed, claude_code_prompt_authorization_surface,
-        claude_code_provider_capabilities, claude_code_staged_command_matches,
-        claude_code_workflow_launch_from_event, durable_final_missing_idle_grace_elapsed,
+        claude_code_composer_text, claude_code_deep_research_report_to_markdown,
+        claude_code_jsonl_cursor_for_session, claude_code_jsonl_event_is_text_only_violation,
+        claude_code_mcp_detail_action_positions, claude_code_mcp_reconnect_action_selected,
+        claude_code_mcp_reconnect_action_visible, claude_code_mcp_reconnect_line,
+        claude_code_mcp_reconnect_outcome, claude_code_mcp_status_value,
+        claude_code_permission_cycle_steps, claude_code_prompt_authorization_allowed,
+        claude_code_prompt_authorization_surface, claude_code_provider_capabilities,
+        claude_code_staged_command_matches, claude_code_workflow_launch_from_event,
+        durable_final_missing_idle_grace_elapsed,
         extract_claude_code_mcp_server_entries_from_screen, file_contract_continue_prompt,
         find_claude_code_session_jsonl, is_claude_code_logout_success,
         normalize_claude_code_model_target, normalize_claude_code_permission_mode,

@@ -166,7 +166,7 @@ impl EngineController for ClaudeCodeController {
 
         self.pty.init_slot(&pty_slot).await;
 
-        let mut extra_env = HashMap::new();
+        let mut extra_env = req.env.clone();
         if req.skip_permissions {
             extra_env.insert(
                 "MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS".to_string(),
@@ -193,12 +193,12 @@ impl EngineController for ClaudeCodeController {
                 sandbox: None,
                 approval_policy: None,
                 tool_policy_path: None,
-                extra_env: req.env.clone(),
+                extra_env: extra_env.clone(),
                 initial_prompt: None,
                 command_override: None,
                 ..Default::default()
             },
-            Some(&req.env),
+            Some(&extra_env),
         )
         .await?;
 

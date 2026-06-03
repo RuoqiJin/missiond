@@ -8839,15 +8839,15 @@ JSON 字段必须是：\n\
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .or_else(|| Some("Gemini 3.1 Pro (High)".to_string()))
+            .or_else(|| Self::jarvis_default_text_only_model(provider))
     }
 
-    fn jarvis_direct_answer_model() -> Option<String> {
+    fn jarvis_direct_answer_model(provider: &str) -> Option<String> {
         std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_MODEL")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .or_else(Self::jarvis_communicator_model)
+            .or_else(|| Self::jarvis_communicator_model_for_provider(provider))
     }
 
     fn jarvis_communicator_timeout_secs() -> u64 {
@@ -9009,7 +9009,7 @@ JSON 字段必须是：\n\
         let prompt = Self::build_jarvis_communicator_prompt(phase, objective, &context);
         let correlation_id = format!("jarvis-communicator-{}", uuid::Uuid::new_v4().simple());
         let agy_text_lane = engine == "agy";
-        let model = Self::jarvis_communicator_model();
+        let model = Self::jarvis_communicator_model_for_provider(provider.as_str());
         let body = serde_json::json!({
             "schema": "missiond.provider-interaction-request.v1",
             "command": "pure-text-single-turn",
@@ -9198,7 +9198,7 @@ JSON 字段必须是：\n\
                 .as_deref(),
             "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
         );
-        let model = Self::jarvis_direct_answer_model();
+        let model = Self::jarvis_direct_answer_model(provider.as_str());
         let body = serde_json::json!({
             "schema": "missiond.provider-interaction-request.v1",
             "command": command,

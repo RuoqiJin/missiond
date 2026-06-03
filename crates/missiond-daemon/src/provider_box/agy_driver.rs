@@ -455,6 +455,13 @@ impl AgyProviderDriver {
         slot_id: &str,
     ) -> PTYSpawnOptions {
         let mut options = Self::spawn_options();
+        if request.dangerously_bypass_approvals_and_sandbox {
+            options.dangerously_skip_permissions = true;
+            options.extra_env.insert(
+                "MISSIOND_PROVIDER_BOX_AGY_SKIP_PERMISSIONS".to_string(),
+                "1".to_string(),
+            );
+        }
         if request.command == BoxCommand::PureTextSingleTurn && is_private_agy_text_slot_id(slot_id)
         {
             options.sandbox = Some("text-only".to_string());
@@ -5819,6 +5826,33 @@ mod tests {
 
         request.desired_worker = Some(json!({"spawn_if_missing": true}));
         assert!(!AgyProviderDriver::request_force_restart(&request));
+    }
+
+    #[test]
+    fn agy_spawn_options_project_provider_box_bypass_without_model_launch() {
+        let mut request = ProviderInteractionRequest::new(BoxCommand::Status, CliEngine::Agy);
+        request.model = Some("Gemini 3.1 Pro (High)".to_string());
+        let baseline = AgyProviderDriver::spawn_options_for_request(
+            &request,
+            "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
+        );
+        assert!(!baseline.dangerously_skip_permissions);
+        assert!(baseline.model.is_none());
+
+        request.dangerously_bypass_approvals_and_sandbox = true;
+        let bypass = AgyProviderDriver::spawn_options_for_request(
+            &request,
+            "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
+        );
+        assert!(bypass.dangerously_skip_permissions);
+        assert!(bypass.model.is_none());
+        assert_eq!(
+            bypass
+                .extra_env
+                .get("MISSIOND_PROVIDER_BOX_AGY_SKIP_PERMISSIONS")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]

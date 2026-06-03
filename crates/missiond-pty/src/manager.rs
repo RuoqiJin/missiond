@@ -1495,7 +1495,8 @@ fn enforce_core_spawn_sandbox_policy(slot: &Slot, options: &mut PTYSpawnOptions)
             }
         }
         CliEngine::Agy => {
-            if options.dangerously_skip_permissions && !privileged_role {
+            let provider_box_role = role.contains("provider-box-agy");
+            if options.dangerously_skip_permissions && !privileged_role && !provider_box_role {
                 warn!(
                     slot_id = %slot.id,
                     role = %slot.role,
@@ -1599,6 +1600,32 @@ mod tests {
 
         assert!(!options.dangerously_skip_permissions);
         assert_eq!(options.approval_policy.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn core_spawn_policy_disables_agy_worker_broad_skip() {
+        let slot = test_slot("researcher", CliEngine::Agy);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(!options.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn core_spawn_policy_allows_agy_provider_box_skip_permissions() {
+        let slot = test_slot("provider-box-agy", CliEngine::Agy);
+        let mut options = PTYSpawnOptions {
+            dangerously_skip_permissions: true,
+            ..Default::default()
+        };
+
+        enforce_core_spawn_sandbox_policy(&slot, &mut options);
+
+        assert!(options.dangerously_skip_permissions);
     }
 
     #[test]
