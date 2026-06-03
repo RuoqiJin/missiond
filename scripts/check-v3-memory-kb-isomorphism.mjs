@@ -266,6 +266,17 @@ function checkFiles(root, files) {
     'observed_candidates',
     'relay_diagnostics',
     'deploy_center_relay_absent_or_disabled',
+    'missiond_webhook_ingest_ok_deploy_center_relay_absent',
+    'observed_webhook_ingest_probe',
+    'observed_authoritative_deploy_center_source',
+    'webhook_ingest_probe_candidate_count',
+    'authoritative_deploy_center_candidate_count',
+    'ingest_health',
+    'manual_probe',
+    'codex-local-probe',
+    'deploy-center.deploy_events',
+    'deploy_events cursor inspection',
+    'deploy_logs-to-deploy_events write-path verification',
     'drop_sample_omitted_counts',
     'source_summaries.deployment_events.status',
     'never fall back to conversation/tool timeline hits for deploy evidence',
@@ -377,6 +388,17 @@ function checkFiles(root, files) {
     'observed_candidates',
     'relay_diagnostics',
     'deploy_center_relay_absent_or_disabled',
+    'missiond_webhook_ingest_ok_deploy_center_relay_absent',
+    'observed_webhook_ingest_probe',
+    'observed_authoritative_deploy_center_source',
+    'webhook_ingest_probe_candidate_count',
+    'authoritative_deploy_center_candidate_count',
+    'ingest_health',
+    'manual_probe',
+    'codex-local-probe',
+    'deploy-center.deploy_events',
+    'deploy_events cursor inspection',
+    'deploy_logs-to-deploy_events write-path verification',
     'drop_reason_counts',
     'drop_sample_omitted_counts',
     'sample_dropped_events',
@@ -1169,6 +1191,17 @@ function buildFixture() {
                          "observed_candidates"
                          "relay_diagnostics"
                          "deploy_center_relay_absent_or_disabled"
+                         "missiond_webhook_ingest_ok_deploy_center_relay_absent"
+                         "observed_webhook_ingest_probe"
+                         "observed_authoritative_deploy_center_source"
+                         "webhook_ingest_probe_candidate_count"
+                         "authoritative_deploy_center_candidate_count"
+                         "ingest_health"
+                         "manual_probe"
+                         "codex-local-probe"
+                         "deploy-center.deploy_events"
+                         "deploy_events cursor inspection"
+                         "deploy_logs-to-deploy_events write-path verification"
                          "drop_sample_omitted_counts"
                          "source_summaries.deployment_events.status"
                          "never fall back to conversation/tool timeline hits for deploy evidence"

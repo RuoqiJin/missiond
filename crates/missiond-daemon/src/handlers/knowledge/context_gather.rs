@@ -2,7 +2,7 @@ use anyhow::Result;
 use missiond_core::types::{ContextGatherRunInput, EvidenceItemInput, EvidenceSearchInput};
 use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -11,8 +11,8 @@ use std::{
 };
 
 use crate::context::v3_blueprint_runtime::{
-    load_compiled_project_universe, CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog,
-    EvidenceLaneRuntimeConfig, EvidenceLaneRuntimeEntry,
+    CompiledServiceRuntimeEntry, CompiledServiceSupportCatalog, EvidenceLaneRuntimeConfig,
+    EvidenceLaneRuntimeEntry, load_compiled_project_universe,
 };
 use crate::feature_gates;
 use crate::handlers::comm::conversation;
@@ -2559,7 +2559,9 @@ async fn deployment_events_source(
                 "ok"
             };
             let diagnostic = if events.is_empty() {
-                Some("No scoped Deploy Center ExternalServiceEvent was found in the local event_log window; deploy_ops context is using support_catalog/deployment_closure policy until Deploy Center emits durable release/canary evidence into MissionD EventBridge.")
+                Some(
+                    "No scoped Deploy Center ExternalServiceEvent was found in the local event_log window; deploy_ops context is using support_catalog/deployment_closure policy until Deploy Center emits durable release/canary evidence into MissionD EventBridge.",
+                )
             } else {
                 None
             };
@@ -2651,8 +2653,12 @@ fn deployment_event_empty_observed_candidate_summary() -> Value {
     json!({
         "candidate_count": 0,
         "deploy_center_candidate_count": 0,
+        "authoritative_deploy_center_candidate_count": 0,
+        "webhook_ingest_probe_candidate_count": 0,
         "accepted_kind_candidate_count": 0,
         "observed_deploy_center_source": false,
+        "observed_authoritative_deploy_center_source": false,
+        "observed_webhook_ingest_probe": false,
         "observed_accepted_deploy_kind": false,
         "producer_service_counts": {},
         "event_kind_counts": {},
@@ -2667,6 +2673,8 @@ fn deployment_event_observed_candidate_summary(rows: &[missiond_core::db::Timeli
     let mut event_source_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut event_authority_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut deploy_center_candidate_count = 0usize;
+    let mut authoritative_deploy_center_candidate_count = 0usize;
+    let mut webhook_ingest_probe_candidate_count = 0usize;
     let mut accepted_kind_candidate_count = 0usize;
 
     for row in rows {
@@ -2701,8 +2709,10 @@ fn deployment_event_observed_candidate_summary(rows: &[missiond_core::db::Timeli
             .entry(producer_service_id.clone())
             .or_default() += 1;
         *event_kind_counts.entry(event_kind.clone()).or_default() += 1;
-        *event_source_counts.entry(event_source).or_default() += 1;
-        *event_authority_counts.entry(event_authority).or_default() += 1;
+        *event_source_counts.entry(event_source.clone()).or_default() += 1;
+        *event_authority_counts
+            .entry(event_authority.clone())
+            .or_default() += 1;
 
         if deployment_event_kind_is_relevant(&event_kind) {
             accepted_kind_candidate_count += 1;
@@ -2712,13 +2722,27 @@ fn deployment_event_observed_candidate_summary(rows: &[missiond_core::db::Timeli
         if deployment_event_has_deploy_center_authority(&producer_service_id, &event_id, envelope) {
             deploy_center_candidate_count += 1;
         }
+        if deployment_event_has_authoritative_deploy_center_authority(
+            &producer_service_id,
+            &event_id,
+            envelope,
+        ) {
+            authoritative_deploy_center_candidate_count += 1;
+        }
+        if deployment_event_is_webhook_ingest_probe(&event_source, &event_authority, &event_kind) {
+            webhook_ingest_probe_candidate_count += 1;
+        }
     }
 
     json!({
         "candidate_count": rows.len(),
         "deploy_center_candidate_count": deploy_center_candidate_count,
+        "authoritative_deploy_center_candidate_count": authoritative_deploy_center_candidate_count,
+        "webhook_ingest_probe_candidate_count": webhook_ingest_probe_candidate_count,
         "accepted_kind_candidate_count": accepted_kind_candidate_count,
         "observed_deploy_center_source": deploy_center_candidate_count > 0,
+        "observed_authoritative_deploy_center_source": authoritative_deploy_center_candidate_count > 0,
+        "observed_webhook_ingest_probe": webhook_ingest_probe_candidate_count > 0,
         "observed_accepted_deploy_kind": accepted_kind_candidate_count > 0,
         "producer_service_counts": deployment_event_count_object(producer_service_counts, 8),
         "event_kind_counts": deployment_event_count_object(event_kind_counts, 12),
@@ -2737,6 +2761,14 @@ fn deployment_event_relay_diagnostics(
         .get("deploy_center_candidate_count")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let authoritative_deploy_center_candidate_count = observed_candidates
+        .get("authoritative_deploy_center_candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let webhook_ingest_probe_candidate_count = observed_candidates
+        .get("webhook_ingest_probe_candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let accepted_kind_candidate_count = observed_candidates
         .get("accepted_kind_candidate_count")
         .and_then(Value::as_u64)
@@ -2745,6 +2777,12 @@ fn deployment_event_relay_diagnostics(
         "ok"
     } else if candidate_count == 0 {
         "no_external_service_events_in_window"
+    } else if authoritative_deploy_center_candidate_count == 0 {
+        if webhook_ingest_probe_candidate_count > 0 || deploy_center_candidate_count > 0 {
+            "missiond_webhook_ingest_ok_deploy_center_relay_absent"
+        } else {
+            "deploy_center_relay_absent_or_disabled"
+        }
     } else if deploy_center_candidate_count == 0 {
         "deploy_center_relay_absent_or_disabled"
     } else if accepted_kind_candidate_count == 0 {
@@ -2771,6 +2809,15 @@ fn deployment_event_relay_diagnostics(
             "optional_poll_interval": "DEPLOY_EVENT_RELAY_POLL_INTERVAL_SECS",
             "optional_batch_limit": "DEPLOY_EVENT_RELAY_BATCH_LIMIT"
         },
+        "ingest_health": {
+            "webhook_ingest_probe_candidate_count": webhook_ingest_probe_candidate_count,
+            "observed_webhook_ingest_probe": webhook_ingest_probe_candidate_count > 0,
+            "interpretation": if webhook_ingest_probe_candidate_count > 0 {
+                "MissionD webhook ingestion accepted and persisted at least one non-authoritative probe; this does not prove Deploy Center relayed durable deploy_events rows."
+            } else {
+                "No non-authoritative webhook probe was observed in the deployment_events read window."
+            }
+        },
         "local_config_probe": local_config_probe,
         "next_actions": deployment_event_relay_next_actions(
             inferred_gap,
@@ -2778,6 +2825,7 @@ fn deployment_event_relay_diagnostics(
         ),
         "interpretation": match inferred_gap {
             "deploy_center_relay_absent_or_disabled" => "EventBridge has external events, but none are from deploy-center; inspect Deploy Center runtime env/compose for DEPLOY_EVENT_RELAY_ENABLED and MissionD webhook URL/token.",
+            "missiond_webhook_ingest_ok_deploy_center_relay_absent" => "MissionD webhook ingestion is working for a probe, but no authoritative deploy-center.deploy_events relay rows are visible; inspect Deploy Center relay cursor/source table and runtime Secret Store adoption.",
             "deploy_center_relay_emitted_no_deploy_event_kinds" => "Deploy Center producer is visible, but recent events are not accepted deployment evidence kinds; inspect relay event_kind mapping.",
             "deploy_center_scope_mismatch_or_missing_project_service_scope" => "Deploy Center deployment events exist, but they do not match the resolved project/service/deploy slug; inspect relay payload scope fields.",
             "no_external_service_events_in_window" => "MissionD event_log has no recent external_service_event candidates in the deployment_events read window.",
@@ -2791,6 +2839,12 @@ fn deployment_event_relay_next_actions(
     local_config_probe_status: Option<&str>,
 ) -> Value {
     match inferred_gap {
+        "missiond_webhook_ingest_ok_deploy_center_relay_absent" => json!([
+            "deploy_events cursor inspection: verify Deploy Center deploy_events has rows newer than deploy_event_relay_state.missiond cursor",
+            "inspect deploy_event_relay runtime logs for skipped empty deploy_events polling versus delivery failures",
+            "run Deploy Center config-health/manifest-verify and confirm Secret Store namespace xjp-deploy-center contains DEPLOY_EVENT_RELAY_ENABLED, MISSIOND_EVENTBRIDGE_URL, and MISSIOND_EXTERNAL_WEBHOOK_TOKEN key names",
+            "deploy_logs-to-deploy_events write-path verification: confirm production deploy log status changes write deploy_events rows, not only deploy_logs status fields"
+        ]),
         "deploy_center_relay_absent_or_disabled" => {
             if local_config_probe_status == Some("relay_env_names_present") {
                 json!([
@@ -3110,7 +3164,7 @@ fn deployment_event_filter_timeline_row(
                 project_id,
                 service_id,
                 deploy_center_slug,
-            )
+            );
         }
     };
     let Some(producer_service_id) = text_field(&payload, "service_id") else {
@@ -3380,6 +3434,33 @@ fn deployment_event_has_deploy_center_authority(
         || text_from_sources(&[envelope], &["source", "authority"]).is_some_and(|value| {
             normalized_lookup_key(Some(&value)).is_some_and(|key| key.contains("deploy-center"))
         })
+}
+
+fn deployment_event_has_authoritative_deploy_center_authority(
+    producer_service_id: &str,
+    event_id: &str,
+    envelope: Option<&Value>,
+) -> bool {
+    let producer_is_deploy_center =
+        normalized_lookup_key(Some(producer_service_id)).as_deref() == Some("deploy-center");
+    let event_id_is_deploy_events =
+        normalized_lookup_key(Some(event_id)).is_some_and(|value| value.contains("deploy-events"));
+    let authority_is_deploy_events =
+        text_from_sources(&[envelope], &["authority"]).is_some_and(|value| {
+            normalized_lookup_key(Some(&value))
+                .is_some_and(|key| key == "deploy-center-deploy-events")
+        });
+    producer_is_deploy_center && (event_id_is_deploy_events || authority_is_deploy_events)
+}
+
+fn deployment_event_is_webhook_ingest_probe(
+    event_source: &str,
+    event_authority: &str,
+    event_kind: &str,
+) -> bool {
+    normalized_lookup_key(Some(event_source)).is_some_and(|key| key.contains("probe"))
+        || normalized_lookup_key(Some(event_authority)).is_some_and(|key| key.contains("probe"))
+        || normalized_lookup_key(Some(event_kind)).is_some_and(|key| key.contains("probe"))
 }
 
 fn deployment_event_matches_scope(
@@ -5220,13 +5301,14 @@ fn collect_evidence_refs_inner(value: &Value, path: &str, refs: &mut Vec<Value>)
 mod tests {
     use std::{fs, path::Path};
 
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use crate::context::v3_blueprint_runtime::EvidenceLaneRuntimeConfig;
 
     use super::{
-        attach_infra_os_disabled_support_fallback, build_evidence_items,
-        build_evidence_items_with_options, build_evidence_lanes,
+        CompiledDeploymentPolicyFingerprint, ContextGatherArgs, DEPLOYMENT_EVENT_RELEVANT_KINDS,
+        DeploymentEventFilterResult, SourceProfile, attach_infra_os_disabled_support_fallback,
+        build_evidence_items, build_evidence_items_with_options, build_evidence_lanes,
         build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
         build_support_catalog, collect_evidence_refs_from_value, context_gather_persist_artifact,
         context_gather_persist_read_model, context_gather_worker_visible_dir_for,
@@ -5243,8 +5325,7 @@ mod tests {
         filter_stale_runtime_environment_evidence_items_with_dir,
         optional_infra_os_disabled_diagnostic, optional_infra_os_disabled_source, response_sources,
         source_selection, summarize_source, support_catalog_has_content,
-        support_catalog_response_view, CompiledDeploymentPolicyFingerprint, ContextGatherArgs,
-        DeploymentEventFilterResult, SourceProfile, DEPLOYMENT_EVENT_RELEVANT_KINDS,
+        support_catalog_response_view,
     };
 
     fn args(value: serde_json::Value) -> ContextGatherArgs {
@@ -5959,14 +6040,16 @@ mod tests {
             .to_string(),
             created_at: "2026-06-02 20:08:16".to_string(),
         };
-        assert!(deployment_event_item_from_timeline_row(
-            &unscoped,
-            Some("payments"),
-            Some("payments"),
-            Some("xjp-payments"),
-            "Payments canary",
-        )
-        .is_none());
+        assert!(
+            deployment_event_item_from_timeline_row(
+                &unscoped,
+                Some("payments"),
+                Some("payments"),
+                Some("xjp-payments"),
+                "Payments canary",
+            )
+            .is_none()
+        );
         match deployment_event_filter_timeline_row(
             &unscoped,
             Some("payments"),
@@ -6000,14 +6083,16 @@ mod tests {
             "payload_json": "{}",
         })
         .to_string();
-        assert!(deployment_event_item_from_timeline_row(
-            &non_deploy,
-            Some("deploy-center"),
-            Some("deploy-center"),
-            Some("xjp-deploy-center"),
-            "deploy-center",
-        )
-        .is_none());
+        assert!(
+            deployment_event_item_from_timeline_row(
+                &non_deploy,
+                Some("deploy-center"),
+                Some("deploy-center"),
+                Some("xjp-deploy-center"),
+                "deploy-center",
+            )
+            .is_none()
+        );
         match deployment_event_filter_timeline_row(
             &non_deploy,
             Some("deploy-center"),
@@ -6075,6 +6160,18 @@ mod tests {
         );
         assert_eq!(
             summary
+                .get("authoritative_deploy_center_candidate_count")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            summary
+                .get("webhook_ingest_probe_candidate_count")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            summary
                 .get("accepted_kind_candidate_count")
                 .and_then(Value::as_u64),
             Some(0)
@@ -6082,6 +6179,18 @@ mod tests {
         assert_eq!(
             summary
                 .get("observed_deploy_center_source")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            summary
+                .get("observed_authoritative_deploy_center_source")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            summary
+                .get("observed_webhook_ingest_probe")
                 .and_then(Value::as_bool),
             Some(false)
         );
@@ -6108,12 +6217,120 @@ mod tests {
     }
 
     #[test]
+    fn deployment_event_observed_candidates_separate_webhook_probe_from_authoritative_relay() {
+        let probe_payload_json = json!({
+            "_envelope": {
+                "project_id": "xjp-deploy-center",
+                "source": "codex-local-probe",
+                "authority": "manual_probe"
+            },
+            "probe": "local_webhook_append"
+        })
+        .to_string();
+        let probe = missiond_core::db::TimelineRow {
+            seq: 12939,
+            trace_id: None,
+            span_id: None,
+            parent_span_id: None,
+            event_type: "external_service_event".to_string(),
+            summary: Some("deploy-center reported deploy_probe".to_string()),
+            payload: json!({
+                "service_id": "deploy-center",
+                "event_id": "deploy-center:local_webhook_probe:20260603T002005Z",
+                "event_kind": "deploy_probe",
+                "summary": "deploy-center reported deploy_probe",
+                "payload_json": probe_payload_json,
+            })
+            .to_string(),
+            created_at: "2026-06-03 00:20:07".to_string(),
+        };
+
+        let authoritative_payload_json = json!({
+            "_envelope": {
+                "project_id": "xjp-deploy-center",
+                "source": "deploy-center",
+                "authority": "deploy-center.deploy_events"
+            },
+            "deploy_event_id": 330,
+            "project_slug": "xjp-deploy-center"
+        })
+        .to_string();
+        let authoritative = missiond_core::db::TimelineRow {
+            seq: 12940,
+            trace_id: None,
+            span_id: None,
+            parent_span_id: None,
+            event_type: "external_service_event".to_string(),
+            summary: Some("deploy-center workflow job succeeded".to_string()),
+            payload: json!({
+                "service_id": "deploy-center",
+                "event_id": "deploy-center:deploy_events:330",
+                "event_kind": "workflow_job_succeeded",
+                "summary": "deploy-center workflow job succeeded",
+                "payload_json": authoritative_payload_json,
+            })
+            .to_string(),
+            created_at: "2026-06-03 00:20:08".to_string(),
+        };
+
+        let probe_summary = deployment_event_observed_candidate_summary(&[probe]);
+        assert_eq!(
+            probe_summary
+                .get("deploy_center_candidate_count")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            probe_summary
+                .get("authoritative_deploy_center_candidate_count")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            probe_summary
+                .get("webhook_ingest_probe_candidate_count")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            probe_summary
+                .get("observed_webhook_ingest_probe")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let authoritative_summary = deployment_event_observed_candidate_summary(&[authoritative]);
+        assert_eq!(
+            authoritative_summary
+                .get("authoritative_deploy_center_candidate_count")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            authoritative_summary
+                .get("observed_authoritative_deploy_center_source")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            authoritative_summary
+                .get("webhook_ingest_probe_candidate_count")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn deployment_event_relay_diagnostics_identifies_disabled_or_absent_relay() {
         let observed = json!({
             "candidate_count": 16,
             "deploy_center_candidate_count": 0,
+            "authoritative_deploy_center_candidate_count": 0,
+            "webhook_ingest_probe_candidate_count": 0,
             "accepted_kind_candidate_count": 0,
             "observed_deploy_center_source": false,
+            "observed_authoritative_deploy_center_source": false,
+            "observed_webhook_ingest_probe": false,
             "producer_service_counts": {"missiond-shared-memory": 16}
         });
 
@@ -6143,10 +6360,50 @@ mod tests {
                 .and_then(Value::as_str),
             Some("not_available")
         );
-        assert!(diagnostics
-            .get("next_actions")
-            .and_then(Value::as_array)
-            .is_some_and(|items| !items.is_empty()));
+        assert!(
+            diagnostics
+                .get("next_actions")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+        );
+    }
+
+    #[test]
+    fn deployment_event_relay_diagnostics_keeps_probe_non_authoritative() {
+        let observed = json!({
+            "candidate_count": 1,
+            "deploy_center_candidate_count": 1,
+            "authoritative_deploy_center_candidate_count": 0,
+            "webhook_ingest_probe_candidate_count": 1,
+            "accepted_kind_candidate_count": 0,
+            "observed_deploy_center_source": true,
+            "observed_authoritative_deploy_center_source": false,
+            "observed_webhook_ingest_probe": true,
+            "producer_service_counts": {"deploy-center": 1},
+            "event_authority_counts": {"manual_probe": 1}
+        });
+
+        let diagnostics = deployment_event_relay_diagnostics(1, 0, &observed, None);
+
+        assert_eq!(
+            diagnostics.get("inferred_gap").and_then(Value::as_str),
+            Some("missiond_webhook_ingest_ok_deploy_center_relay_absent")
+        );
+        assert_eq!(
+            diagnostics
+                .get("ingest_health")
+                .and_then(|value| value.get("observed_webhook_ingest_probe"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            diagnostics
+                .get("next_actions")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| item
+                    .as_str()
+                    .is_some_and(|text| text.contains("deploy_event_relay_state"))))
+        );
     }
 
     #[test]
@@ -6156,19 +6413,27 @@ mod tests {
             Some("relay_env_names_present"),
         );
 
-        assert!(actions
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item
-                .as_str()
-                .is_some_and(|text| text.contains("runtime env values")))));
-        assert!(actions.as_array().is_some_and(|items| items
-            .iter()
-            .any(|item| item.as_str().is_some_and(|text| text.contains("reachable")))));
-        assert!(actions
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item
-                .as_str()
-                .is_some_and(|text| text.contains("Secret Store namespace xjp-deploy-center")))));
+        assert!(
+            actions
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item
+                    .as_str()
+                    .is_some_and(|text| text.contains("runtime env values"))))
+        );
+        assert!(actions.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.as_str().is_some_and(|text| text.contains("reachable")))
+        }));
+        assert!(
+            actions
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.as_str().is_some_and(|text| {
+                        text.contains("Secret Store namespace xjp-deploy-center")
+                    })
+                }))
+        );
     }
 
     #[test]
@@ -6225,12 +6490,14 @@ mod tests {
                 .map(Path::new),
             Some(root.as_path())
         );
-        assert!(probe
-            .get("missing_env_groups")
-            .and_then(Value::as_array)
-            .is_some_and(|items| items
-                .iter()
-                .any(|item| { item.get("group").and_then(Value::as_str) == Some("enable") })));
+        assert!(
+            probe
+                .get("missing_env_groups")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| { item.get("group").and_then(Value::as_str) == Some("enable") }))
+        );
         assert_eq!(
             probe
                 .get("secret_store_key_probe")
@@ -6238,25 +6505,29 @@ mod tests {
                 .and_then(Value::as_str),
             Some("xjp-deploy-center")
         );
-        assert!(probe
-            .get("secret_store_key_probe")
-            .and_then(|value| value.get("required_key_names"))
-            .and_then(Value::as_array)
-            .is_some_and(|items| items
-                .iter()
-                .any(|item| item.as_str() == Some("MISSIOND_EXTERNAL_WEBHOOK_TOKEN"))));
-        assert!(probe
-            .get("code_refs")
-            .and_then(Value::as_array)
-            .is_some_and(|items| items.iter().any(|item| {
-                item.get("expected_needles_present")
-                    .and_then(Value::as_array)
-                    .is_some_and(|needles| {
-                        needles.iter().any(|needle| {
-                            needle.as_str() == Some("deploy_event_relay::spawn_from_env")
+        assert!(
+            probe
+                .get("secret_store_key_probe")
+                .and_then(|value| value.get("required_key_names"))
+                .and_then(Value::as_array)
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item.as_str() == Some("MISSIOND_EXTERNAL_WEBHOOK_TOKEN")))
+        );
+        assert!(
+            probe
+                .get("code_refs")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.get("expected_needles_present")
+                        .and_then(Value::as_array)
+                        .is_some_and(|needles| {
+                            needles.iter().any(|needle| {
+                                needle.as_str() == Some("deploy_event_relay::spawn_from_env")
+                            })
                         })
-                    })
-            })));
+                }))
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -6427,11 +6698,12 @@ mod tests {
         }));
 
         let raw = response_sources(&sources, &summaries, true);
-        assert!(raw
-            .get("skill_context")
-            .and_then(|value| value.get("operational_facts"))
-            .and_then(|value| value.as_array())
-            .is_some_and(|items| items.len() == 1));
+        assert!(
+            raw.get("skill_context")
+                .and_then(|value| value.get("operational_facts"))
+                .and_then(|value| value.as_array())
+                .is_some_and(|items| items.len() == 1)
+        );
     }
 
     #[test]
@@ -6578,12 +6850,14 @@ mod tests {
             support_refs.get("item_count").and_then(Value::as_u64),
             Some(1)
         );
-        assert!(support_refs
-            .get("source_keys")
-            .and_then(Value::as_array)
-            .is_some_and(|keys| keys
-                .iter()
-                .any(|value| value.as_str() == Some("support_catalog"))));
+        assert!(
+            support_refs
+                .get("source_keys")
+                .and_then(Value::as_array)
+                .is_some_and(|keys| keys
+                    .iter()
+                    .any(|value| value.as_str() == Some("support_catalog")))
+        );
 
         let scoped_catalog_with_closure = json!({
             "schema": "missiond.support-catalog.v1",
@@ -6955,10 +7229,12 @@ mod tests {
             None,
             None,
         );
-        assert!(!items
-            .iter()
-            .any(|item| item.source_type == "support_catalog"
-                || item.source_type == "deployment_closure_policy"));
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.source_type == "support_catalog"
+                    || item.source_type == "deployment_closure_policy")
+        );
     }
 
     #[test]
@@ -6984,12 +7260,16 @@ mod tests {
             Some("payments"),
             None,
         );
-        assert!(items
-            .iter()
-            .any(|item| item.source_type == "support_catalog"));
-        assert!(!items
-            .iter()
-            .any(|item| item.source_type == "deployment_closure_policy"));
+        assert!(
+            items
+                .iter()
+                .any(|item| item.source_type == "support_catalog")
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.source_type == "deployment_closure_policy")
+        );
     }
 
     #[test]
@@ -7017,12 +7297,16 @@ mod tests {
             None,
             false,
         );
-        assert!(items
-            .iter()
-            .any(|item| item.source_type == "support_catalog"));
-        assert!(!items
-            .iter()
-            .any(|item| item.source_type == "deployment_closure_policy"));
+        assert!(
+            items
+                .iter()
+                .any(|item| item.source_type == "support_catalog")
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.source_type == "deployment_closure_policy")
+        );
     }
 
     #[test]
