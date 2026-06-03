@@ -525,6 +525,20 @@ struct JarvisObservedVersion {
     diagnostic: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct JarvisProviderSlotMonitorSpec {
+    phase: &'static str,
+    role: &'static str,
+    provider: String,
+    engine: String,
+    slot_id: String,
+    model: Option<String>,
+    model_profile: Option<String>,
+    residency: &'static str,
+    required_ready: bool,
+    critical: bool,
+}
+
 /// WebSocket server options
 pub struct WSServerOptions {
     /// Server port
@@ -3070,6 +3084,329 @@ impl PTYWebSocketServer {
         })
     }
 
+    fn jarvis_grounding_worker_slot_id_for_monitor() -> String {
+        Self::env_var_trimmed("MISSIOND_JARVIS_GROUNDING_WORKER_SLOT_ID")
+            .unwrap_or_else(|| "slot-jarvis-grounding-claude".to_string())
+    }
+
+    fn jarvis_direct_answer_slot_id_for_monitor(provider: &str, fallback_slot: &str) -> String {
+        Self::jarvis_text_only_slot_id(
+            provider,
+            Self::env_var_trimmed("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
+                .or_else(|| Self::env_var_trimmed("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID"))
+                .as_deref(),
+            fallback_slot,
+        )
+    }
+
+    fn jarvis_provider_slot_monitor_specs(
+        default_slot: &str,
+        intent_author: &JarvisIntentAuthorConfig,
+        key_judgment_author: &JarvisKeyJudgmentAuthorConfig,
+        plan_author: &JarvisPlanAuthorConfig,
+    ) -> Vec<JarvisProviderSlotMonitorSpec> {
+        let author_provider = Self::jarvis_author_text_provider();
+        let communicator_provider = Self::jarvis_communicator_provider();
+        let communicator_slot = Self::jarvis_communicator_slot_id(&communicator_provider);
+        let direct_answer_slot = Self::jarvis_direct_answer_slot_id_for_monitor(
+            &communicator_provider,
+            &communicator_slot,
+        );
+
+        vec![
+            JarvisProviderSlotMonitorSpec {
+                phase: "default_chat",
+                role: "chat-default",
+                provider: "claude_code".to_string(),
+                engine: "claude_code".to_string(),
+                slot_id: default_slot.to_string(),
+                model: None,
+                model_profile: None,
+                residency: "resident",
+                required_ready: true,
+                critical: true,
+            },
+            JarvisProviderSlotMonitorSpec {
+                phase: "intent",
+                role: "semantic-author",
+                provider: author_provider.clone(),
+                engine: Self::provider_box_engine_for_provider(&author_provider)
+                    .unwrap_or("codex")
+                    .to_string(),
+                slot_id: Self::jarvis_author_text_slot_id_for_phase(
+                    &author_provider,
+                    "MISSIOND_JARVIS_INTENT_AUTHOR_SLOT_ID",
+                    &intent_author.slot_id,
+                ),
+                model: Self::jarvis_author_text_model(&author_provider, &intent_author.model),
+                model_profile: Some(intent_author.reasoning_effort.clone()),
+                residency: "resident",
+                required_ready: true,
+                critical: true,
+            },
+            JarvisProviderSlotMonitorSpec {
+                phase: "grounding",
+                role: "context-gather-worker",
+                provider: "claude_code".to_string(),
+                engine: "claude_code".to_string(),
+                slot_id: Self::jarvis_grounding_worker_slot_id_for_monitor(),
+                model: None,
+                model_profile: None,
+                residency: "spawnable",
+                required_ready: false,
+                critical: true,
+            },
+            JarvisProviderSlotMonitorSpec {
+                phase: "key_judgment",
+                role: "semantic-author",
+                provider: author_provider.clone(),
+                engine: Self::provider_box_engine_for_provider(&author_provider)
+                    .unwrap_or("codex")
+                    .to_string(),
+                slot_id: Self::jarvis_author_text_slot_id_for_phase(
+                    &author_provider,
+                    "MISSIOND_JARVIS_KEY_JUDGMENT_AUTHOR_SLOT_ID",
+                    &key_judgment_author.slot_id,
+                ),
+                model: Self::jarvis_author_text_model(&author_provider, &key_judgment_author.model),
+                model_profile: Some(key_judgment_author.reasoning_effort.clone()),
+                residency: "resident",
+                required_ready: true,
+                critical: true,
+            },
+            JarvisProviderSlotMonitorSpec {
+                phase: "plan",
+                role: "semantic-author",
+                provider: author_provider.clone(),
+                engine: Self::provider_box_engine_for_provider(&author_provider)
+                    .unwrap_or("codex")
+                    .to_string(),
+                slot_id: Self::jarvis_author_text_slot_id_for_phase(
+                    &author_provider,
+                    "MISSIOND_JARVIS_PLAN_AUTHOR_SLOT_ID",
+                    &plan_author.slot_id,
+                ),
+                model: Self::jarvis_author_text_model(&author_provider, &plan_author.model),
+                model_profile: Some(plan_author.reasoning_effort.clone()),
+                residency: "resident",
+                required_ready: true,
+                critical: true,
+            },
+            JarvisProviderSlotMonitorSpec {
+                phase: "communicator",
+                role: "communication-officer",
+                provider: communicator_provider.clone(),
+                engine: Self::provider_box_engine_for_provider(&communicator_provider)
+                    .unwrap_or("agy")
+                    .to_string(),
+                slot_id: communicator_slot.clone(),
+                model: Self::jarvis_communicator_model_for_provider(&communicator_provider),
+                model_profile: None,
+                residency: "spawnable",
+                required_ready: false,
+                critical: true,
+            },
+            JarvisProviderSlotMonitorSpec {
+                phase: "direct_answer",
+                role: "direct-answer-provider",
+                provider: communicator_provider.clone(),
+                engine: Self::provider_box_engine_for_provider(&communicator_provider)
+                    .unwrap_or("agy")
+                    .to_string(),
+                slot_id: direct_answer_slot,
+                model: Self::jarvis_direct_answer_model(&communicator_provider),
+                model_profile: None,
+                residency: "spawnable",
+                required_ready: false,
+                critical: true,
+            },
+        ]
+    }
+
+    fn jarvis_slot_state_wire(state: SessionState) -> String {
+        serde_json::to_value(state)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{:?}", state).to_ascii_lowercase())
+    }
+
+    fn jarvis_provider_slot_status(
+        info: Option<&crate::pty::PTYAgentInfo>,
+        spec: &JarvisProviderSlotMonitorSpec,
+    ) -> (&'static str, bool, String) {
+        let Some(info) = info else {
+            return if spec.required_ready {
+                (
+                    "missing_required",
+                    false,
+                    "Required resident provider-box slot is not observed by PTYManager."
+                        .to_string(),
+                )
+            } else {
+                (
+                    "not_observed_spawnable",
+                    true,
+                    "On-demand provider-box slot is not currently running; provider-box may spawn it when requested.".to_string(),
+                )
+            };
+        };
+        match info.state {
+            SessionState::Idle => (
+                "ready",
+                true,
+                "Provider slot is idle and ready.".to_string(),
+            ),
+            SessionState::Starting
+            | SessionState::Thinking
+            | SessionState::Responding
+            | SessionState::ToolRunning => {
+                let ok = !spec.required_ready;
+                let reason = if ok {
+                    "Provider slot is active; this is acceptable for an on-demand lane."
+                } else {
+                    "Required resident provider slot is active and not ready for a new Jarvis phase."
+                };
+                ("busy", ok, reason.to_string())
+            }
+            SessionState::SlashMenu | SessionState::Confirming => (
+                "blocked",
+                false,
+                "Provider slot is waiting on an interactive surface or approval prompt."
+                    .to_string(),
+            ),
+            SessionState::Error | SessionState::Exited => (
+                "unavailable",
+                false,
+                "Provider slot is exited or errored.".to_string(),
+            ),
+        }
+    }
+
+    fn jarvis_provider_slot_row(
+        spec: &JarvisProviderSlotMonitorSpec,
+        info: Option<&crate::pty::PTYAgentInfo>,
+    ) -> serde_json::Value {
+        let (status, ok, reason) = Self::jarvis_provider_slot_status(info, spec);
+        let recognition = info.and_then(|slot| slot.recognition.as_ref());
+        let screen_identity = recognition.and_then(|snapshot| snapshot.screen_identity.as_ref());
+        serde_json::json!({
+            "phase": spec.phase,
+            "role": spec.role,
+            "provider": &spec.provider,
+            "engine": &spec.engine,
+            "slot_id": &spec.slot_id,
+            "model": &spec.model,
+            "model_profile": &spec.model_profile,
+            "residency": spec.residency,
+            "required_ready": spec.required_ready,
+            "critical": spec.critical,
+            "ok": ok,
+            "status": status,
+            "reason": reason,
+            "observed": info.map(|slot| serde_json::json!({
+                "state": Self::jarvis_slot_state_wire(slot.state),
+                "engine": format!("{:?}", slot.engine),
+                "pid": slot.pid,
+                "status_text": slot.status_text.clone(),
+                "started_at": slot.started_at,
+                "current_task_id": slot.current_task_id.clone(),
+                "log_file": slot.log_file.display().to_string(),
+            })),
+            "recognition": recognition.map(|snapshot| serde_json::json!({
+                "state": format!("{:?}", snapshot.state).to_ascii_lowercase(),
+                "reason": snapshot.reason.clone(),
+                "phase": snapshot.phase.clone(),
+                "blocked_kind": snapshot.blocked_kind.clone(),
+                "confidence": snapshot.confidence,
+                "source": snapshot.source.clone(),
+                "current_model": screen_identity.and_then(|identity| identity.current_model.clone()),
+                "reasoning_effort": screen_identity.and_then(|identity| identity.reasoning_effort.clone()),
+                "permission_mode": screen_identity.and_then(|identity| identity.permission_mode.clone()),
+                "cwd": screen_identity.and_then(|identity| identity.cwd.clone()),
+            })),
+        })
+    }
+
+    async fn jarvis_provider_box_slots_snapshot(
+        pty_manager: &PTYManager,
+        default_slot: &str,
+        intent_author: &JarvisIntentAuthorConfig,
+        key_judgment_author: &JarvisKeyJudgmentAuthorConfig,
+        plan_author: &JarvisPlanAuthorConfig,
+    ) -> serde_json::Value {
+        let specs = Self::jarvis_provider_slot_monitor_specs(
+            default_slot,
+            intent_author,
+            key_judgment_author,
+            plan_author,
+        );
+        let mut slots = Vec::with_capacity(specs.len());
+        for spec in &specs {
+            let info = pty_manager.get_status(&spec.slot_id).await;
+            slots.push(Self::jarvis_provider_slot_row(spec, info.as_ref()));
+        }
+        let mut by_status = std::collections::BTreeMap::<String, usize>::new();
+        let mut failing_required = 0usize;
+        for slot in &slots {
+            if let Some(status) = slot.get("status").and_then(|value| value.as_str()) {
+                *by_status.entry(status.to_string()).or_insert(0) += 1;
+            }
+            if slot.get("critical").and_then(|value| value.as_bool()) == Some(true)
+                && slot.get("ok").and_then(|value| value.as_bool()) == Some(false)
+            {
+                failing_required += 1;
+            }
+        }
+        serde_json::json!({
+            "schema": "missiond.jarvis-provider-box-slots.v1",
+            "slots": slots,
+            "summary": {
+                "total": specs.len(),
+                "by_status": by_status,
+                "critical_failures": failing_required,
+            }
+        })
+    }
+
+    fn jarvis_provider_slot_checks(
+        provider_box_slots: &serde_json::Value,
+    ) -> Vec<serde_json::Value> {
+        provider_box_slots
+            .get("slots")
+            .and_then(|value| value.as_array())
+            .map(|slots| {
+                slots
+                    .iter()
+                    .map(|slot| {
+                        let phase = slot
+                            .get("phase")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("unknown");
+                        serde_json::json!({
+                            "id": format!("provider-slot-{phase}"),
+                            "label": format!("Jarvis provider-box slot: {phase}"),
+                            "ok": slot.get("ok").and_then(|value| value.as_bool()).unwrap_or(false),
+                            "critical": slot.get("critical").and_then(|value| value.as_bool()).unwrap_or(true),
+                            "status": slot.get("status"),
+                            "slot_id": slot.get("slot_id"),
+                            "provider": slot.get("provider"),
+                            "engine": slot.get("engine"),
+                            "role": slot.get("role"),
+                            "residency": slot.get("residency"),
+                            "reason": slot.get("reason"),
+                            "blocked_kind": slot
+                                .get("recognition")
+                                .and_then(|recognition| recognition.get("blocked_kind")),
+                            "recognition_reason": slot
+                                .get("recognition")
+                                .and_then(|recognition| recognition.get("reason")),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
     fn expand_home_path(path: &str) -> Option<std::path::PathBuf> {
         let trimmed = path.trim();
         if trimmed.is_empty() {
@@ -3087,6 +3424,9 @@ impl PTYWebSocketServer {
         mut stream: TcpStream,
         pty_manager: Arc<PTYManager>,
         default_slot: String,
+        jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_key_judgment_author: JarvisKeyJudgmentAuthorConfig,
+        jarvis_plan_author: JarvisPlanAuthorConfig,
     ) -> anyhow::Result<()> {
         let mut buf = vec![0u8; 4096];
         let _ = stream.read(&mut buf).await;
@@ -3109,6 +3449,14 @@ impl PTYWebSocketServer {
         let runtime_topology = Self::jarvis_runtime_topology_snapshot(&compiled_runtime_dir);
         let compiled_abi_freshness =
             Self::compiled_abi_freshness_check_in_dir(&compiled_runtime_dir);
+        let provider_box_slots = Self::jarvis_provider_box_slots_snapshot(
+            &pty_manager,
+            &default_slot,
+            &jarvis_intent_author,
+            &jarvis_key_judgment_author,
+            &jarvis_plan_author,
+        )
+        .await;
         let slot_log = default_slot_status
             .as_ref()
             .map(|info| info.log_file.clone())
@@ -3170,7 +3518,19 @@ impl PTYWebSocketServer {
             ),
         ];
         checks.extend(Self::jarvis_topology_checks(&runtime_topology).await);
+        checks.extend(Self::jarvis_provider_slot_checks(&provider_box_slots));
 
+        let provider_slot_failures = checks
+            .iter()
+            .filter(|check| {
+                check
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| id.starts_with("provider-slot-"))
+            })
+            .filter(|check| check.get("ok").and_then(|v| v.as_bool()) == Some(false))
+            .filter(|check| check.get("critical").and_then(|v| v.as_bool()) == Some(true))
+            .count();
         let critical_failures = checks
             .iter()
             .filter(|check| check.get("ok").and_then(|v| v.as_bool()) == Some(false))
@@ -3182,6 +3542,7 @@ impl PTYWebSocketServer {
             .filter(|check| check.get("critical").and_then(|v| v.as_bool()) != Some(true))
             .count();
         let overall = match readiness_status {
+            _ if provider_slot_failures > 0 => "provider_slot_unavailable",
             _ if critical_failures > 0 => "abi_freshness_mismatch",
             "ready" if non_critical_failures == 0 => "ready",
             "ready" => "degraded",
@@ -3195,6 +3556,9 @@ impl PTYWebSocketServer {
             "degraded" => "check failed non-critical monitor rows before the next deploy",
             "busy" => "wait for default slot completion or choose another slot",
             "stale_slot" => "respawn default slot; MissionD spawn now cleans stale PTY sessions",
+            "provider_slot_unavailable" => {
+                "inspect provider_box_slots; restart or re-auth the blocked Jarvis phase slot before retrying iOS"
+            }
             "abi_freshness_mismatch" => {
                 "run node scripts/project-v3-contracts.mjs --write, node scripts/compile-v3-runtime.mjs --json, then redeploy MissionD"
             }
@@ -3231,6 +3595,7 @@ impl PTYWebSocketServer {
             "chat_endpoint": "/v1/chat/completions",
             "runtime_topology": runtime_topology,
             "route_graph": route_graph,
+            "provider_box_slots": provider_box_slots,
             "readiness": readiness,
             "release": Self::release_snapshot(),
             "slots": {
@@ -6462,6 +6827,13 @@ impl PTYWebSocketServer {
         }
     }
 
+    fn env_var_trimmed(name: &str) -> Option<String> {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
     fn jarvis_author_text_slot_id(provider: &str, default_slot: &str) -> String {
         Self::jarvis_text_only_slot_id(
             provider,
@@ -6470,6 +6842,20 @@ impl PTYWebSocketServer {
                 .as_deref(),
             default_slot,
         )
+    }
+
+    fn jarvis_author_text_slot_id_for_phase(
+        provider: &str,
+        phase_slot_env: &str,
+        default_slot: &str,
+    ) -> String {
+        let phase_slot = Self::env_var_trimmed(phase_slot_env);
+        if let Some(slot_id) = phase_slot.as_deref() {
+            if Self::jarvis_slot_matches_provider(provider, slot_id) {
+                return slot_id.to_string();
+            }
+        }
+        Self::jarvis_author_text_slot_id(provider, default_slot)
     }
 
     fn jarvis_author_text_model(provider: &str, default_model: &str) -> Option<String> {
@@ -6812,6 +7198,7 @@ JSON 字段必须是：\n\
         approval_policy: &str,
         timeout_secs: u64,
         output_prefix: &str,
+        slot_override_env: &str,
         env_marker: &str,
         error_prefix: &str,
         prompt: &str,
@@ -6820,7 +7207,11 @@ JSON 字段必须是：\n\
         let correlation_id = format!("jarvis-{}-{}", output_prefix, uuid::Uuid::new_v4().simple());
         let provider = Self::jarvis_author_text_provider();
         let engine = Self::provider_box_engine_for_provider(provider.as_str())?;
-        let slot_id = Self::jarvis_author_text_slot_id(provider.as_str(), slot_id);
+        let slot_id = Self::jarvis_author_text_slot_id_for_phase(
+            provider.as_str(),
+            slot_override_env,
+            slot_id,
+        );
         let model = Self::jarvis_author_text_model(provider.as_str(), model);
         let pure_text_command = engine == "agy";
         let command = if pure_text_command {
@@ -6883,6 +7274,7 @@ JSON 字段必须是：\n\
             &config.approval_policy,
             Self::jarvis_intent_author_timeout_secs(config),
             "intent",
+            "MISSIOND_JARVIS_INTENT_AUTHOR_SLOT_ID",
             "MISSIOND_JARVIS_INTENT_AUTHOR",
             "JARVIS_INTENT_AUTHOR",
             prompt,
@@ -6905,6 +7297,7 @@ JSON 字段必须是：\n\
             &config.approval_policy,
             Self::jarvis_key_judgment_author_timeout_secs(config),
             "key-judgment",
+            "MISSIOND_JARVIS_KEY_JUDGMENT_AUTHOR_SLOT_ID",
             "MISSIOND_JARVIS_KEY_JUDGMENT_AUTHOR",
             "JARVIS_KEY_JUDGMENT_AUTHOR",
             prompt,
@@ -6927,6 +7320,7 @@ JSON 字段必须是：\n\
             &config.approval_policy,
             Self::jarvis_plan_author_timeout_secs(config),
             "plan",
+            "MISSIOND_JARVIS_PLAN_AUTHOR_SLOT_ID",
             "MISSIOND_JARVIS_PLAN_AUTHOR",
             "JARVIS_PLAN_AUTHOR",
             prompt,
@@ -14109,7 +14503,15 @@ JSON 字段必须是：\n\
             if method == "GET" && normalized_path == "/api/monitor/jarvis" && !is_upgrade {
                 return match pty_manager {
                     Some(pm) => {
-                        Self::handle_jarvis_monitor(stream, pm, default_chat_slot.clone()).await
+                        Self::handle_jarvis_monitor(
+                            stream,
+                            pm,
+                            default_chat_slot.clone(),
+                            jarvis_intent_author.clone(),
+                            jarvis_key_judgment_author.clone(),
+                            jarvis_plan_author.clone(),
+                        )
+                        .await
                     }
                     None => {
                         let mut s = stream;

@@ -375,6 +375,12 @@ fn jarvis_intent_author_config(
             .unwrap_or(projected.approval_policy);
         projected.timeout_secs = worker.timeout_secs;
     }
+    if let Ok(slot_id) = std::env::var("MISSIOND_JARVIS_INTENT_AUTHOR_SLOT_ID") {
+        let slot_id = slot_id.trim();
+        if !slot_id.is_empty() {
+            projected.slot_id = slot_id.to_string();
+        }
+    }
     Ok(projected)
 }
 
@@ -400,6 +406,12 @@ fn jarvis_plan_author_config(
             .clone()
             .unwrap_or(projected.approval_policy);
         projected.timeout_secs = worker.timeout_secs;
+    }
+    if let Ok(slot_id) = std::env::var("MISSIOND_JARVIS_PLAN_AUTHOR_SLOT_ID") {
+        let slot_id = slot_id.trim();
+        if !slot_id.is_empty() {
+            projected.slot_id = slot_id.to_string();
+        }
     }
     Ok(projected)
 }

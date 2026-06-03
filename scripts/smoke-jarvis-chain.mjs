@@ -78,6 +78,22 @@ async function main() {
           message: 'Jarvis monitor v2 must include route_graph and runtime_topology.',
         });
       }
+      if (!monitor.provider_box_slots || !Array.isArray(monitor.provider_box_slots.slots)) {
+        diagnostics.push({
+          code: 'JARVIS_MONITOR_PROVIDER_SLOTS_MISSING',
+          message: 'Jarvis monitor v2 must include provider_box_slots.slots.',
+        });
+      } else {
+        const phases = new Set(monitor.provider_box_slots.slots.map((slot) => slot.phase));
+        for (const required of ['intent', 'grounding', 'key_judgment', 'plan', 'communicator', 'direct_answer']) {
+          if (!phases.has(required)) {
+            diagnostics.push({
+              code: 'JARVIS_MONITOR_PROVIDER_SLOT_PHASE_MISSING',
+              message: `Jarvis monitor provider_box_slots missing phase ${required}`,
+            });
+          }
+        }
+      }
     }
     const overall = String(monitor.overall || 'unknown');
     if (!['ready', 'busy'].includes(overall) || (overall === 'busy' && !allowBusy)) {
@@ -133,6 +149,18 @@ async function main() {
                 origin_node: monitor.route_graph.origin_node,
                 tunnel_client_id: monitor.route_graph.tunnel_client_id,
                 route_generation: monitor.route_graph.route_generation,
+              }
+            : null,
+          provider_box_slots: monitor.provider_box_slots
+            ? {
+                summary: monitor.provider_box_slots.summary,
+                phases: (monitor.provider_box_slots.slots || []).map((slot) => ({
+                  phase: slot.phase,
+                  slot_id: slot.slot_id,
+                  status: slot.status,
+                  ok: slot.ok,
+                  blocked_kind: slot.recognition?.blocked_kind,
+                })),
               }
             : null,
           checks: (monitor.checks || []).map((check) => ({

@@ -270,6 +270,8 @@ requireIncludes('jarvisChainSmoke', [
   'missiond.jarvis-chain-monitor.v1',
   'missiond.jarvis-chain-monitor.v2',
   'JARVIS_MONITOR_TOPOLOGY_MISSING',
+  'JARVIS_MONITOR_PROVIDER_SLOTS_MISSING',
+  'provider_box_slots',
   'public-entry',
   'default-slot-readiness',
 ]);
