@@ -4559,7 +4559,7 @@ mod tests {
         let caps = provider_slot_capabilities_value(
             CliEngine::ClaudeCode,
             &ProviderDriverCapabilities {
-                submit_turn: false,
+                submit_turn: true,
                 switch_model: true,
                 usage_probe: false,
                 model_catalog: false,

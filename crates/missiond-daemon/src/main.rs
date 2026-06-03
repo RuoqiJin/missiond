@@ -110,6 +110,134 @@ fn tool_result_json_value(result: ToolResult) -> std::result::Result<Value, Stri
         .map_err(|err| format!("tool returned non-json content: {err}"))
 }
 
+fn provider_box_internal_headers() -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    if let Some(token) = std::env::var("MISSIOND_PROVIDER_BOX_INTERNAL_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("MISSIOND_AGY_INTERNAL_TOKEN").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        headers.insert("authorization".to_string(), format!("Bearer {token}"));
+    }
+    headers
+}
+
+async fn call_provider_box_turn_from_daemon(
+    slot: &missiond_core::ProviderBoxHttpSlot,
+    body: Value,
+    timeout_secs: u64,
+    phase: &str,
+) -> std::result::Result<Value, String> {
+    let callback = {
+        let guard = slot.read().await;
+        guard.clone()
+    }
+    .ok_or_else(|| format!("{phase}: provider-box adapter is not configured"))?;
+    let request = missiond_core::ProviderBoxHttpRequest {
+        method: "POST".to_string(),
+        path: "/provider-box/v1/turns".to_string(),
+        headers: provider_box_internal_headers(),
+        body,
+    };
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs.saturating_add(15)),
+        callback(request),
+    )
+    .await
+    .map_err(|_| format!("{phase}: provider-box turn exceeded {timeout_secs}s"))?
+    .map_err(|err| format!("{phase}: provider-box failed: {err}"))?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "{phase}: provider-box returned {}: {}",
+            response.status,
+            response
+                .body
+                .to_string()
+                .chars()
+                .take(800)
+                .collect::<String>()
+        ));
+    }
+    Ok(response.body)
+}
+
+fn jarvis_grounding_worker_slot_id() -> String {
+    std::env::var("MISSIOND_JARVIS_GROUNDING_WORKER_SLOT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "slot-jarvis-grounding-claude".to_string())
+}
+
+fn jarvis_grounding_worker_timeout_secs() -> u64 {
+    std::env::var("MISSIOND_JARVIS_GROUNDING_WORKER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300)
+        .clamp(30, 900)
+}
+
+fn jarvis_grounding_report_dir() -> PathBuf {
+    if let Ok(runtime_dir) = std::env::var("MISSIOND_RUNTIME_DIR") {
+        let runtime_dir = runtime_dir.trim();
+        if !runtime_dir.is_empty() {
+            return PathBuf::from(runtime_dir).join("context-gather-worker");
+        }
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".missiond/v3/runtime/context-gather-worker")
+}
+
+fn missiond_project_root_for_provider() -> PathBuf {
+    std::env::var("MISSIOND_PROJECT_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn build_jarvis_grounding_worker_prompt(
+    req: &missiond_core::JarvisGroundingRequest,
+    context_pack_path: Option<&str>,
+    context_pack_file: Option<&str>,
+    target_report_file: &Path,
+) -> String {
+    let input = serde_json::json!({
+        "schema": "missiond.jarvis-grounding-worker-input.v1",
+        "user_input": req.query.clone(),
+        "confirmed_intent_artifact_id": req.confirmed_intent_artifact_id.clone(),
+        "confirmed_intent_lisp": req.confirmed_intent_lisp.clone(),
+        "conversation_id": req.conversation_id.clone(),
+        "chat_id": req.chat_id.clone(),
+        "permission_context": req.permission_context.clone(),
+        "context_pack_path": context_pack_path,
+        "context_pack_file": context_pack_file,
+        "target_report_file": target_report_file.display().to_string(),
+        "required_surfaces": ["missiond-mcp", "xjp-mcp"],
+        "forbidden_actions": [
+            "不要创建 BoardTask",
+            "不要执行实现或部署",
+            "不要修改源码",
+            "不要写 target_report_file 之外的文件"
+        ]
+    });
+    format!(
+        "根据用户输入的内容，在 MissionD 中搜集相关上下游全链的信息，存入文件 {file}，把内容供给下一步分析。\n\n\
+执行要求：\n\
+1. 优先通过已挂载的 MissionD MCP / XJP MCP 查询，不要靠记忆猜测。\n\
+2. 如果 context_pack_file 可读，先读取它作为机器生成 seed；如不足，再用 MCP 补齐项目、Board、会话、时间线、共享 artifact、SSOT/运行时证据等上下游信息。\n\
+3. 只写 Markdown 报告到 target_report_file，不要创建 BoardTask，不要执行实现，不要修改源码。\n\
+4. Markdown 报告必须包含：摘要、已确认意图、相关项目/模块/文件/服务、上游输入、下游影响、相关 Board/会话/artifact、权限边界、证据来源、未知项、给 plan.lisp 作者的建议。\n\
+5. 完成后最终回复只写：GROUNDING_REPORT_WRITTEN {file}\n\n\
+输入 JSON：\n{payload}\n",
+        file = target_report_file.display(),
+        payload = serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string())
+    )
+}
+
 fn is_skill_watch_path(path: &Path, skills_dir: &Path) -> bool {
     if !path.starts_with(skills_dir) {
         return false;
@@ -1557,25 +1685,27 @@ async fn main() -> Result<()> {
     // Late-bind grounded-dispatch primitives for the strict Jarvis intent/plan gate.
     {
         let state_for_grounding = state.clone();
-        let grounder: missiond_core::JarvisGroundingFn =
-            Arc::new(move |req: missiond_core::JarvisGroundingRequest| {
+        let provider_box_http_for_grounding = Arc::clone(&provider_box_http_slot);
+        let grounder: missiond_core::JarvisGroundingFn = Arc::new(
+            move |req: missiond_core::JarvisGroundingRequest| {
                 let s = state_for_grounding.clone();
+                let provider_box_http = Arc::clone(&provider_box_http_for_grounding);
                 Box::pin(async move {
                     let result = handlers::knowledge::context_gather::handle(
                         &s,
                         "mission_context_gather",
                         serde_json::json!({
-                            "query": req.query,
-                            "unknowns": req.unknowns,
-                            "source_id": req.chat_id,
-                            "conversation_id": req.conversation_id,
-                            "user_id": req.user_id,
-                            "tenant_id": req.tenant_id,
-                            "application_id": req.application_id,
-                            "channel": req.channel,
-                            "topic_id": req.topic_id,
-                            "topic_label": req.topic_label,
-                            "permission_context": req.permission_context,
+                            "query": req.query.clone(),
+                            "unknowns": req.unknowns.clone(),
+                            "source_id": req.chat_id.clone(),
+                            "conversation_id": req.conversation_id.clone(),
+                            "user_id": req.user_id.clone(),
+                            "tenant_id": req.tenant_id.clone(),
+                            "application_id": req.application_id.clone(),
+                            "channel": req.channel.clone(),
+                            "topic_id": req.topic_id.clone(),
+                            "topic_label": req.topic_label.clone(),
+                            "permission_context": req.permission_context.clone(),
                             "persist": true,
                             "limit": 8
                         }),
@@ -1633,10 +1763,169 @@ async fn main() -> Result<()> {
                         .get("diagnostics")
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!([]));
+
+                    let timeout_secs = jarvis_grounding_worker_timeout_secs();
+                    let slot_id = jarvis_grounding_worker_slot_id();
+                    let provider_session_id = uuid::Uuid::new_v4().to_string();
+                    let report_dir = jarvis_grounding_report_dir();
+                    tokio::fs::create_dir_all(&report_dir)
+                        .await
+                        .map_err(|err| {
+                            format!("Jarvis grounding report directory could not be created: {err}")
+                        })?;
+                    let report_file =
+                        report_dir.join(format!("jarvis-grounding-{}.md", provider_session_id));
+                    let project_root = missiond_project_root_for_provider();
+                    let prompt = build_jarvis_grounding_worker_prompt(
+                        &req,
+                        context_pack_path.as_deref(),
+                        context_pack_file.as_deref(),
+                        &report_file,
+                    );
+                    let turn_body = serde_json::json!({
+                        "schema": "missiond.provider-interaction-request.v1",
+                        "command": "worker-turn",
+                        "provider": "claude_code",
+                        "engine": "claude_code",
+                        "model": std::env::var("MISSIOND_JARVIS_GROUNDING_WORKER_MODEL").ok(),
+                        "cwd": project_root.display().to_string(),
+                        "project_root": project_root.display().to_string(),
+                        "prompt": prompt,
+                        "timeout_secs": timeout_secs,
+                        "correlation_id": format!("jarvis-grounding-{}", uuid::Uuid::new_v4().simple()),
+                        "slot_id": slot_id,
+                        "no_tools": false,
+                        "no_mcp": false,
+                        "no_shell": true,
+                        "no_file_access": false,
+                        "desired_worker": {
+                            "spawn_if_missing": true,
+                            "force_restart": true,
+                            "provider_session_id": provider_session_id,
+                            "mcp_server": "missiond"
+                        },
+                        "tool_policy": {
+                            "require_mcp_server": true,
+                            "mcp_server": "missiond",
+                            "write_scope": [report_file.display().to_string()],
+                            "read_scope": [
+                                project_root.display().to_string(),
+                                context_pack_file.clone().unwrap_or_default()
+                            ],
+                            "no_shell": true,
+                            "artifact": "interaction-grounding-report"
+                        },
+                        "output_contract": {
+                            "media_type": "text/markdown",
+                            "artifact": "interaction-grounding-report",
+                            "must_write_file": report_file.display().to_string()
+                        }
+                    });
+                    let turn_value = call_provider_box_turn_from_daemon(
+                        &provider_box_http,
+                        turn_body,
+                        timeout_secs,
+                        "JARVIS_GROUNDING_WORKER",
+                    )
+                    .await?;
+                    let turn_status = turn_value
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    if turn_status != "completed" {
+                        return Err(format!(
+                            "JARVIS_GROUNDING_WORKER_FAILED: provider-box status={turn_status}, diagnostics={}",
+                            turn_value
+                                .get("diagnostics")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!([]))
+                        ));
+                    }
+                    let report_text =
+                        tokio::fs::read_to_string(&report_file)
+                            .await
+                            .map_err(|err| {
+                                format!(
+                                    "JARVIS_GROUNDING_REPORT_MISSING: {} could not be read: {err}",
+                                    report_file.display()
+                                )
+                            })?;
+                    if report_text.trim().len() < 40 {
+                        return Err(format!(
+                            "JARVIS_GROUNDING_REPORT_EMPTY: {} was empty or too small",
+                            report_file.display()
+                        ));
+                    }
+                    let report_artifact = s
+                        .shared_memory
+                        .handle_action(&serde_json::json!({
+                            "action": "artifact_put",
+                            "kind": "interaction-grounding-report",
+                            "media_type": "text/markdown",
+                            "content": report_text,
+                            "metadata": {
+                                "schema": "missiond.interaction-grounding-report.v1",
+                                "grounding_context_id": grounding_context_id.clone(),
+                                "context_pack_path": context_pack_path.clone(),
+                                "context_pack_file": context_pack_file.clone(),
+                                "grounding_report_file": report_file.display().to_string(),
+                                "conversation_id": req.conversation_id.clone(),
+                                "chat_id": req.chat_id.clone(),
+                                "confirmed_intent_artifact_id": req.confirmed_intent_artifact_id.clone(),
+                                "grounding_worker_slot_id": turn_value.get("slot_id").cloned(),
+                                "grounding_worker_turn_id": turn_value.get("turn_id").cloned(),
+                                "provider_session_identity": turn_value.get("provider_session_identity").cloned()
+                            }
+                        }))
+                        .await
+                        .map_err(|err| format!("JARVIS_GROUNDING_REPORT_ARTIFACT_FAILED: {err}"))?;
+                    let grounding_report_hash = report_artifact
+                        .get("hash")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let grounding_report_artifact_path = grounding_report_hash
+                        .as_ref()
+                        .map(|hash| format!("shared-artifact://{hash}"));
+                    let grounding_report_file = Some(report_file.display().to_string());
+                    let grounding_worker_slot_id = turn_value
+                        .get("slot_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let grounding_worker_turn_id = turn_value
+                        .get("turn_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let context_sufficiency = Some("grounding_report_written".to_string());
+                    let mut diagnostics = serde_json::json!({
+                        "context_gather": diagnostics,
+                        "grounding_worker": {
+                            "status": turn_status,
+                            "turn_id": turn_value.get("turn_id"),
+                            "slot_id": turn_value.get("slot_id"),
+                            "durable_source": turn_value.get("durable_source"),
+                            "final_text": turn_value.get("final_text"),
+                            "diagnostics": turn_value.get("diagnostics")
+                        },
+                        "report_artifact": report_artifact
+                    });
+                    if let Some(object) = diagnostics.as_object_mut() {
+                        object.insert(
+                            "grounding_report_file".to_string(),
+                            serde_json::Value::String(
+                                grounding_report_file.clone().unwrap_or_default(),
+                            ),
+                        );
+                    }
                     Ok(missiond_core::JarvisGroundingResult {
                         grounding_context_id,
                         context_pack_path,
                         context_pack_file,
+                        grounding_report_file,
+                        grounding_report_artifact_path,
+                        grounding_report_hash,
+                        grounding_worker_slot_id,
+                        grounding_worker_turn_id,
+                        context_sufficiency,
                         artifact_hash,
                         context_capsule_hash,
                         context_capsule_file,
@@ -1646,7 +1935,8 @@ async fn main() -> Result<()> {
                         diagnostics,
                     })
                 })
-            });
+            },
+        );
         *jarvis_grounding_slot.write().await = Some(grounder);
 
         let state_for_artifact = state.clone();

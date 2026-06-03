@@ -249,6 +249,34 @@ impl ClaudeCodeProviderDriver {
             .to_string()
     }
 
+    fn request_requires_mcp(request: &ProviderInteractionRequest) -> bool {
+        !request.no_mcp
+            && (bool_any(
+                request.tool_policy.as_ref(),
+                &["require_mcp", "require_mcp_server"],
+            ) || request.tool_policy.as_ref().is_some_and(|policy| {
+                policy.get("mcp_server").is_some() || policy.get("server").is_some()
+            }) || request.desired_worker.as_ref().is_some_and(|worker| {
+                worker.get("mcp_server").is_some() || worker.get("server").is_some()
+            }))
+    }
+
+    fn request_provider_session_id(request: &ProviderInteractionRequest) -> Option<String> {
+        request
+            .desired_worker
+            .as_ref()
+            .and_then(|worker| {
+                worker
+                    .get("provider_session_id")
+                    .or_else(|| worker.get("session_id"))
+                    .or_else(|| worker.get("claude_session_id"))
+                    .and_then(Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
     fn request_launch_model(request: &ProviderInteractionRequest) -> Option<String> {
         request.model.as_deref().map(|model| {
             normalize_claude_code_model_target(model)
@@ -586,6 +614,7 @@ impl ClaudeCodeProviderDriver {
             extra_env,
             initial_prompt: None,
             command_override: None,
+            provider_session_id: Self::request_provider_session_id(request),
             ..Default::default()
         };
 
@@ -1869,6 +1898,375 @@ impl ClaudeCodeProviderDriver {
         }
     }
 
+    fn validate_prompt_turn(
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+    ) -> bool {
+        if request
+            .prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode provider-box prompt turn requires a non-empty prompt",
+                json!({
+                    "slot_id": request.slot_id,
+                    "command": request.command,
+                }),
+            ));
+            return false;
+        }
+        if Self::request_provider_session_id(request).is_none() {
+            result.status = ProviderBoxStatus::Failed;
+            result.add_diagnostic(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_INVALID_REQUEST,
+                "ClaudeCode provider-box prompt turn requires desired_worker.provider_session_id for durable JSONL final extraction",
+                json!({
+                    "slot_id": request.slot_id,
+                    "command": request.command,
+                    "rule": "callers that submit ClaudeCode prompt turns must allocate a request-scoped session id and pass it through desired_worker.provider_session_id"
+                }),
+            ));
+            return false;
+        }
+        true
+    }
+
+    async fn ensure_ready_for_prompt_turn(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        timeout: Duration,
+    ) -> bool {
+        let started = Instant::now();
+        loop {
+            let mut observation = self.observe(slot_id).await;
+            for _ in 0..2 {
+                if !is_claude_code_mcp_surface(&observation) {
+                    break;
+                }
+                observation = self
+                    .write_step(
+                        result,
+                        slot_id,
+                        PtyStepAction::key("escape"),
+                        "\x1b",
+                        Some("close ClaudeCode MCP page before prompt submission".to_string()),
+                    )
+                    .await;
+            }
+            if is_claude_code_workspace_trust_prompt(&observation) {
+                observation = match self
+                    .accept_workspace_trust_locked(result, slot_id, observation)
+                    .await
+                {
+                    Some(observation) => observation,
+                    None => return false,
+                };
+            }
+
+            if is_ready_for_claude_code_text(&observation) {
+                if let Some(text) = claude_code_composer_text(&observation) {
+                    if !text.trim().is_empty() {
+                        result.status = ProviderBoxStatus::Blocked;
+                        result.add_diagnostic(ProviderBoxDiagnostic::error(
+                            DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                            "ClaudeCode composer is not empty; refusing to append a provider-box prompt turn",
+                            json!({
+                                "slot_id": slot_id,
+                                "composer_text_preview": text.chars().take(120).collect::<String>(),
+                                "safe_alternative": "clear the composer through a taught provider-box control before submitting a prompt turn"
+                            }),
+                        ));
+                        let status = self.pty.get_status(slot_id).await;
+                        result.slot_status =
+                            Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            if observation.snapshot.state == PtyCanonicalState::Blocked {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "ClaudeCode prompt turn slot is blocked before submission",
+                    json!({
+                        "slot_id": slot_id,
+                        "reason": observation.snapshot.reason,
+                        "blocked_kind": observation.snapshot.blocked_kind,
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return false;
+            }
+
+            if started.elapsed() >= timeout {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "ClaudeCode prompt turn slot did not reach an idle composer before timeout",
+                    json!({
+                        "slot_id": slot_id,
+                        "reason": observation.snapshot.reason,
+                        "state": observation.snapshot.state,
+                        "blocked_kind": observation.snapshot.blocked_kind,
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return false;
+            }
+
+            tokio::time::sleep(Duration::from_millis(350)).await;
+        }
+    }
+
+    async fn ensure_mcp_ready_for_prompt_turn(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+    ) -> bool {
+        let target = Self::request_mcp_server(request);
+        self.refresh_mcp_status_locked(request, result, slot_id)
+            .await;
+        let connected = result
+            .mcp_status
+            .as_ref()
+            .and_then(|status| status.get("target_connected"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if connected {
+            return true;
+        }
+
+        self.reconnect_mcp_locked(request, result, slot_id).await;
+        let connected = result
+            .mcp_status
+            .as_ref()
+            .and_then(|status| status.get("target_connected"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if connected {
+            true
+        } else {
+            if !matches!(
+                result.status,
+                ProviderBoxStatus::Failed
+                    | ProviderBoxStatus::Blocked
+                    | ProviderBoxStatus::Unverified
+            ) {
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE,
+                    "ClaudeCode required MCP server was not connected before prompt submission",
+                    json!({
+                        "slot_id": slot_id,
+                        "target_server": target,
+                        "mcp_status": result.mcp_status,
+                    }),
+                ));
+            }
+            false
+        }
+    }
+
+    async fn submit_prompt_step(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        prompt: &str,
+    ) -> bool {
+        let before = self.observe(slot_id).await;
+        let send_result = self.pty.send_fire_and_forget(slot_id, prompt).await;
+        let after = self.observe_after_action(slot_id).await;
+        let mut action = PtyStepAction::text("<claude-code prompt paste + enter>");
+        action.redacted = true;
+        let status = if send_result.is_err() {
+            PtyStepVerificationStatus::Failed
+        } else if after.snapshot.state == PtyCanonicalState::Running
+            || Self::observations_changed(&before, &after)
+        {
+            PtyStepVerificationStatus::Verified
+        } else {
+            PtyStepVerificationStatus::Ambiguous
+        };
+        let mut step = PtyStepRecord::new(
+            Self::pty_observation(slot_id, &before),
+            action,
+            Self::pty_observation(slot_id, &after),
+            Some("ClaudeCode accepts prompt and starts a provider turn".to_string()),
+            status,
+        );
+        if let Err(err) = send_result {
+            step.diagnostics.push(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                "ClaudeCode provider-box prompt submission failed",
+                json!({
+                    "slot_id": slot_id,
+                    "error": err.to_string(),
+                }),
+            ));
+        }
+        let ok = step.verification_status != PtyStepVerificationStatus::Failed;
+        result.record_step(step);
+        ok
+    }
+
+    async fn monitor_prompt_turn(
+        &self,
+        request: &ProviderInteractionRequest,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        session_id: &str,
+        cursor: ClaudeCodeJsonlCursor,
+    ) -> ProviderBoxResult {
+        let timeout_secs = request.timeout_secs.unwrap_or(300).clamp(10, 7_200);
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let mut idle_seen_at: Option<Instant> = None;
+
+        loop {
+            let analysis =
+                analyze_claude_code_jsonl_after_cursor(&self.claude_home, session_id, &cursor);
+            if let Some(upstream_error) = analysis.upstream_error {
+                let status = upstream_error
+                    .pointer("/error/status")
+                    .or_else(|| upstream_error.get("status"))
+                    .and_then(Value::as_i64);
+                let formatted = upstream_error
+                    .pointer("/error/formatted")
+                    .or_else(|| upstream_error.get("formatted"))
+                    .and_then(Value::as_str);
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_UPSTREAM_UNAVAILABLE,
+                    "ClaudeCode upstream provider returned an API error before durable final",
+                    json!({
+                        "provider": request.provider.clone().unwrap_or_else(|| "claude_code".to_string()),
+                        "slot_id": slot_id,
+                        "session_id": session_id,
+                        "status": status,
+                        "formatted": formatted,
+                        "event": upstream_error,
+                        "line_count": analysis.line_count,
+                        "rule": "provider-box fails closed on ClaudeCode API errors and does not synthesize a final from PTY screen text"
+                    }),
+                ));
+                return result.clone();
+            }
+
+            if let Some(final_text) = analysis
+                .final_text
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                let durable_source = analysis
+                    .jsonl_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "claude_code_session_jsonl".to_string());
+                let status = self.pty.get_status(slot_id).await;
+                let observation = self.observe(slot_id).await;
+                result.status = ProviderBoxStatus::Completed;
+                result.provider = request
+                    .provider
+                    .clone()
+                    .or_else(|| Some("claude_code".to_string()));
+                result.model = request.model.clone();
+                result.model_profile = request.model_profile.clone();
+                result.provider_conversation_id = Some(session_id.to_string());
+                result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                    result.provider.clone(),
+                    CliEngine::ClaudeCode,
+                    Some(slot_id.to_string()),
+                    session_id.to_string(),
+                    "claude_code_session_jsonl",
+                    Some(durable_source.clone()),
+                    request.cwd.clone().or_else(|| request.project_root.clone()),
+                    "durable_final",
+                ));
+                result.durable_source = Some(durable_source.clone());
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                result.final_text = Some(final_text.to_string());
+                return result.clone();
+            }
+
+            let observation = self.observe(slot_id).await;
+            if observation.snapshot.state == PtyCanonicalState::Blocked {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+                    "ClaudeCode provider-box turn entered a blocked provider surface",
+                    json!({
+                        "slot_id": slot_id,
+                        "reason": observation.snapshot.reason,
+                        "blocked_kind": observation.snapshot.blocked_kind,
+                        "screen_excerpt": bounded_text_excerpt(&observation.text, 1200),
+                    }),
+                ));
+                let status = self.pty.get_status(slot_id).await;
+                result.slot_status =
+                    Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                return result.clone();
+            }
+
+            if matches!(
+                observation.snapshot.state,
+                PtyCanonicalState::Idle | PtyCanonicalState::Complete
+            ) {
+                if let Some(seen_at) = idle_seen_at {
+                    if seen_at.elapsed() >= Duration::from_secs(4) {
+                        result.status = ProviderBoxStatus::Failed;
+                        result.add_diagnostic(ProviderBoxDiagnostic::error(
+                            DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                            "ClaudeCode returned to input but no durable assistant end_turn final was found",
+                            json!({
+                                "slot_id": slot_id,
+                                "session_id": session_id,
+                                "line_count": analysis.line_count,
+                                "rule": "PTY screen text is diagnostic only; no fallback final was synthesized"
+                            }),
+                        ));
+                        return result.clone();
+                    }
+                } else {
+                    idle_seen_at = Some(Instant::now());
+                }
+            } else {
+                idle_seen_at = None;
+            }
+
+            if Instant::now() >= deadline {
+                let _ = self.pty.write(slot_id, "\x1b").await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                result.status = ProviderBoxStatus::Failed;
+                result.add_diagnostic(ProviderBoxDiagnostic::error(
+                    DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                    "ClaudeCode provider-box turn timed out before durable final appeared",
+                    json!({
+                        "slot_id": slot_id,
+                        "session_id": session_id,
+                        "timeout_secs": timeout_secs,
+                    }),
+                ));
+                return result.clone();
+            }
+
+            tokio::time::sleep(Duration::from_millis(750)).await;
+        }
+    }
+
     async fn submit_text_only_prompt(
         &self,
         result: &mut ProviderBoxResult,
@@ -2245,6 +2643,44 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
         claude_code_provider_capabilities()
     }
 
+    async fn submit_turn(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
+        let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
+        if !Self::validate_prompt_turn(request, &mut result) {
+            return result;
+        }
+        let Some(session_id) = Self::request_provider_session_id(request) else {
+            return result;
+        };
+        let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
+            return result;
+        };
+        result.slot_id = Some(slot_id.clone());
+        let lock = self.slot_lock(&slot_id).await;
+        let _guard = lock.lock().await;
+
+        if Self::request_requires_mcp(request)
+            && !self
+                .ensure_mcp_ready_for_prompt_turn(request, &mut result, &slot_id)
+                .await
+        {
+            return result;
+        }
+        if !self
+            .ensure_ready_for_prompt_turn(&mut result, &slot_id, Duration::from_secs(90))
+            .await
+        {
+            return result;
+        }
+        let cursor = claude_code_jsonl_cursor_for_session(&self.claude_home, &session_id);
+        let prompt = request.prompt.as_deref().unwrap_or_default();
+        if !self.submit_prompt_step(&mut result, &slot_id, prompt).await {
+            result.status = ProviderBoxStatus::Failed;
+            return result;
+        }
+        self.monitor_prompt_turn(request, &mut result, &slot_id, &session_id, cursor)
+            .await
+    }
+
     async fn status(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
         let mut result = ProviderBoxResult::base(request, ProviderBoxStatus::Unknown);
         let Some(slot_id) = self.ensure_slot(request, &mut result).await else {
@@ -2531,7 +2967,7 @@ impl ProviderDriver for ClaudeCodeProviderDriver {
 
 fn claude_code_provider_capabilities() -> ProviderDriverCapabilities {
     ProviderDriverCapabilities {
-        submit_turn: false,
+        submit_turn: true,
         switch_model: true,
         usage_probe: false,
         model_catalog: false,
@@ -3365,6 +3801,7 @@ mod tests {
     fn claude_code_driver_capabilities_expose_mcp_status_and_reconnect() {
         let caps = claude_code_provider_capabilities();
 
+        assert!(caps.submit_turn);
         assert!(caps.mcp_status);
         assert!(caps.mcp_reconnect);
         assert!(caps.status);

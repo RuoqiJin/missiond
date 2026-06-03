@@ -69,6 +69,18 @@ pub struct JarvisGroundingResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_pack_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub grounding_report_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grounding_report_artifact_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grounding_report_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grounding_worker_slot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grounding_worker_turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_sufficiency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_capsule_hash: Option<String>,
@@ -88,6 +100,10 @@ pub struct JarvisGroundingResult {
 #[serde(rename_all = "snake_case")]
 pub struct JarvisGroundingRequest {
     pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_intent_artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_intent_lisp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     pub chat_id: String,
@@ -660,6 +676,54 @@ fn interaction_metadata_string(envelope: &InteractionEnvelope, key: &str) -> Opt
                 .and_then(|confirm| confirm.get("confirm_payload"))
                 .and_then(|payload| string_at(payload, key))
         })
+}
+
+fn json_string_vec_at(value: &serde_json::Value, key: &str) -> Option<Vec<String>> {
+    value
+        .get(key)
+        .and_then(|field| field.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+}
+
+fn interaction_metadata_string_vec(envelope: &InteractionEnvelope, key: &str) -> Vec<String> {
+    json_string_vec_at(&envelope.metadata, key)
+        .or_else(|| {
+            envelope
+                .metadata
+                .get("missiond_confirm")
+                .and_then(|confirm| json_string_vec_at(confirm, key))
+        })
+        .or_else(|| {
+            envelope
+                .metadata
+                .get("missiond_confirm")
+                .and_then(|confirm| confirm.get("confirm_payload"))
+                .and_then(|payload| json_string_vec_at(payload, key))
+        })
+        .unwrap_or_default()
+}
+
+#[allow(dead_code)]
+fn jarvis_confirm_string_vec(req: &serde_json::Value, key: &str) -> Vec<String> {
+    json_string_vec_at(req, key)
+        .or_else(|| {
+            req.get("missiond_confirm")
+                .and_then(|confirm| json_string_vec_at(confirm, key))
+        })
+        .or_else(|| {
+            req.get("missiond_confirm")
+                .and_then(|confirm| confirm.get("confirm_payload"))
+                .and_then(|payload| json_string_vec_at(payload, key))
+        })
+        .unwrap_or_default()
 }
 
 fn extract_bearer_token(headers: &str) -> Option<String> {
@@ -2003,9 +2067,12 @@ impl PTYWebSocketServer {
         pty_manager: &PTYManager,
         default_slot: &str,
     ) -> serde_json::Value {
+        let abi_freshness = Self::compiled_abi_freshness_check();
+        let abi_freshness_ok =
+            abi_freshness.get("ok").and_then(|value| value.as_bool()) == Some(true);
         let session_running = pty_manager.is_running(default_slot).await;
         let status = pty_manager.get_status(default_slot).await;
-        let (readiness, reason, slot_state, recognition) = match status {
+        let (mut readiness, mut reason, slot_state, recognition) = match status {
             None => (
                 "slot_unavailable",
                 format!("Default slot {} is not registered.", default_slot),
@@ -2052,6 +2119,14 @@ impl PTYWebSocketServer {
                 }
             }
         };
+        if !abi_freshness_ok {
+            readiness = "abi_freshness_mismatch";
+            reason = abi_freshness
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("Compiled V3 contract ABI differs from the MissionD binary.")
+                .to_string();
+        }
 
         serde_json::json!({
             "status": readiness,
@@ -2060,6 +2135,7 @@ impl PTYWebSocketServer {
             "session_running": session_running,
             "reason": reason,
             "recognition": recognition,
+            "compiled_abi_freshness": abi_freshness,
             "auto_heal": {
                 "enabled": jarvis_slot_auto_heal_enabled(),
                 "trigger": "chat-request-or-local-ensure",
@@ -2112,6 +2188,22 @@ impl PTYWebSocketServer {
                 "auto_heal": {
                     "status": "skipped",
                     "reason": "busy slots are not restarted automatically"
+                },
+            }));
+        }
+        if status == "abi_freshness_mismatch" {
+            return Err(serde_json::json!({
+                "error": {
+                    "code": "ABI_FRESHNESS_MISMATCH",
+                    "message": readiness
+                        .get("reason")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("Compiled V3 contract ABI differs from the MissionD binary.")
+                },
+                "readiness": readiness,
+                "auto_heal": {
+                    "status": "skipped",
+                    "reason": "ABI freshness mismatch is a deployment artifact problem, not a PTY slot problem"
                 },
             }));
         }
@@ -2245,6 +2337,26 @@ impl PTYWebSocketServer {
             });
             return Self::send_http_error(&mut stream, 409, "Conflict", &body.to_string()).await;
         }
+        if before_status == "abi_freshness_mismatch" {
+            let body = serde_json::json!({
+                "schema": "missiond.jarvis-slot-ensure.v1",
+                "overall": "abi_freshness_mismatch",
+                "default_slot": default_slot,
+                "readiness_before": before,
+                "auto_heal": {
+                    "status": "skipped",
+                    "reason": "ABI freshness mismatch is a deployment artifact problem, not a PTY slot problem"
+                },
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            });
+            return Self::send_http_error(
+                &mut stream,
+                503,
+                "Service Unavailable",
+                &body.to_string(),
+            )
+            .await;
+        }
 
         let auto_heal = Self::maybe_auto_heal_jarvis_slot(&pty_manager, &default_slot).await;
         let after = Self::build_jarvis_readiness(&pty_manager, &default_slot).await;
@@ -2278,6 +2390,7 @@ impl PTYWebSocketServer {
             "id": id,
             "label": label,
             "ok": metadata.is_some(),
+            "critical": false,
             "status": if metadata.is_some() { "ok" } else { "missing" },
             "path": path,
             "size_bytes": metadata.as_ref().map(|m| m.len()),
@@ -2285,6 +2398,175 @@ impl PTYWebSocketServer {
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs()),
+        })
+    }
+
+    fn compiled_runtime_dir() -> std::path::PathBuf {
+        if let Ok(dir) = std::env::var("MISSIOND_COMPILED_RUNTIME_DIR") {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                return std::path::PathBuf::from(trimmed);
+            }
+        }
+        if let Ok(dir) = std::env::var("MISSIOND_RUNTIME_DIR") {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                return std::path::PathBuf::from(trimmed).join("compiled");
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let candidate = parent
+                    .join(".missiond")
+                    .join("v3")
+                    .join("runtime")
+                    .join("compiled");
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+        std::path::PathBuf::from(".missiond/v3/runtime/compiled")
+    }
+
+    fn compiled_abi_freshness_check() -> serde_json::Value {
+        Self::compiled_abi_freshness_check_in_dir(Self::compiled_runtime_dir())
+    }
+
+    fn compiled_abi_freshness_check_in_dir(
+        compiled_runtime_dir: impl AsRef<std::path::Path>,
+    ) -> serde_json::Value {
+        let compiled_runtime_dir = compiled_runtime_dir.as_ref();
+        let contract_abi = Self::compiled_runtime_json_freshness_check(
+            "compiled-contract-abi",
+            "Compiled V3 contract ABI",
+            compiled_runtime_dir.join("compiled-contract-abi.json"),
+            crate::v3_contracts::SCHEMA_VERSION,
+            crate::v3_contracts::SOURCE_HASH,
+        );
+        let runtime_config = Self::compiled_runtime_json_freshness_check(
+            "compiled-runtime-config",
+            "Compiled V3 runtime config",
+            compiled_runtime_dir.join("compiled-runtime-config.json"),
+            "missiond.compiled-runtime-config.v1",
+            crate::v3_contracts::SOURCE_HASH,
+        );
+        let artifacts = vec![contract_abi, runtime_config];
+        let ok = artifacts
+            .iter()
+            .all(|artifact| artifact.get("ok").and_then(|value| value.as_bool()) == Some(true));
+        let failed: Vec<String> = artifacts
+            .iter()
+            .filter(|artifact| artifact.get("ok").and_then(|value| value.as_bool()) != Some(true))
+            .filter_map(|artifact| {
+                let id = artifact.get("id").and_then(|value| value.as_str())?;
+                let status = artifact
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("failed");
+                Some(format!("{id}:{status}"))
+            })
+            .collect();
+        serde_json::json!({
+            "id": "compiled-abi-freshness",
+            "label": "Compiled V3 ABI freshness",
+            "ok": ok,
+            "critical": true,
+            "status": if ok { "ok" } else { "abi_freshness_mismatch" },
+            "reason": if ok {
+                "Compiled V3 contract ABI and runtime config match the MissionD binary."
+            } else {
+                "Compiled V3 contract ABI/runtime config differ from the MissionD binary; run node scripts/project-v3-contracts.mjs --write, node scripts/compile-v3-runtime.mjs --json, then redeploy MissionD."
+            },
+            "compiled_runtime_dir": compiled_runtime_dir,
+            "binary_contract_abi": {
+                "schema": crate::v3_contracts::SCHEMA_VERSION,
+                "source_hash": crate::v3_contracts::SOURCE_HASH,
+                "runtime_config_source_hash": crate::v3_contracts::RUNTIME_CONFIG_SOURCE_HASH,
+                "project_universe_source_hash": crate::v3_contracts::PROJECT_UNIVERSE_SOURCE_HASH,
+            },
+            "failed": failed,
+            "artifacts": artifacts,
+        })
+    }
+
+    fn compiled_runtime_json_freshness_check(
+        id: &str,
+        label: &str,
+        path: std::path::PathBuf,
+        expected_schema: &str,
+        expected_source_hash: &str,
+    ) -> serde_json::Value {
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                return serde_json::json!({
+                    "id": id,
+                    "label": label,
+                    "ok": false,
+                    "critical": true,
+                    "status": "missing_or_unreadable",
+                    "path": path,
+                    "expected_schema": expected_schema,
+                    "expected_source_hash": expected_source_hash,
+                    "diagnostic": "abi_freshness_mismatch",
+                    "reason": err.to_string(),
+                });
+            }
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                return serde_json::json!({
+                    "id": id,
+                    "label": label,
+                    "ok": false,
+                    "critical": true,
+                    "status": "invalid_json",
+                    "path": path,
+                    "expected_schema": expected_schema,
+                    "expected_source_hash": expected_source_hash,
+                    "diagnostic": "abi_freshness_mismatch",
+                    "reason": err.to_string(),
+                });
+            }
+        };
+        let actual_schema = parsed
+            .get("schema_version")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let actual_source_hash = parsed
+            .get("source_hash")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let diagnostics_count = parsed
+            .get("diagnostics")
+            .and_then(|value| value.as_array())
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+        let status = if actual_schema != expected_schema {
+            "schema_mismatch"
+        } else if actual_source_hash != expected_source_hash {
+            "source_hash_mismatch"
+        } else if diagnostics_count > 0 {
+            "compiled_diagnostics_present"
+        } else {
+            "ok"
+        };
+        let ok = status == "ok";
+        serde_json::json!({
+            "id": id,
+            "label": label,
+            "ok": ok,
+            "critical": true,
+            "status": status,
+            "path": path,
+            "expected_schema": expected_schema,
+            "actual_schema": actual_schema,
+            "expected_source_hash": expected_source_hash,
+            "actual_source_hash": actual_source_hash,
+            "diagnostics_count": diagnostics_count,
+            "diagnostic": if ok { "none" } else { "abi_freshness_mismatch" },
         })
     }
 
@@ -2334,20 +2616,10 @@ impl PTYWebSocketServer {
         let mcp_binary = std::env::var("MISSIOND_MCP_BIN_PATH")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| home.join("mission-mcp"));
-        let compiled_runtime = std::env::var("MISSIOND_COMPILED_RUNTIME_DIR")
-            .map(|dir| std::path::PathBuf::from(dir).join("compiled-runtime-config.json"))
-            .or_else(|_| {
-                std::env::var("MISSIOND_RUNTIME_DIR").map(|dir| {
-                    std::path::PathBuf::from(dir)
-                        .join("compiled")
-                        .join("compiled-runtime-config.json")
-                })
-            })
-            .unwrap_or_else(|_| {
-                std::path::PathBuf::from(
-                    ".missiond/v3/runtime/compiled/compiled-runtime-config.json",
-                )
-            });
+        let compiled_runtime_dir = Self::compiled_runtime_dir();
+        let compiled_runtime = compiled_runtime_dir.join("compiled-runtime-config.json");
+        let compiled_abi_freshness =
+            Self::compiled_abi_freshness_check_in_dir(&compiled_runtime_dir);
         let slot_log = default_slot_status
             .as_ref()
             .map(|info| info.log_file.clone())
@@ -2401,6 +2673,7 @@ impl PTYWebSocketServer {
             }),
             Self::file_check("mission-mcp-binary", "MissionD MCP binary", mcp_binary),
             slot_log_check,
+            compiled_abi_freshness,
             Self::file_check(
                 "compiled-runtime-config",
                 "Compiled V3 runtime config",
@@ -2408,11 +2681,18 @@ impl PTYWebSocketServer {
             ),
         ];
 
+        let critical_failures = checks
+            .iter()
+            .filter(|check| check.get("ok").and_then(|v| v.as_bool()) == Some(false))
+            .filter(|check| check.get("critical").and_then(|v| v.as_bool()) == Some(true))
+            .count();
         let non_critical_failures = checks
             .iter()
             .filter(|check| check.get("ok").and_then(|v| v.as_bool()) == Some(false))
+            .filter(|check| check.get("critical").and_then(|v| v.as_bool()) != Some(true))
             .count();
         let overall = match readiness_status {
+            _ if critical_failures > 0 => "abi_freshness_mismatch",
             "ready" if non_critical_failures == 0 => "ready",
             "ready" => "degraded",
             "busy" => "busy",
@@ -2425,6 +2705,9 @@ impl PTYWebSocketServer {
             "degraded" => "check failed non-critical monitor rows before the next deploy",
             "busy" => "wait for default slot completion or choose another slot",
             "stale_slot" => "respawn default slot; MissionD spawn now cleans stale PTY sessions",
+            "abi_freshness_mismatch" => {
+                "run node scripts/project-v3-contracts.mjs --write, node scripts/compile-v3-runtime.mjs --json, then redeploy MissionD"
+            }
             "unavailable" => {
                 "start the default Jarvis slot or inspect provider credentials/billing"
             }
@@ -2914,61 +3197,158 @@ impl PTYWebSocketServer {
         } else {
             raw_user_text.clone()
         };
-        Self::write_jarvis_progress(
-            &mut stream,
-            &jarvis_progress_bus,
-            &chat_id,
-            Some(&interaction_id),
-            "grounding",
-            "context_gather_start",
-            "running",
-            "正在收集上下文、权限和项目证据，准备生成可确认的 Lisp 草案。",
-            None,
-            None,
-            None,
-        )
-        .await?;
-        let grounding = match Self::gather_jarvis_grounding(
-            &jarvis_grounding,
-            JarvisGroundingRequest {
-                query: objective_text.clone(),
-                conversation_id: jarvis_conv_id.clone(),
-                chat_id: chat_id.clone(),
-                user_id: conversation_scope.user_id.clone(),
-                tenant_id: conversation_scope.tenant_id.clone(),
-                application_id: conversation_scope.application_id.clone(),
-                channel: Some(conversation_scope.channel.clone()),
-                topic_id: conversation_scope.topic_id.clone(),
-                topic_label: conversation_scope.topic_label.clone(),
-                permission_context: permission_context.clone(),
-                unknowns: vec![
-                    format!("What does this {channel} channel user intend MissionD to do?"),
-                    "Which project registry, SSOT, skill, infra, or tool facts are required before planning?".to_string(),
-                    "What permissions and capabilities should this channel identity have?".to_string(),
-                ],
-            },
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => {
-                Self::fail_jarvis_gate_visible(
-                    &mut stream,
-                    &jarvis_progress_bus,
-                    &chat_id,
-                    Some(&interaction_id),
-                    error,
-                    "grounding",
-                    db.as_ref(),
-                    jarvis_conv_id.as_deref(),
-                )
-                .await?;
-                return Ok(());
+
+        let confirmed_intent_artifact_id = if intent_confirmed {
+            match interaction_metadata_string(&envelope, "missiond_intent_artifact_id") {
+                Some(value) => Some(value),
+                None => {
+                    Self::fail_jarvis_gate_visible(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
+                        "Jarvis intent confirmation requires missiond_intent_artifact_id from the previous intent payload; refusing to collect grounding without a confirmed intent.lisp.".to_string(),
+                        "confirmation_intent_artifact",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
             }
+        } else {
+            None
+        };
+        let confirmed_plan_artifact_id = if plan_confirmed {
+            match interaction_metadata_string(&envelope, "missiond_plan_artifact_id") {
+                Some(value) => Some(value),
+                None => {
+                    Self::fail_jarvis_gate_visible(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
+                        "Jarvis plan confirmation requires missiond_plan_artifact_id from the previous plan payload; refusing to execute without a confirmed plan.lisp.".to_string(),
+                        "confirmation_plan_artifact",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
+        let grounding_was_collected = intent_confirmed && !plan_confirmed;
+        let grounding = if plan_confirmed {
+            match Self::jarvis_grounding_from_interaction_metadata(&envelope, &conversation_scope) {
+                Ok(result) => result,
+                Err(error) => {
+                    Self::fail_jarvis_gate_visible(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
+                        error,
+                        "confirmation_grounding",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        } else if intent_confirmed {
+            Self::write_jarvis_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                "grounding",
+                "context_gather_start",
+                "running",
+                "intent.lisp 已确认，正在调用挂载 MissionD MCP 的 ClaudeCode 工位收集上下游全链上下文。",
+                None,
+                None,
+                Some("claude-code-mcp-grounding"),
+            )
+            .await?;
+            let result = match Self::gather_jarvis_grounding(
+                &jarvis_grounding,
+                JarvisGroundingRequest {
+                    query: objective_text.clone(),
+                    confirmed_intent_artifact_id: confirmed_intent_artifact_id.clone(),
+                    confirmed_intent_lisp: interaction_metadata_string(
+                        &envelope,
+                        "missiond_intent_artifact_body",
+                    ),
+                    conversation_id: jarvis_conv_id.clone(),
+                    chat_id: chat_id.clone(),
+                    user_id: conversation_scope.user_id.clone(),
+                    tenant_id: conversation_scope.tenant_id.clone(),
+                    application_id: conversation_scope.application_id.clone(),
+                    channel: Some(conversation_scope.channel.clone()),
+                    topic_id: conversation_scope.topic_id.clone(),
+                    topic_label: conversation_scope.topic_label.clone(),
+                    permission_context: permission_context.clone(),
+                    unknowns: vec![
+                        "Collect MissionD upstream/downstream facts that affect this confirmed intent.".to_string(),
+                        "Identify project registry, SSOT, runtime, skill, provider, infra, and permission evidence needed before plan.lisp.".to_string(),
+                        "Write the grounded evidence report for the plan author instead of creating BoardTask or implementing changes.".to_string(),
+                    ],
+                },
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    Self::fail_jarvis_gate_visible(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
+                        error,
+                        "grounding",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            Self::write_jarvis_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                "grounding",
+                "context_gather_completed",
+                "completed",
+                &format!(
+                    "grounding 已完成，context={}，下一步进入 plan gate。",
+                    result.grounding_context_id
+                ),
+                None,
+                result.grounding_worker_slot_id.as_deref(),
+                Some("claude-code-mcp-grounding"),
+            )
+            .await?;
+            result
+        } else {
+            Self::jarvis_pending_grounding_result(&conversation_scope)
         };
         let grounding_context_id = grounding.grounding_context_id.clone();
         let context_pack_path = grounding.context_pack_path.clone();
         let context_pack_file = grounding.context_pack_file.clone();
+        let grounding_report_file = grounding.grounding_report_file.clone();
+        let grounding_report_artifact_path = grounding.grounding_report_artifact_path.clone();
+        let grounding_report_hash = grounding.grounding_report_hash.clone();
+        let grounding_worker_slot_id = grounding.grounding_worker_slot_id.clone();
+        let grounding_worker_turn_id = grounding.grounding_worker_turn_id.clone();
+        let context_sufficiency = grounding.context_sufficiency.clone();
+        let grounding_artifact_hash = grounding.artifact_hash.clone();
         let context_capsule_hash = grounding.context_capsule_hash.clone();
         let context_capsule_file = grounding.context_capsule_file.clone();
         let resolved_topic_id = grounding
@@ -2980,6 +3360,7 @@ impl PTYWebSocketServer {
             .clone()
             .or_else(|| conversation_scope.topic_label.clone());
         let sources_used = grounding.sources_used.clone();
+        let grounding_diagnostics = grounding.diagnostics.clone();
         if let (Some(ref db), Some(ref cid), Some(ref capsule_hash)) =
             (&db, &jarvis_conv_id, &context_capsule_hash)
         {
@@ -2992,61 +3373,37 @@ impl PTYWebSocketServer {
                 )
                 .await;
         }
-        Self::write_sse_event(
-            &mut stream,
-            "grounding",
-            &serde_json::json!({
+        if grounding_was_collected {
+            let grounding_ledger_event = serde_json::json!({
                 "interaction_id": interaction_id,
                 "phase": "grounding",
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
+                "grounding_report_file": grounding_report_file,
+                "grounding_report_artifact_path": grounding_report_artifact_path,
+                "grounding_report_hash": grounding_report_hash,
+                "grounding_worker_slot_id": grounding_worker_slot_id,
+                "grounding_worker_turn_id": grounding_worker_turn_id,
+                "context_sufficiency": context_sufficiency,
+                "artifact_hash": grounding_artifact_hash,
                 "context_capsule_hash": context_capsule_hash,
                 "context_capsule_file": context_capsule_file,
                 "topic_id": resolved_topic_id,
                 "topic_label": resolved_topic_label,
                 "sources_used": sources_used,
-                "diagnostics": grounding.diagnostics,
-            }),
-        )
-        .await?;
-        let grounding_ledger_event = serde_json::json!({
-            "interaction_id": interaction_id,
-            "phase": "grounding",
-            "grounding_context_id": grounding_context_id,
-            "context_pack_path": context_pack_path,
-            "context_pack_file": context_pack_file,
-            "context_capsule_hash": context_capsule_hash,
-            "context_capsule_file": context_capsule_file,
-            "topic_id": resolved_topic_id,
-            "topic_label": resolved_topic_label,
-            "sources_used": sources_used,
-            "diagnostics": grounding.diagnostics,
-        });
-        Self::persist_interaction_event(
-            db.as_ref(),
-            jarvis_conv_id.as_deref(),
-            Some(&interaction_id),
-            "grounding",
-            &grounding_ledger_event,
-        )
-        .await;
-        Self::write_jarvis_progress(
-            &mut stream,
-            &jarvis_progress_bus,
-            &chat_id,
-            Some(&interaction_id),
-            "grounding",
-            "context_gather_completed",
-            "completed",
-            &format!(
-                "grounding 已完成，context={grounding_context_id}，下一步进入 intent/plan gate。"
-            ),
-            None,
-            None,
-            None,
-        )
-        .await?;
+                "diagnostics": grounding_diagnostics,
+            });
+            Self::write_sse_event(&mut stream, "grounding", &grounding_ledger_event).await?;
+            Self::persist_interaction_event(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                Some(&interaction_id),
+                "grounding",
+                &grounding_ledger_event,
+            )
+            .await;
+        }
 
         let intent_artifact_id = if !intent_confirmed {
             let authored_intent = match Self::author_jarvis_intent_draft_with_progress(
@@ -3101,8 +3458,13 @@ impl PTYWebSocketServer {
                 "intent_kind": authored_intent.intent_kind,
                 "confidence": authored_intent.confidence,
                 "grounding_context_id": grounding_context_id,
+                "grounding_status": "pending_intent_confirmation",
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
+                "grounding_report_file": grounding_report_file,
+                "grounding_report_artifact_path": grounding_report_artifact_path,
+                "grounding_report_hash": grounding_report_hash,
+                "context_sufficiency": context_sufficiency,
                 "context_capsule_hash": context_capsule_hash,
                 "context_capsule_file": context_capsule_file,
                 "topic_id": resolved_topic_id,
@@ -3255,23 +3617,7 @@ impl PTYWebSocketServer {
             Self::finish_sse(&mut stream).await?;
             return Ok(());
         } else {
-            match interaction_metadata_string(&envelope, "missiond_intent_artifact_id") {
-                Some(value) => value,
-                None => {
-                    Self::fail_jarvis_gate_visible(
-                        &mut stream,
-                        &jarvis_progress_bus,
-                        &chat_id,
-                        Some(&interaction_id),
-                        "Jarvis intent confirmation requires missiond_intent_artifact_id from the previous intent payload; refusing to regenerate intent.lisp during confirmation.".to_string(),
-                        "confirmation_intent_artifact",
-                        db.as_ref(),
-                        jarvis_conv_id.as_deref(),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            }
+            confirmed_intent_artifact_id.clone().unwrap_or_default()
         };
 
         if intent_confirmed && !plan_confirmed {
@@ -3300,6 +3646,14 @@ impl PTYWebSocketServer {
                 resolved_topic_label.as_deref(),
                 &sources_used,
                 Some(&permission_context),
+                context_pack_path.as_deref(),
+                context_pack_file.as_deref(),
+                grounding_report_file.as_deref(),
+                grounding_report_artifact_path.as_deref(),
+                grounding_report_hash.as_deref(),
+                grounding_worker_slot_id.as_deref(),
+                grounding_worker_turn_id.as_deref(),
+                context_sufficiency.as_deref(),
             )
             .await
             {
@@ -3341,6 +3695,13 @@ impl PTYWebSocketServer {
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
+                "grounding_report_file": grounding_report_file,
+                "grounding_report_artifact_path": grounding_report_artifact_path,
+                "grounding_report_hash": grounding_report_hash,
+                "grounding_worker_slot_id": grounding_worker_slot_id,
+                "grounding_worker_turn_id": grounding_worker_turn_id,
+                "context_sufficiency": context_sufficiency,
+                "grounding_artifact_hash": grounding_artifact_hash,
                 "context_capsule_hash": context_capsule_hash,
                 "context_capsule_file": context_capsule_file,
                 "topic_id": resolved_topic_id,
@@ -3467,6 +3828,20 @@ impl PTYWebSocketServer {
                     "missiond_plan_confirmed": true,
                     "missiond_objective": plan_objective_text,
                     "missiond_grounding_context_id": grounding_context_id,
+                    "missiond_context_pack_path": context_pack_path,
+                    "missiond_context_pack_file": context_pack_file,
+                    "missiond_grounding_report_file": grounding_report_file,
+                    "missiond_grounding_report_artifact_path": grounding_report_artifact_path,
+                    "missiond_grounding_report_hash": grounding_report_hash,
+                    "missiond_grounding_worker_slot_id": grounding_worker_slot_id,
+                    "missiond_grounding_worker_turn_id": grounding_worker_turn_id,
+                    "missiond_context_sufficiency": context_sufficiency,
+                    "missiond_grounding_artifact_hash": grounding_artifact_hash,
+                    "missiond_context_capsule_hash": context_capsule_hash,
+                    "missiond_context_capsule_file": context_capsule_file,
+                    "missiond_topic_id": resolved_topic_id,
+                    "missiond_topic_label": resolved_topic_label,
+                    "missiond_sources_used": sources_used,
                     "missiond_intent_artifact_id": intent_artifact_id,
                     "missiond_plan_artifact_id": plan_artifact_id,
                     "missiond_execution_mode": plan
@@ -3506,23 +3881,7 @@ impl PTYWebSocketServer {
             Self::finish_sse(&mut stream).await?;
             return Ok(());
         } else {
-            match interaction_metadata_string(&envelope, "missiond_plan_artifact_id") {
-                Some(value) => value,
-                None => {
-                    Self::fail_jarvis_gate_visible(
-                        &mut stream,
-                        &jarvis_progress_bus,
-                        &chat_id,
-                        Some(&interaction_id),
-                        "Jarvis plan confirmation requires missiond_plan_artifact_id from the previous plan payload; refusing to regenerate plan.lisp during confirmation.".to_string(),
-                        "confirmation_plan_artifact",
-                        db.as_ref(),
-                        jarvis_conv_id.as_deref(),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            }
+            confirmed_plan_artifact_id.clone().unwrap_or_default()
         };
 
         let execution_mode = interaction_metadata_string(&envelope, "missiond_execution_mode")
@@ -3559,6 +3918,9 @@ impl PTYWebSocketServer {
                 &grounding_context_id,
                 context_pack_path.as_deref(),
                 context_pack_file.as_deref(),
+                grounding_report_file.as_deref(),
+                grounding_report_artifact_path.as_deref(),
+                grounding_report_hash.as_deref(),
                 &intent_artifact_id,
                 &plan_artifact_id,
                 &permission_context,
@@ -3635,6 +3997,9 @@ impl PTYWebSocketServer {
             &grounding_context_id,
             context_pack_path.as_deref(),
             context_pack_file.as_deref(),
+            grounding_report_file.as_deref(),
+            grounding_report_artifact_path.as_deref(),
+            grounding_report_hash.as_deref(),
             &intent_artifact_id,
             &plan_artifact_id,
             &Self::jarvis_runtime_read_scope_root(),
@@ -3648,6 +4013,12 @@ impl PTYWebSocketServer {
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
+            "grounding_report_file": grounding_report_file,
+            "grounding_report_artifact_path": grounding_report_artifact_path,
+            "grounding_report_hash": grounding_report_hash,
+            "grounding_worker_slot_id": grounding_worker_slot_id,
+            "grounding_worker_turn_id": grounding_worker_turn_id,
+            "context_sufficiency": context_sufficiency,
             "context_capsule_hash": context_capsule_hash,
             "context_capsule_file": context_capsule_file,
             "topic_id": resolved_topic_id,
@@ -4999,6 +5370,15 @@ JSON 字段必须是：\n\
         topic_label: Option<&str>,
         sources_used: &[String],
         permission_context: Option<&serde_json::Value>,
+        context_pack_path: Option<&str>,
+        context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
+        grounding_report_artifact_path: Option<&str>,
+        grounding_report_hash: Option<&str>,
+        grounding_worker_slot_id: Option<&str>,
+        grounding_worker_turn_id: Option<&str>,
+        context_sufficiency: Option<&str>,
+        grounding_report_preview: Option<&str>,
     ) -> String {
         let provider = Self::jarvis_author_text_provider();
         let engine = Self::provider_box_engine_for_provider(provider.as_str()).unwrap_or("codex");
@@ -5014,6 +5394,15 @@ JSON 字段必须是：\n\
             "topic_label": topic_label,
             "sources_used": sources_used,
             "permission_context": permission_context.cloned().unwrap_or(serde_json::Value::Null),
+            "context_pack_path": context_pack_path,
+            "context_pack_file": context_pack_file,
+            "grounding_report_file": grounding_report_file,
+            "grounding_report_artifact_path": grounding_report_artifact_path,
+            "grounding_report_hash": grounding_report_hash,
+            "grounding_worker_slot_id": grounding_worker_slot_id,
+            "grounding_worker_turn_id": grounding_worker_turn_id,
+            "context_sufficiency": context_sufficiency,
+            "grounding_report_preview": grounding_report_preview,
             "authoring_lane": {
                 "provider": provider,
                 "engine": engine,
@@ -5026,8 +5415,9 @@ JSON 字段必须是：\n\
         });
         format!(
             "你是 MissionD 的 Jarvis plan.lisp 语义作者，运行在 provider_box 管理的纯文本语义作者工位。\n\
-任务：基于已确认的 intent.lisp 目标，生成可供用户确认的 plan draft。不要创建 BoardTask、不要派工位、不要执行实现、不要改文件。\n\
-计划必须声明用户确认 plan 后的 execution_mode。现阶段即使是聊天/问答也必须先经过 intent.lisp 和 plan.lisp，但简单问答应选择 grounded_direct_answer，不应污染 BoardTask。\n\
+任务：基于已确认的 intent.lisp 目标，以及 ClaudeCode + MissionD MCP grounding worker 写入的 Markdown 报告，生成可供用户确认的 plan draft。不要创建 BoardTask、不要派工位、不要执行实现、不要改文件。\n\
+计划必须声明用户确认 plan 后的 execution_mode。现阶段即使是聊天/问答也必须先经过 intent.lisp、grounding report 和 plan.lisp；如果 grounding_report_preview 已足够直接回复用户，应选择 grounded_direct_answer，不创建 BoardTask。\n\
+如果 grounding report 证据不足，或者需要改代码/部署/长任务/进一步工位执行，选择 work_order 或 investigation_only，并说明缺口和边界。\n\
 只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
 JSON 字段必须是：\n\
   objective: string，必须等同或更保守地表达已确认意图，不要扩大范围。\n\
@@ -5343,7 +5733,7 @@ JSON 字段必须是：\n\
             &config.reasoning_effort,
         );
         format!(
-            "(intent-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :original-message {}\n  :objective {}\n  :intent-kind {}\n  :confidence {}\n  :understanding {}\n  :grounding-context-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-intent-confirmation :required true)\n  :next-step \"confirm intent -> generate plan.lisp -> confirm plan -> create BoardTask\")",
+            "(intent-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :original-message {}\n  :objective {}\n  :intent-kind {}\n  :confidence {}\n  :understanding {}\n  :grounding-context-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-intent-confirmation :required true)\n  :next-step \"confirm intent -> collect MissionD MCP grounding report -> generate plan.lisp -> confirm plan -> direct answer or BoardTask\")",
             Self::jarvis_lisp_string(schema),
             Self::jarvis_lisp_string(&authority),
             Self::jarvis_lisp_string(&provider),
@@ -5657,7 +6047,17 @@ JSON 字段必须是：\n\
         topic_label: Option<&str>,
         sources_used: &[String],
         permission_context: Option<&serde_json::Value>,
+        context_pack_path: Option<&str>,
+        context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
+        grounding_report_artifact_path: Option<&str>,
+        grounding_report_hash: Option<&str>,
+        grounding_worker_slot_id: Option<&str>,
+        grounding_worker_turn_id: Option<&str>,
+        context_sufficiency: Option<&str>,
     ) -> anyhow::Result<JarvisAuthoredPlanDraft> {
+        let grounding_report_preview =
+            Self::read_jarvis_grounding_report_preview(grounding_report_file).await;
         let prompt = Self::jarvis_codex_plan_prompt(
             config,
             schema,
@@ -5669,6 +6069,15 @@ JSON 字段必须是：\n\
             topic_label,
             sources_used,
             permission_context,
+            context_pack_path,
+            context_pack_file,
+            grounding_report_file,
+            grounding_report_artifact_path,
+            grounding_report_hash,
+            grounding_worker_slot_id,
+            grounding_worker_turn_id,
+            context_sufficiency,
+            grounding_report_preview.as_deref(),
         );
         let response = Self::run_jarvis_codex_plan_turn(provider_box_http, config, &prompt).await?;
         let parsed = Self::parse_codex_plan_response(&response)?;
@@ -5716,6 +6125,14 @@ JSON 字段必须是：\n\
         topic_label: Option<&str>,
         sources_used: &[String],
         permission_context: Option<&serde_json::Value>,
+        context_pack_path: Option<&str>,
+        context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
+        grounding_report_artifact_path: Option<&str>,
+        grounding_report_hash: Option<&str>,
+        grounding_worker_slot_id: Option<&str>,
+        grounding_worker_turn_id: Option<&str>,
+        context_sufficiency: Option<&str>,
     ) -> anyhow::Result<JarvisAuthoredPlanDraft> {
         const HEARTBEAT_SECS: u64 = 8;
         let (provider, slot_id, author) = Self::jarvis_author_progress_identity(
@@ -5750,6 +6167,14 @@ JSON 字段必须是：\n\
             topic_label,
             sources_used,
             permission_context,
+            context_pack_path,
+            context_pack_file,
+            grounding_report_file,
+            grounding_report_artifact_path,
+            grounding_report_hash,
+            grounding_worker_slot_id,
+            grounding_worker_turn_id,
+            context_sufficiency,
         ));
         let mut heartbeat = Box::pin(tokio::time::sleep(std::time::Duration::from_secs(
             HEARTBEAT_SECS,
@@ -6126,6 +6551,123 @@ JSON 字段必须是：\n\
         Self::finish_sse(stream).await
     }
 
+    fn jarvis_pending_grounding_result(scope: &ConversationSessionScope) -> JarvisGroundingResult {
+        JarvisGroundingResult {
+            grounding_context_id: "intent-stage:pending-grounding".to_string(),
+            topic_id: scope.topic_id.clone(),
+            topic_label: scope.topic_label.clone(),
+            sources_used: Vec::new(),
+            diagnostics: serde_json::json!({
+                "status": "pending_intent_confirmation",
+                "reason": "Jarvis collects full MissionD grounding only after intent.lisp is confirmed."
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn jarvis_grounding_from_interaction_metadata(
+        envelope: &InteractionEnvelope,
+        scope: &ConversationSessionScope,
+    ) -> Result<JarvisGroundingResult, String> {
+        let grounding_context_id =
+            interaction_metadata_string(envelope, "missiond_grounding_context_id")
+                .ok_or_else(|| {
+                    "Jarvis plan confirmation requires missiond_grounding_context_id from the previous plan payload.".to_string()
+                })?;
+        Ok(JarvisGroundingResult {
+            grounding_context_id,
+            context_pack_path: interaction_metadata_string(envelope, "missiond_context_pack_path"),
+            context_pack_file: interaction_metadata_string(envelope, "missiond_context_pack_file"),
+            grounding_report_file: interaction_metadata_string(
+                envelope,
+                "missiond_grounding_report_file",
+            ),
+            grounding_report_artifact_path: interaction_metadata_string(
+                envelope,
+                "missiond_grounding_report_artifact_path",
+            ),
+            grounding_report_hash: interaction_metadata_string(
+                envelope,
+                "missiond_grounding_report_hash",
+            ),
+            grounding_worker_slot_id: interaction_metadata_string(
+                envelope,
+                "missiond_grounding_worker_slot_id",
+            ),
+            grounding_worker_turn_id: interaction_metadata_string(
+                envelope,
+                "missiond_grounding_worker_turn_id",
+            ),
+            context_sufficiency: interaction_metadata_string(
+                envelope,
+                "missiond_context_sufficiency",
+            ),
+            artifact_hash: interaction_metadata_string(
+                envelope,
+                "missiond_grounding_artifact_hash",
+            ),
+            context_capsule_hash: interaction_metadata_string(
+                envelope,
+                "missiond_context_capsule_hash",
+            ),
+            context_capsule_file: interaction_metadata_string(
+                envelope,
+                "missiond_context_capsule_file",
+            ),
+            topic_id: interaction_metadata_string(envelope, "missiond_topic_id")
+                .or_else(|| scope.topic_id.clone()),
+            topic_label: interaction_metadata_string(envelope, "missiond_topic_label")
+                .or_else(|| scope.topic_label.clone()),
+            sources_used: interaction_metadata_string_vec(envelope, "missiond_sources_used"),
+            diagnostics: serde_json::json!({
+                "status": "reused_from_plan_confirmation",
+                "source": "missiond_confirm.confirm_payload"
+            }),
+        })
+    }
+
+    fn jarvis_grounding_from_confirm_value(
+        req: &serde_json::Value,
+        scope: &ConversationSessionScope,
+    ) -> Result<JarvisGroundingResult, String> {
+        let grounding_context_id = jarvis_confirm_string(req, "missiond_grounding_context_id")
+            .ok_or_else(|| {
+                "Jarvis plan confirmation requires missiond_grounding_context_id from the previous plan payload.".to_string()
+            })?;
+        Ok(JarvisGroundingResult {
+            grounding_context_id,
+            context_pack_path: jarvis_confirm_string(req, "missiond_context_pack_path"),
+            context_pack_file: jarvis_confirm_string(req, "missiond_context_pack_file"),
+            grounding_report_file: jarvis_confirm_string(req, "missiond_grounding_report_file"),
+            grounding_report_artifact_path: jarvis_confirm_string(
+                req,
+                "missiond_grounding_report_artifact_path",
+            ),
+            grounding_report_hash: jarvis_confirm_string(req, "missiond_grounding_report_hash"),
+            grounding_worker_slot_id: jarvis_confirm_string(
+                req,
+                "missiond_grounding_worker_slot_id",
+            ),
+            grounding_worker_turn_id: jarvis_confirm_string(
+                req,
+                "missiond_grounding_worker_turn_id",
+            ),
+            context_sufficiency: jarvis_confirm_string(req, "missiond_context_sufficiency"),
+            artifact_hash: jarvis_confirm_string(req, "missiond_grounding_artifact_hash"),
+            context_capsule_hash: jarvis_confirm_string(req, "missiond_context_capsule_hash"),
+            context_capsule_file: jarvis_confirm_string(req, "missiond_context_capsule_file"),
+            topic_id: jarvis_confirm_string(req, "missiond_topic_id")
+                .or_else(|| scope.topic_id.clone()),
+            topic_label: jarvis_confirm_string(req, "missiond_topic_label")
+                .or_else(|| scope.topic_label.clone()),
+            sources_used: jarvis_confirm_string_vec(req, "missiond_sources_used"),
+            diagnostics: serde_json::json!({
+                "status": "reused_from_plan_confirmation",
+                "source": "missiond_confirm.confirm_payload"
+            }),
+        })
+    }
+
     async fn gather_jarvis_grounding(
         slot: &JarvisGroundingSlot,
         req: JarvisGroundingRequest,
@@ -6192,14 +6734,23 @@ JSON 字段必须是：\n\
             .clamp(10, 600)
     }
 
-    async fn read_jarvis_context_preview(context_pack_file: Option<&str>) -> Option<String> {
-        const MAX_CONTEXT_CHARS: usize = 16_000;
-        let path = context_pack_file?.trim();
+    async fn read_jarvis_file_preview(path: Option<&str>, max_chars: usize) -> Option<String> {
+        let path = path?.trim();
         if path.is_empty() || path.starts_with("shared-artifact://") {
             return None;
         }
         let content = tokio::fs::read_to_string(path).await.ok()?;
-        Some(content.chars().take(MAX_CONTEXT_CHARS).collect::<String>())
+        Some(content.chars().take(max_chars).collect::<String>())
+    }
+
+    async fn read_jarvis_context_preview(context_pack_file: Option<&str>) -> Option<String> {
+        Self::read_jarvis_file_preview(context_pack_file, 16_000).await
+    }
+
+    async fn read_jarvis_grounding_report_preview(
+        grounding_report_file: Option<&str>,
+    ) -> Option<String> {
+        Self::read_jarvis_file_preview(grounding_report_file, 24_000).await
     }
 
     fn build_jarvis_direct_answer_prompt(
@@ -6207,19 +6758,27 @@ JSON 字段必须是：\n\
         grounding_context_id: &str,
         context_pack_path: Option<&str>,
         context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
+        grounding_report_artifact_path: Option<&str>,
+        grounding_report_hash: Option<&str>,
+        grounding_report_preview: Option<&str>,
         context_preview: Option<&str>,
         intent_artifact_id: &str,
         plan_artifact_id: &str,
         permission_context: &serde_json::Value,
         sources_used: &[String],
     ) -> (String, String) {
-        let system_prompt = "你是 MissionD Jarvis 的 grounded direct-answer materializer。你只能基于随请求提供的 grounding context、PermissionContext、sources_used、intent/plan artifact 生成自然语言回答。不要调用工具，不要读取文件，不要声称已创建 BoardTask，不要编造没有证据的事实。若证据不足，直接说明证据不足并列出还缺什么。".to_string();
+        let system_prompt = "你是 MissionD Jarvis 的 grounded direct-answer materializer。你只能基于随请求提供的 grounding report、grounding context、PermissionContext、sources_used、intent/plan artifact 生成自然语言回答。不要调用工具，不要读取文件，不要声称已创建 BoardTask，不要编造没有证据的事实。若证据不足，直接说明证据不足并列出还缺什么。".to_string();
         let payload = serde_json::json!({
             "schema": "missiond.jarvis-grounded-direct-answer-input.v1",
             "objective": objective,
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
+            "grounding_report_file": grounding_report_file,
+            "grounding_report_artifact_path": grounding_report_artifact_path,
+            "grounding_report_hash": grounding_report_hash,
+            "grounding_report_preview": grounding_report_preview,
             "context_preview": context_preview,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
@@ -6233,7 +6792,7 @@ JSON 字段必须是：\n\
             }
         });
         let prompt = format!(
-            "请基于以下 MissionD grounding payload 给用户一个直接回答。回答要简洁，但必须说明依据来自哪些 MissionD sources；如果用户问身份/你是谁，要分别说明 Jarvis/MissionD 的身份和 PermissionContext 中可确认的用户信息。\n\n{}",
+            "请基于以下 MissionD grounding payload 给用户一个直接回答。优先使用 grounding_report_preview，其次使用 context_preview。回答要简洁，但必须说明依据来自哪些 MissionD sources；如果用户问身份/你是谁，要分别说明 Jarvis/MissionD 的身份和 PermissionContext 中可确认的用户信息。\n\n{}",
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
         );
         (system_prompt, prompt)
@@ -6249,6 +6808,9 @@ JSON 字段必须是：\n\
         grounding_context_id: &str,
         context_pack_path: Option<&str>,
         context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
+        grounding_report_artifact_path: Option<&str>,
+        grounding_report_hash: Option<&str>,
         intent_artifact_id: &str,
         plan_artifact_id: &str,
         permission_context: &serde_json::Value,
@@ -6275,12 +6837,18 @@ JSON 字段必须是：\n\
         )
         .await?;
 
+        let grounding_report_preview =
+            Self::read_jarvis_grounding_report_preview(grounding_report_file).await;
         let context_preview = Self::read_jarvis_context_preview(context_pack_file).await;
         let (system_prompt, prompt) = Self::build_jarvis_direct_answer_prompt(
             objective,
             grounding_context_id,
             context_pack_path,
             context_pack_file,
+            grounding_report_file,
+            grounding_report_artifact_path,
+            grounding_report_hash,
+            grounding_report_preview.as_deref(),
             context_preview.as_deref(),
             intent_artifact_id,
             plan_artifact_id,
@@ -6367,6 +6935,9 @@ JSON 字段必须是：\n\
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
+            "grounding_report_file": grounding_report_file,
+            "grounding_report_artifact_path": grounding_report_artifact_path,
+            "grounding_report_hash": grounding_report_hash,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
             "provider": &provider,
@@ -6386,6 +6957,9 @@ JSON 字段必须是：\n\
                     "schema": "missiond.interaction-result-artifact.v1",
                     "interaction_id": interaction_id,
                     "grounding_context_id": grounding_context_id,
+                    "grounding_report_file": grounding_report_file,
+                    "grounding_report_artifact_path": grounding_report_artifact_path,
+                    "grounding_report_hash": grounding_report_hash,
                     "intent_artifact_id": intent_artifact_id,
                     "plan_artifact_id": plan_artifact_id,
                     "execution_mode": "grounded_direct_answer",
@@ -6991,6 +7565,9 @@ JSON 字段必须是：\n\
         grounding_context_id: &str,
         context_pack_path: Option<&str>,
         context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
+        grounding_report_artifact_path: Option<&str>,
+        grounding_report_hash: Option<&str>,
         intent_artifact_id: &str,
         plan_artifact_id: &str,
         read_scope_root: &str,
@@ -7062,7 +7639,11 @@ JSON 字段必须是：\n\
         } else {
             serde_json::json!(["Do not spawn sub-workers from inside the worker"])
         };
-        let read_scope = Self::jarvis_dispatch_read_scope(read_scope_root, context_pack_file);
+        let read_scope = Self::jarvis_dispatch_read_scope(
+            read_scope_root,
+            context_pack_file,
+            grounding_report_file,
+        );
 
         serde_json::json!({
             "schema": "missiond.jarvis-dispatch-metadata.v1",
@@ -7088,6 +7669,9 @@ JSON 字段必须是：\n\
             "grounding_context_id": grounding_context_id,
             "context_pack_path": context_pack_path,
             "context_pack_file": context_pack_file,
+            "grounding_report_file": grounding_report_file,
+            "grounding_report_artifact_path": grounding_report_artifact_path,
+            "grounding_report_hash": grounding_report_hash,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
             "worker_may_delegate": false
@@ -7097,24 +7681,28 @@ JSON 字段必须是：\n\
     fn jarvis_dispatch_read_scope(
         read_scope_root: &str,
         context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
     ) -> Vec<String> {
         let root = read_scope_root.trim();
         let mut scopes = Vec::new();
         if !root.is_empty() {
             scopes.push(root.to_string());
         }
-        let Some(context_pack_file) = context_pack_file.map(str::trim).filter(|s| !s.is_empty())
-        else {
-            return scopes;
-        };
-        let context_path = Path::new(context_pack_file);
-        let context_scope = context_path.parent().unwrap_or(context_path);
-        let context_scope_display = context_scope.display().to_string();
-        if !context_scope_display.is_empty()
-            && !Self::path_is_within_scope(context_scope, root)
-            && !scopes.iter().any(|scope| scope == &context_scope_display)
+        for file in [context_pack_file, grounding_report_file]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with("shared-artifact://"))
         {
-            scopes.push(context_scope_display);
+            let path = Path::new(file);
+            let scope = path.parent().unwrap_or(path);
+            let scope_display = scope.display().to_string();
+            if !scope_display.is_empty()
+                && !Self::path_is_within_scope(scope, root)
+                && !scopes.iter().any(|existing| existing == &scope_display)
+            {
+                scopes.push(scope_display);
+            }
         }
         scopes
     }
@@ -7162,6 +7750,14 @@ JSON 字段必须是：\n\
             .unwrap_or("");
         let context_pack_file = dispatch_metadata
             .get("context_pack_file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let grounding_report_file = dispatch_metadata
+            .get("grounding_report_file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let grounding_report_hash = dispatch_metadata
+            .get("grounding_report_hash")
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let task_kind = dispatch_metadata
@@ -7251,6 +7847,8 @@ JSON 字段必须是：\n\
              grounding_context_id: {gci}\n\
              context_pack_path: {cpp}\n\
              context_pack_file: {cpf}\n\
+             grounding_report_file: {grf}\n\
+             grounding_report_hash: {grh}\n\
              intent_artifact_id: {iai}\n\
              plan_artifact_id: {pai}\n\n\
              已接受执行切片：\n\
@@ -7261,9 +7859,10 @@ JSON 字段必须是：\n\
              - acceptance:\n{acc}\n\n\
              工作方式：\n\
              - 这是已经过 Jarvis 意图确认和计划确认的 grounded dispatch，不要重新扮演主控。\n\
-             - 先读取 context_pack_file；这是 MissionD 为没有 MCP 的工位物化的 bounded context slice。\n\
-             - 如果 context_pack_file 不可读，且 context_pack_path 是 shared-artifact://，再用 MissionD MCP 调 mission_shared_memory(action=\"artifact_get\", hash=\"{cph}\") 或 mission_context_slice 读取上下文切片。\n\
-             - 如果文件和 MCP 都不可用，不要自行大范围搜索代码；请快速失败并输出 Diagnostic / Evidence / Verification，说明 context unavailable。\n\
+             - 先读取 grounding_report_file；这是 ClaudeCode + MissionD MCP grounding worker 写入的上下游全链 Markdown 报告。\n\
+             - 再读取 context_pack_file；这是 MissionD 为没有 MCP 的工位物化的 bounded context slice。\n\
+             - 如果文件不可读，且 context_pack_path 是 shared-artifact://，再用 MissionD MCP 调 mission_shared_memory(action=\"artifact_get\", hash=\"{cph}\") 或 mission_context_slice 读取上下文切片。\n\
+             - 如果 grounding report、context 文件和 MCP 都不可用，不要自行大范围搜索代码；请快速失败并输出 Diagnostic / Evidence / Verification，说明 context unavailable。\n\
              {wc}\
              - 输出必须是结构化 artifact，严格包含以下四个 Markdown 二级标题：\n\
                ## Findings\n\
@@ -7283,6 +7882,8 @@ JSON 字段必须是：\n\
             gci = grounding_context_id,
             cpp = context_pack_path,
             cpf = context_pack_file,
+            grf = grounding_report_file,
+            grh = grounding_report_hash,
             iai = intent_artifact_id,
             pai = plan_artifact_id,
             acc = acceptance,
@@ -7674,39 +8275,95 @@ JSON 字段必须是：\n\
                 raw_user_text.clone()
             };
 
-            let grounding = match Self::gather_jarvis_grounding(
-                &jarvis_grounding,
-                JarvisGroundingRequest {
-                    query: objective_text.clone(),
-                    conversation_id: jarvis_conv_id.clone(),
-                    chat_id: chat_id.clone(),
-                    user_id: conversation_scope.user_id.clone(),
-                    tenant_id: conversation_scope.tenant_id.clone(),
-                    application_id: conversation_scope.application_id.clone(),
-                    channel: Some(conversation_scope.channel.clone()),
-                    topic_id: conversation_scope.topic_id.clone(),
-                    topic_label: conversation_scope.topic_label.clone(),
-                    permission_context: permission_context.clone(),
-                    unknowns: vec![
-                        "What project, skill, deploy fact, or tool context is needed before dispatch?"
-                            .to_string(),
-                        "Is this broad request ready for intent/plan confirmation or already an exact shard?"
-                            .to_string(),
-                    ],
-                    ..Default::default()
-                },
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    Self::fail_jarvis_gate(&mut stream, error, "grounding").await?;
-                    return Ok(());
+            let confirmed_intent_artifact_id = if intent_confirmed {
+                match jarvis_confirm_string(&effective_req, "missiond_intent_artifact_id") {
+                    Some(value) => Some(value),
+                    None => {
+                        Self::fail_jarvis_gate(
+                            &mut stream,
+                            "Jarvis intent confirmation requires missiond_intent_artifact_id from the previous intent payload; refusing to collect grounding without a confirmed intent.lisp.",
+                            "confirmation_intent_artifact",
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                 }
+            } else {
+                None
+            };
+            let confirmed_plan_artifact_id = if plan_confirmed {
+                match jarvis_confirm_string(&effective_req, "missiond_plan_artifact_id") {
+                    Some(value) => Some(value),
+                    None => {
+                        Self::fail_jarvis_gate(
+                            &mut stream,
+                            "Jarvis plan confirmation requires missiond_plan_artifact_id from the previous plan payload; refusing to execute without a confirmed plan.lisp.",
+                            "confirmation_plan_artifact",
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            };
+            let grounding_was_collected = intent_confirmed && !plan_confirmed;
+            let grounding = if plan_confirmed {
+                match Self::jarvis_grounding_from_confirm_value(&effective_req, &conversation_scope)
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        Self::fail_jarvis_gate(&mut stream, error, "confirmation_grounding")
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            } else if intent_confirmed {
+                match Self::gather_jarvis_grounding(
+                    &jarvis_grounding,
+                    JarvisGroundingRequest {
+                        query: objective_text.clone(),
+                        confirmed_intent_artifact_id: confirmed_intent_artifact_id.clone(),
+                        confirmed_intent_lisp: jarvis_confirm_string(
+                            &effective_req,
+                            "missiond_intent_artifact_body",
+                        ),
+                        conversation_id: jarvis_conv_id.clone(),
+                        chat_id: chat_id.clone(),
+                        user_id: conversation_scope.user_id.clone(),
+                        tenant_id: conversation_scope.tenant_id.clone(),
+                        application_id: conversation_scope.application_id.clone(),
+                        channel: Some(conversation_scope.channel.clone()),
+                        topic_id: conversation_scope.topic_id.clone(),
+                        topic_label: conversation_scope.topic_label.clone(),
+                        permission_context: permission_context.clone(),
+                        unknowns: vec![
+                            "Collect MissionD upstream/downstream facts that affect this confirmed intent.".to_string(),
+                            "Identify project registry, SSOT, runtime, skill, provider, infra, and permission evidence needed before plan.lisp.".to_string(),
+                            "Write the grounded evidence report for the plan author instead of creating BoardTask or implementing changes.".to_string(),
+                        ],
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        Self::fail_jarvis_gate(&mut stream, error, "grounding").await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                Self::jarvis_pending_grounding_result(&conversation_scope)
             };
             let grounding_context_id = grounding.grounding_context_id.clone();
             let context_pack_path = grounding.context_pack_path.clone();
             let context_pack_file = grounding.context_pack_file.clone();
+            let grounding_report_file = grounding.grounding_report_file.clone();
+            let grounding_report_artifact_path = grounding.grounding_report_artifact_path.clone();
+            let grounding_report_hash = grounding.grounding_report_hash.clone();
+            let grounding_worker_slot_id = grounding.grounding_worker_slot_id.clone();
+            let grounding_worker_turn_id = grounding.grounding_worker_turn_id.clone();
+            let context_sufficiency = grounding.context_sufficiency.clone();
             let grounding_artifact_hash = grounding.artifact_hash.clone();
             let context_capsule_hash = grounding.context_capsule_hash.clone();
             let context_capsule_file = grounding.context_capsule_file.clone();
@@ -7732,65 +8389,74 @@ JSON 字段必须是：\n\
                     )
                     .await;
             }
-            let grounding_event = serde_json::json!({
-                "phase": "grounding",
-                "grounding_context_id": grounding_context_id,
-                "context_pack_path": context_pack_path,
-                "context_pack_file": context_pack_file,
-                "artifact_hash": grounding_artifact_hash,
-                "context_capsule_hash": context_capsule_hash,
-                "context_capsule_file": context_capsule_file,
-                "topic_id": resolved_topic_id,
-                "topic_label": resolved_topic_label,
-                "sources_used": sources_used,
-                "diagnostics": grounding_diagnostics,
-            });
-            Self::write_sse_event(&mut stream, "status", &grounding_event).await?;
+            if grounding_was_collected {
+                let grounding_event = serde_json::json!({
+                    "phase": "grounding",
+                    "grounding_context_id": grounding_context_id,
+                    "context_pack_path": context_pack_path,
+                    "context_pack_file": context_pack_file,
+                    "grounding_report_file": grounding_report_file,
+                    "grounding_report_artifact_path": grounding_report_artifact_path,
+                    "grounding_report_hash": grounding_report_hash,
+                    "grounding_worker_slot_id": grounding_worker_slot_id,
+                    "grounding_worker_turn_id": grounding_worker_turn_id,
+                    "context_sufficiency": context_sufficiency,
+                    "artifact_hash": grounding_artifact_hash,
+                    "context_capsule_hash": context_capsule_hash,
+                    "context_capsule_file": context_capsule_file,
+                    "topic_id": resolved_topic_id,
+                    "topic_label": resolved_topic_label,
+                    "sources_used": sources_used,
+                    "diagnostics": grounding_diagnostics,
+                });
+                Self::write_sse_event(&mut stream, "status", &grounding_event).await?;
+            }
 
-            let jarvis_intent_author = JarvisIntentAuthorConfig::default();
-            let authored_intent = match Self::author_jarvis_intent_draft_with_progress(
-                &mut stream,
-                &jarvis_progress_bus,
-                &chat_id,
-                None,
-                &provider_box_http,
-                &jarvis_intent_author,
-                "missiond.jarvis-intent-artifact.v1",
-                "jarvis",
-                &objective_text,
-                &grounding_context_id,
-                resolved_topic_id.as_deref(),
-                resolved_topic_label.as_deref(),
-                &sources_used,
-                Some(&permission_context),
-            )
-            .await
-            {
-                Ok(draft) => draft,
-                Err(error) => {
-                    let diagnostic = serde_json::json!({
-                        "phase": "intent_authoring_failed",
-                        "error": {
-                            "code": "JARVIS_INTENT_AUTHOR_FAILED",
-                            "message": error.to_string()
-                        }
-                    });
-                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                    Self::write_sse_openai_text_and_persist(
-                        &mut stream,
-                        &chat_id,
-                        "intent.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的意图识别。",
-                        Some("stop"),
-                        db.as_ref(),
-                        jarvis_conv_id.as_deref(),
-                    )
-                    .await?;
-                    Self::finish_sse(&mut stream).await?;
-                    return Ok(());
-                }
-            };
-            let objective_text = authored_intent.objective.clone();
-            let intent_payload = serde_json::json!({
+            let intent_artifact_id = if !intent_confirmed {
+                let jarvis_intent_author = JarvisIntentAuthorConfig::default();
+                let authored_intent = match Self::author_jarvis_intent_draft_with_progress(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &chat_id,
+                    None,
+                    &provider_box_http,
+                    &jarvis_intent_author,
+                    "missiond.jarvis-intent-artifact.v1",
+                    "jarvis",
+                    &objective_text,
+                    &grounding_context_id,
+                    resolved_topic_id.as_deref(),
+                    resolved_topic_label.as_deref(),
+                    &sources_used,
+                    Some(&permission_context),
+                )
+                .await
+                {
+                    Ok(draft) => draft,
+                    Err(error) => {
+                        let diagnostic = serde_json::json!({
+                            "phase": "intent_authoring_failed",
+                            "error": {
+                                "code": "JARVIS_INTENT_AUTHOR_FAILED",
+                                "message": error.to_string()
+                            }
+                        });
+                        Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                        Self::write_sse_openai_text_and_persist(
+                            &mut stream,
+                            &chat_id,
+                            "intent.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的意图识别。",
+                            Some("stop"),
+                            db.as_ref(),
+                            jarvis_conv_id.as_deref(),
+                        )
+                        .await?;
+                        Self::finish_sse(&mut stream).await?;
+                        return Ok(());
+                    }
+                };
+                let objective_text = authored_intent.objective.clone();
+                let intent_payload = serde_json::json!({
                 "schema": "missiond.jarvis-intent-artifact.v1",
                 "phase": "intent_draft",
                 "author": "codex-cli-gpt-5.5-xhigh",
@@ -7800,6 +8466,12 @@ JSON 字段必须是：\n\
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
+                "grounding_report_file": grounding_report_file,
+                "grounding_report_artifact_path": grounding_report_artifact_path,
+                "grounding_report_hash": grounding_report_hash,
+                "grounding_worker_slot_id": grounding_worker_slot_id,
+                "grounding_worker_turn_id": grounding_worker_turn_id,
+                "context_sufficiency": context_sufficiency,
                 "context_capsule_hash": context_capsule_hash,
                 "context_capsule_file": context_capsule_file,
                 "topic_id": resolved_topic_id,
@@ -7816,34 +8488,33 @@ JSON 字段必须是：\n\
                 "acceptance_signals": authored_intent.acceptance_signals,
                 "sources_used": sources_used,
                 "requires_confirmation": true
-            });
-            let intent_artifact = match Self::put_jarvis_artifact(
-                &jarvis_artifact_writer,
-                JarvisArtifactRequest {
-                    kind: "jarvis-intent-draft".to_string(),
-                    project_id: None,
-                    task_id: None,
-                    payload: intent_payload.clone(),
-                    metadata: serde_json::json!({
-                        "schema": "missiond.jarvis-intent-artifact.v1",
-                        "chat_id": chat_id.clone(),
-                        "conversation_id": jarvis_conv_id.clone(),
-                        "grounding_context_id": grounding_context_id,
-                    }),
-                },
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    Self::fail_jarvis_gate(&mut stream, error, "intent_artifact").await?;
-                    return Ok(());
-                }
-            };
-            let intent_artifact_id = intent_artifact.artifact_id.clone();
-            let intent_artifact_hash = intent_artifact.artifact_hash.clone();
-            let intent_artifact_path = intent_artifact.path.clone();
-            if !intent_confirmed {
+                });
+                let intent_artifact = match Self::put_jarvis_artifact(
+                    &jarvis_artifact_writer,
+                    JarvisArtifactRequest {
+                        kind: "jarvis-intent-draft".to_string(),
+                        project_id: None,
+                        task_id: None,
+                        payload: intent_payload.clone(),
+                        metadata: serde_json::json!({
+                            "schema": "missiond.jarvis-intent-artifact.v1",
+                            "chat_id": chat_id.clone(),
+                            "conversation_id": jarvis_conv_id.clone(),
+                            "grounding_context_id": grounding_context_id,
+                        }),
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        Self::fail_jarvis_gate(&mut stream, error, "intent_artifact").await?;
+                        return Ok(());
+                    }
+                };
+                let intent_artifact_id = intent_artifact.artifact_id.clone();
+                let intent_artifact_hash = intent_artifact.artifact_hash.clone();
+                let intent_artifact_path = intent_artifact.path.clone();
                 let mut intent = intent_payload;
                 if let Some(object) = intent.as_object_mut() {
                     object.insert(
@@ -7871,7 +8542,7 @@ JSON 字段必须是：\n\
                 .await?;
                 let confirm = serde_json::json!({
                     "phase": "awaiting_intent_confirmation",
-                    "message": "请确认：我的意图理解是否正确？确认后我会生成 plan.lisp，再等你确认后创建 BoardTask 并派工位。",
+                    "message": "请确认：我的意图理解是否正确？确认后我会先收集 MissionD grounding，再生成 plan.lisp；plan 确认后可能直接回答或创建 BoardTask。",
                     "confirm_payload": {
                         "missiond_intent_confirmed": true,
                         "missiond_objective": objective_text,
@@ -7897,7 +8568,9 @@ JSON 字段必须是：\n\
                 .await?;
                 Self::finish_sse(&mut stream).await?;
                 return Ok(());
-            }
+            } else {
+                confirmed_intent_artifact_id.clone().unwrap_or_default()
+            };
 
             if intent_confirmed && !plan_confirmed {
                 Self::persist_jarvis_confirmation_fulfilled(
@@ -7908,54 +8581,63 @@ JSON 字段必须是：\n\
                 .await;
             }
 
-            let jarvis_plan_author = JarvisPlanAuthorConfig::default();
-            let authored_plan = match Self::author_jarvis_plan_draft_with_progress(
-                &mut stream,
-                &jarvis_progress_bus,
-                &chat_id,
-                None,
-                &provider_box_http,
-                &jarvis_plan_author,
-                "missiond.jarvis-plan-artifact.v1",
-                "jarvis",
-                &objective_text,
-                &grounding_context_id,
-                &intent_artifact_id,
-                resolved_topic_id.as_deref(),
-                resolved_topic_label.as_deref(),
-                &sources_used,
-                Some(&permission_context),
-            )
-            .await
-            {
-                Ok(draft) => draft,
-                Err(error) => {
-                    let diagnostic = serde_json::json!({
-                        "phase": "plan_authoring_failed",
-                        "error": {
-                            "code": "JARVIS_PLAN_AUTHOR_FAILED",
-                            "message": error.to_string()
-                        }
-                    });
-                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                    Self::write_sse_openai_text_and_persist(
-                        &mut stream,
-                        &chat_id,
-                        "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
-                        Some("stop"),
-                        db.as_ref(),
-                        jarvis_conv_id.as_deref(),
-                    )
-                    .await?;
-                    Self::finish_sse(&mut stream).await?;
-                    return Ok(());
-                }
-            };
-            let objective_text = authored_plan.objective.clone();
-            let plan_review_text = authored_plan.review_text.clone();
-            let plan_artifact_body = authored_plan.artifact_body.clone();
-            let plan_steps = authored_plan.steps.clone();
-            let plan_payload = serde_json::json!({
+            let plan_artifact_id = if !plan_confirmed {
+                let jarvis_plan_author = JarvisPlanAuthorConfig::default();
+                let authored_plan = match Self::author_jarvis_plan_draft_with_progress(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &chat_id,
+                    None,
+                    &provider_box_http,
+                    &jarvis_plan_author,
+                    "missiond.jarvis-plan-artifact.v1",
+                    "jarvis",
+                    &objective_text,
+                    &grounding_context_id,
+                    &intent_artifact_id,
+                    resolved_topic_id.as_deref(),
+                    resolved_topic_label.as_deref(),
+                    &sources_used,
+                    Some(&permission_context),
+                    context_pack_path.as_deref(),
+                    context_pack_file.as_deref(),
+                    grounding_report_file.as_deref(),
+                    grounding_report_artifact_path.as_deref(),
+                    grounding_report_hash.as_deref(),
+                    grounding_worker_slot_id.as_deref(),
+                    grounding_worker_turn_id.as_deref(),
+                    context_sufficiency.as_deref(),
+                )
+                .await
+                {
+                    Ok(draft) => draft,
+                    Err(error) => {
+                        let diagnostic = serde_json::json!({
+                            "phase": "plan_authoring_failed",
+                            "error": {
+                                "code": "JARVIS_PLAN_AUTHOR_FAILED",
+                                "message": error.to_string()
+                            }
+                        });
+                        Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                        Self::write_sse_openai_text_and_persist(
+                            &mut stream,
+                            &chat_id,
+                            "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
+                            Some("stop"),
+                            db.as_ref(),
+                            jarvis_conv_id.as_deref(),
+                        )
+                        .await?;
+                        Self::finish_sse(&mut stream).await?;
+                        return Ok(());
+                    }
+                };
+                let objective_text = authored_plan.objective.clone();
+                let plan_review_text = authored_plan.review_text.clone();
+                let plan_artifact_body = authored_plan.artifact_body.clone();
+                let plan_steps = authored_plan.steps.clone();
+                let plan_payload = serde_json::json!({
                 "schema": "missiond.jarvis-plan-artifact.v1",
                 "phase": "plan_draft",
                 "author": "codex-cli-gpt-5.5-xhigh",
@@ -7964,6 +8646,13 @@ JSON 字段必须是：\n\
                 "grounding_context_id": grounding_context_id,
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
+                "grounding_report_file": grounding_report_file,
+                "grounding_report_artifact_path": grounding_report_artifact_path,
+                "grounding_report_hash": grounding_report_hash,
+                "grounding_worker_slot_id": grounding_worker_slot_id,
+                "grounding_worker_turn_id": grounding_worker_turn_id,
+                "context_sufficiency": context_sufficiency,
+                "grounding_artifact_hash": grounding_artifact_hash,
                 "context_capsule_hash": context_capsule_hash,
                 "context_capsule_file": context_capsule_file,
                 "topic_id": resolved_topic_id,
@@ -7984,35 +8673,34 @@ JSON 字段必须是：\n\
                 "acceptance_signals": authored_plan.acceptance_signals,
                 "sources_used": sources_used,
                 "requires_confirmation": true
-            });
-            let plan_artifact = match Self::put_jarvis_artifact(
-                &jarvis_artifact_writer,
-                JarvisArtifactRequest {
-                    kind: "jarvis-plan-draft".to_string(),
-                    project_id: None,
-                    task_id: None,
-                    payload: plan_payload.clone(),
-                    metadata: serde_json::json!({
-                        "schema": "missiond.jarvis-plan-artifact.v1",
-                        "chat_id": chat_id.clone(),
-                        "conversation_id": jarvis_conv_id.clone(),
-                        "grounding_context_id": grounding_context_id,
-                        "intent_artifact_id": intent_artifact_id,
-                    }),
-                },
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    Self::fail_jarvis_gate(&mut stream, error, "plan_artifact").await?;
-                    return Ok(());
-                }
-            };
-            let plan_artifact_id = plan_artifact.artifact_id.clone();
-            let plan_artifact_hash = plan_artifact.artifact_hash.clone();
-            let plan_artifact_path = plan_artifact.path.clone();
-            if !plan_confirmed {
+                });
+                let plan_artifact = match Self::put_jarvis_artifact(
+                    &jarvis_artifact_writer,
+                    JarvisArtifactRequest {
+                        kind: "jarvis-plan-draft".to_string(),
+                        project_id: None,
+                        task_id: None,
+                        payload: plan_payload.clone(),
+                        metadata: serde_json::json!({
+                            "schema": "missiond.jarvis-plan-artifact.v1",
+                            "chat_id": chat_id.clone(),
+                            "conversation_id": jarvis_conv_id.clone(),
+                            "grounding_context_id": grounding_context_id,
+                            "intent_artifact_id": intent_artifact_id,
+                        }),
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        Self::fail_jarvis_gate(&mut stream, error, "plan_artifact").await?;
+                        return Ok(());
+                    }
+                };
+                let plan_artifact_id = plan_artifact.artifact_id.clone();
+                let plan_artifact_hash = plan_artifact.artifact_hash.clone();
+                let plan_artifact_path = plan_artifact.path.clone();
                 let mut plan = plan_payload;
                 if let Some(object) = plan.as_object_mut() {
                     object.insert(
@@ -8055,6 +8743,20 @@ JSON 字段必须是：\n\
                         "missiond_plan_confirmed": true,
                         "missiond_objective": objective_text,
                         "missiond_grounding_context_id": grounding_context_id,
+                        "missiond_context_pack_path": context_pack_path,
+                        "missiond_context_pack_file": context_pack_file,
+                        "missiond_grounding_report_file": grounding_report_file,
+                        "missiond_grounding_report_artifact_path": grounding_report_artifact_path,
+                        "missiond_grounding_report_hash": grounding_report_hash,
+                        "missiond_grounding_worker_slot_id": grounding_worker_slot_id,
+                        "missiond_grounding_worker_turn_id": grounding_worker_turn_id,
+                        "missiond_context_sufficiency": context_sufficiency,
+                        "missiond_grounding_artifact_hash": grounding_artifact_hash,
+                        "missiond_context_capsule_hash": context_capsule_hash,
+                        "missiond_context_capsule_file": context_capsule_file,
+                        "missiond_topic_id": resolved_topic_id,
+                        "missiond_topic_label": resolved_topic_label,
+                        "missiond_sources_used": sources_used,
                         "missiond_intent_artifact_id": intent_artifact_id,
                         "missiond_plan_artifact_id": plan_artifact_id,
                         "missiond_execution_mode": plan
@@ -8085,13 +8787,15 @@ JSON 字段必须是：\n\
                 .await?;
                 Self::finish_sse(&mut stream).await?;
                 return Ok(());
-            }
+            } else {
+                confirmed_plan_artifact_id.clone().unwrap_or_default()
+            };
 
-            let execution_mode = jarvis_confirm_string(&req, "missiond_execution_mode")
+            let execution_mode = jarvis_confirm_string(&effective_req, "missiond_execution_mode")
                 .unwrap_or_else(|| "work_order".to_string())
                 .to_ascii_lowercase();
             if execution_mode == "grounded_direct_answer" {
-                if jarvis_confirm_bool(&req, "missiond_requires_board_task") {
+                if jarvis_confirm_bool(&effective_req, "missiond_requires_board_task") {
                     Self::fail_jarvis_gate(
                         &mut stream,
                         "plan.lisp declared grounded_direct_answer but missiond_requires_board_task=true; refusing ambiguous execution.",
@@ -8111,6 +8815,9 @@ JSON 字段必须是：\n\
                     &grounding_context_id,
                     context_pack_path.as_deref(),
                     context_pack_file.as_deref(),
+                    grounding_report_file.as_deref(),
+                    grounding_report_artifact_path.as_deref(),
+                    grounding_report_hash.as_deref(),
                     &intent_artifact_id,
                     &plan_artifact_id,
                     &permission_context,
@@ -8163,6 +8870,9 @@ JSON 字段必须是：\n\
                 &grounding_context_id,
                 context_pack_path.as_deref(),
                 context_pack_file.as_deref(),
+                grounding_report_file.as_deref(),
+                grounding_report_artifact_path.as_deref(),
+                grounding_report_hash.as_deref(),
                 &intent_artifact_id,
                 &plan_artifact_id,
                 &Self::jarvis_runtime_read_scope_root(),
@@ -10611,6 +11321,72 @@ mod tests {
     }
 
     #[test]
+    fn compiled_abi_freshness_accepts_matching_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("compiled-contract-abi.json"),
+            serde_json::json!({
+                "schema_version": crate::v3_contracts::SCHEMA_VERSION,
+                "source_hash": crate::v3_contracts::SOURCE_HASH,
+                "diagnostics": [],
+                "payload": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("compiled-runtime-config.json"),
+            serde_json::json!({
+                "schema_version": "missiond.compiled-runtime-config.v1",
+                "source_hash": crate::v3_contracts::SOURCE_HASH,
+                "diagnostics": [],
+                "payload": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let check = PTYWebSocketServer::compiled_abi_freshness_check_in_dir(dir.path());
+        assert_eq!(check["ok"], true);
+        assert_eq!(check["status"], "ok");
+    }
+
+    #[test]
+    fn compiled_abi_freshness_fails_closed_on_hash_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("compiled-contract-abi.json"),
+            serde_json::json!({
+                "schema_version": crate::v3_contracts::SCHEMA_VERSION,
+                "source_hash": crate::v3_contracts::SOURCE_HASH,
+                "diagnostics": [],
+                "payload": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("compiled-runtime-config.json"),
+            serde_json::json!({
+                "schema_version": "missiond.compiled-runtime-config.v1",
+                "source_hash": "stale-runtime-config-hash",
+                "diagnostics": [],
+                "payload": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let check = PTYWebSocketServer::compiled_abi_freshness_check_in_dir(dir.path());
+        assert_eq!(check["ok"], false);
+        assert_eq!(check["status"], "abi_freshness_mismatch");
+        assert_eq!(
+            check["failed"][0],
+            "compiled-runtime-config:source_hash_mismatch"
+        );
+    }
+
+    #[test]
     fn jarvis_task_wait_budget_is_bounded_for_mobile_clients() {
         assert_eq!(clamp_jarvis_task_wait_secs(None), 180);
         assert_eq!(clamp_jarvis_task_wait_secs(Some(1)), 15);
@@ -10765,7 +11541,7 @@ done"#;
             Some("Jarvis intent"),
             &["source-a".to_string()],
         );
-        assert!(body.contains(":authority codex-cli-gpt-5.5-xhigh"));
+        assert!(body.contains(":authority \"codex-cli-gpt-5.5-xhigh\""));
         assert!(body.contains(":semantic-author"));
         assert!(body.contains(":objective \"识别真实意图\""));
         assert!(body.contains(":non-goals [\"Rust 自行猜测意图\"]"));
@@ -10803,7 +11579,7 @@ done"#;
             Some("Jarvis plan"),
             &["source-a".to_string()],
         );
-        assert!(body.contains(":authority codex-cli-gpt-5.5-xhigh"));
+        assert!(body.contains(":authority \"codex-cli-gpt-5.5-xhigh\""));
         assert!(body.contains(":semantic-author"));
         assert!(body.contains(":slot-id \"slot-codex-plan-author\""));
         assert!(body.contains(":objective \"生成 Codex-authored plan\""));
@@ -11150,6 +11926,9 @@ done"#;
             "context-gather:abc",
             Some("shared-artifact://abc"),
             Some("/tmp/missiond/context-gather/abc.json"),
+            None,
+            None,
+            None,
             "intent-abc",
             "plan-abc",
             "/repo",
@@ -11161,7 +11940,8 @@ done"#;
         assert!(prompt.contains("intent_artifact_id: intent-abc"));
         assert!(prompt.contains("plan_artifact_id: plan-abc"));
         assert!(prompt.contains("已接受执行切片"));
-        assert!(prompt.contains("先读取 context_pack_file"));
+        assert!(prompt.contains("先读取 grounding_report_file"));
+        assert!(prompt.contains("再读取 context_pack_file"));
         assert!(prompt.contains("context unavailable"));
         assert!(prompt.contains("mission_shared_memory(action=\"artifact_get\", hash=\"abc\")"));
         assert!(prompt.contains("Task/Explore/TaskCreate/TaskUpdate/TaskList/TaskOutput"));
@@ -11180,6 +11960,9 @@ done"#;
             "context-gather:abc",
             Some("shared-artifact://abc"),
             Some("/tmp/missiond/context-gather/abc.json"),
+            None,
+            None,
+            None,
             "intent-abc",
             "plan-abc",
             "/repo",
@@ -11196,6 +11979,9 @@ done"#;
             "context-gather:xyz",
             Some("shared-artifact://xyz"),
             Some("/tmp/ctx.json"),
+            None,
+            None,
+            None,
             "intent-xyz",
             "plan-xyz",
             "/repo",
@@ -11217,6 +12003,9 @@ done"#;
             "context-gather:codex",
             Some("shared-artifact://codex"),
             Some("/tmp/ctx.json"),
+            None,
+            None,
+            None,
             "intent-codex",
             "plan-codex",
             "/repo",
@@ -11234,6 +12023,9 @@ done"#;
         let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
             "review the deployment pipeline",
             "context-gather:abc",
+            None,
+            None,
+            None,
             None,
             None,
             "intent-abc",
@@ -11258,6 +12050,9 @@ done"#;
             "context-gather:survey",
             Some("shared-artifact://survey"),
             Some("/tmp/ctx.json"),
+            None,
+            None,
+            None,
             "intent-survey",
             "plan-survey",
             "/repo",
@@ -11277,6 +12072,9 @@ done"#;
             "context-gather:readonly",
             Some("shared-artifact://readonly"),
             Some("/tmp/ctx.json"),
+            None,
+            None,
+            None,
             "intent-readonly",
             "plan-readonly",
             "/repo",
@@ -11300,6 +12098,9 @@ done"#;
             "context-gather:code",
             Some("shared-artifact://code"),
             Some("/tmp/ctx.json"),
+            None,
+            None,
+            None,
             "intent-code",
             "plan-code",
             "/repo",
@@ -11319,6 +12120,9 @@ done"#;
         let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
             "fix the broken auth flow",
             "ctx:abc",
+            None,
+            None,
+            None,
             None,
             None,
             "i",
