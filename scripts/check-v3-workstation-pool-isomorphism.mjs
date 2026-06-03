@@ -164,11 +164,12 @@ function checkFiles(root) {
     'async fn register_and_init_runtime_slot',
     'state.pty.init_slot(&pty_slot).await',
     'for worker in workstation_config.workstation_pool()',
-    'dangerously_skip_permissions: Some(false)',
+    'fn missiond_managed_skip_permissions',
+    'dangerously_skip_permissions: Some(missiond_managed_skip_permissions(engine, false))',
     'tool_policy_path: worker.tool_policy_path.clone()',
     'reasoning_effort: worker.reasoning_effort.clone()',
     'search_enabled: worker.search_enabled',
-    'skip_permissions: false',
+    'skip_permissions: missiond_managed_skip_permissions(engine, false)',
     'state.mission.register_runtime_slot(slot_config)',
     'SlotManager: workstation pool registered from V3',
     'missiond_project_root()',
@@ -785,12 +786,37 @@ fn startup_slot_config() {}
 fn workstation_pool_slot_config() {}
 reasoning_effort: worker.reasoning_effort.clone();
 search_enabled: Some(worker.search_enabled).filter;
-dangerously_skip_permissions: Some(false);
+fn missiond_managed_skip_permissions() {}
+dangerously_skip_permissions: Some(missiond_managed_skip_permissions(engine, false));
 tool_policy_path: worker.tool_policy_path.clone();
-skip_permissions: false;
+skip_permissions: missiond_managed_skip_permissions(engine, false);
 async fn register_and_init_runtime_slot() { state.pty.init_slot(&pty_slot).await; state.mission.register_runtime_slot(slot_config); }
 for worker in workstation_config.workstation_pool() {}
 "SlotManager: workstation pool registered from V3";`);
+  write(root, 'projectTypes', `
+use std::path::Path;
+let cwd_path = Path::new(cwd);
+cwd_path.starts_with(Path::new(prefix));
+fn resolve_does_not_match_sibling_by_string_prefix() {}
+"/Users/rickyhq/Projects/missiond-clean";`);
+  write(root, 'genericCli', `
+GenericCliSlotManager;
+PTYSpawnOptions;
+reasoning_effort: req.reasoning_effort.clone();
+search_enabled: req.search_enabled;
+sandbox: req.sandbox.clone();
+approval_policy: req.approval_policy.clone();
+tool_policy_path: req.tool_policy_path.clone();
+canonical_source_for_engine(self.engine);
+TextComplete;`);
+  write(root, 'controlTree', `
+Agy,
+Self::Agy => None;`);
+  write(root, 'ptyRecognition', `
+CliEngine::Agy => recognize_agy(lines);
+fn recognize_agy() {}
+agy_idle_screen_is_idle;
+agy_auth_or_quota_error_is_blocked;`);
   write(root, 'ptySession', `
 CliEngine::Gemini;
 --approval-mode plan;

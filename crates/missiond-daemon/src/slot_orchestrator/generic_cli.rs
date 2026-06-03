@@ -4,7 +4,7 @@
 //! This is intentionally small: it only owns lifecycle/concurrency and delegates
 //! all terminal semantics to PTYManager plus provider-specific recognition.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -156,6 +156,13 @@ impl EngineController for GenericCliController {
             engine: self.engine,
         };
         self.pty.init_slot(&pty_slot).await;
+        let mut extra_env = HashMap::new();
+        if self.engine == CliEngine::ClaudeCode && req.skip_permissions {
+            extra_env.insert(
+                "MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS".to_string(),
+                "true".to_string(),
+            );
+        }
         super::spawner::spawn_tracked_slot(
             &self.pty,
             &self.store,
@@ -175,7 +182,7 @@ impl EngineController for GenericCliController {
                 sandbox: req.sandbox.clone(),
                 approval_policy: req.approval_policy.clone(),
                 tool_policy_path: req.tool_policy_path.clone(),
-                extra_env: std::collections::HashMap::new(),
+                extra_env,
                 initial_prompt: None,
                 command_override: None,
                 ..Default::default()
