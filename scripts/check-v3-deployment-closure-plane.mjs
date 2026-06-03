@@ -12,6 +12,7 @@ const files = {
   projectRegistry: 'crates/missiond-daemon/src/handlers/knowledge/project/registry.rs',
   timeline: 'crates/missiond-daemon/src/handlers/comm/timeline.rs',
   deployDaemon: 'scripts/deploy-daemon.sh',
+  taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
 };
 
 const required = [
@@ -49,6 +50,13 @@ const required = [
   ['deployDaemon', 'release-local compiled runtime dir'],
   ['deployDaemon', 'MISSIOND_COMPILED_RUNTIME_DIR'],
   ['deployDaemon', 'compiled-runtime'],
+  ['taskDelegate', 'DEPLOY_OPS_OUTPUT_CONTRACT'],
+  ['taskDelegate', 'DEPLOY_OPS_APPROVAL_REQUIRED'],
+  ['taskDelegate', 'deploy_ops_mutation_without_approval'],
+  ['taskDelegate', 'deploy_ops_action_requires_approval'],
+  ['taskDelegate', 'DEPLOY_OPS_MUTATIONS_REQUIRING_APPROVAL'],
+  ['taskDelegate', 'mutation_action'],
+  ['taskDelegate', 'redeploy'],
 ];
 
 const diagnostics = [];
