@@ -20,6 +20,8 @@
       :rule "Human mode requires intent approval and plan approval before execution.")
     (trusted-agent-fast-path
       :rule "Trusted agents may fold intent approval into plan.lisp only through policy gates.")
+    (jarvis-strict-intent-plan-gate
+      :rule "Jarvis broad requests MUST pass the strict intent/plan gate before execution or worker dispatch.")
     (orchestrator-final-truth
       :rule "Workers draft outcomes; orchestrator finalizes reports and completion state.")
     (event-sourced-runtime
