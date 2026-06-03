@@ -43,6 +43,7 @@ const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
 const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
 const CODEX_STARTUP_READY_WAIT_SECS: u64 = 60;
 const CODEX_TRUST_READY_WAIT_SECS: u64 = 12;
+const CODEX_PROMPT_SEND_READY_WAIT_SECS: u64 = 12;
 const CODEX_MANUAL_TEXT_LIMIT: usize = 4096;
 const CODEX_MANUAL_KEY_NAMES: &[&str] = &[
     "enter",
@@ -80,6 +81,7 @@ pub(crate) struct CodexProviderDriver {
 struct CodexObservation {
     lines: Vec<String>,
     text: String,
+    session_state: SessionState,
     snapshot: missiond_core::pty::PtyRecognitionSnapshot,
 }
 
@@ -926,12 +928,14 @@ impl CodexProviderDriver {
         CodexObservation {
             lines,
             text,
+            session_state: state,
             snapshot,
         }
     }
 
     fn observations_equivalent(left: &CodexObservation, right: &CodexObservation) -> bool {
         left.text == right.text
+            && left.session_state == right.session_state
             && left.snapshot.state == right.snapshot.state
             && left.snapshot.reason == right.snapshot.reason
             && left.snapshot.blocked_kind == right.snapshot.blocked_kind
@@ -1208,8 +1212,14 @@ impl CodexProviderDriver {
                     None => return false,
                 };
             }
-            if is_ready_for_codex_text(&observation) {
+            if is_codex_ready_for_prompt_send(&observation) {
                 return true;
+            }
+            if is_ready_for_codex_text(&observation) {
+                return self
+                    .wait_for_prompt_send_ready(result, slot_id, observation)
+                    .await
+                    .is_some();
             }
             if started.elapsed() > Duration::from_secs(8) {
                 result.status = ProviderBoxStatus::Blocked;
@@ -1227,6 +1237,81 @@ impl CodexProviderDriver {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+    }
+
+    async fn wait_for_prompt_send_ready(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        initial: CodexObservation,
+    ) -> Option<CodexObservation> {
+        let before = initial.clone();
+        let mut observation = initial;
+        if is_codex_ready_screen_with_busy_session(&observation) {
+            let started = Instant::now();
+            loop {
+                if started.elapsed() >= Duration::from_secs(CODEX_PROMPT_SEND_READY_WAIT_SECS) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                observation = self.observe(slot_id).await;
+                if is_codex_ready_for_prompt_send(&observation) {
+                    result.record_step(PtyStepRecord::new(
+                        Self::pty_observation(slot_id, &before),
+                        PtyStepAction {
+                            action_type: "wait".to_string(),
+                            human_input: format!(
+                                "wait until Codex PTY session state is idle before prompt submit ({}s)",
+                                CODEX_PROMPT_SEND_READY_WAIT_SECS
+                            ),
+                            redacted: false,
+                        },
+                        Self::pty_observation(slot_id, &observation),
+                        Some("Codex screen and PTY session are both ready for prompt input".to_string()),
+                        PtyStepVerificationStatus::Verified,
+                    ));
+                    return Some(observation);
+                }
+            }
+        }
+
+        let mut step = PtyStepRecord::new(
+            Self::pty_observation(slot_id, &before),
+            PtyStepAction {
+                action_type: "wait".to_string(),
+                human_input: format!(
+                    "wait until Codex PTY session state is idle before prompt submit ({}s)",
+                    CODEX_PROMPT_SEND_READY_WAIT_SECS
+                ),
+                redacted: false,
+            },
+            Self::pty_observation(slot_id, &observation),
+            Some("Codex screen and PTY session are both ready for prompt input".to_string()),
+            PtyStepVerificationStatus::Failed,
+        );
+        step.diagnostics.push(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+            "Codex screen is ready, but PTY session state did not become idle for prompt submission",
+            json!({
+                "slot_id": slot_id,
+                "session_state": observation.session_state,
+                "screen_state": observation.snapshot.state,
+                "reason": observation.snapshot.reason,
+            }),
+        ));
+        result.record_step(step);
+        result.status = ProviderBoxStatus::Blocked;
+        result.add_diagnostic(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+            "Codex slot is not ready for prompt submission",
+            json!({
+                "slot_id": slot_id,
+                "session_state": observation.session_state,
+                "screen_state": observation.snapshot.state,
+                "reason": observation.snapshot.reason,
+            }),
+        ));
+        None
     }
 
     async fn submit_prompt_step(
@@ -3551,6 +3636,18 @@ fn is_ready_for_codex_text(observation: &CodexObservation) -> bool {
         && observation.snapshot.reason != "session_state:Exited"
 }
 
+fn is_codex_ready_for_prompt_send(observation: &CodexObservation) -> bool {
+    is_ready_for_codex_text(observation) && observation.session_state == SessionState::Idle
+}
+
+fn is_codex_ready_screen_with_busy_session(observation: &CodexObservation) -> bool {
+    is_ready_for_codex_text(observation)
+        && !matches!(
+            observation.session_state,
+            SessionState::Idle | SessionState::Exited | SessionState::Error
+        )
+}
+
 fn is_codex_empty_composer(observation: &CodexObservation) -> bool {
     observation
         .snapshot
@@ -4849,6 +4946,7 @@ mod tests {
         let observation = CodexObservation {
             text: lines.join("\n"),
             snapshot: recognize_screen(CliEngine::Codex, &lines, SessionState::Idle),
+            session_state: SessionState::Idle,
             lines,
         };
         assert!(codex_workspace_candidate_strings(&observation)
@@ -5129,11 +5227,36 @@ mod tests {
         let observation = CodexObservation {
             text: lines.join("\n"),
             lines,
+            session_state: SessionState::Idle,
             snapshot,
         };
 
         assert!(is_ready_for_codex_text(&observation));
+        assert!(is_codex_ready_for_prompt_send(&observation));
         assert!(is_codex_empty_composer(&observation));
+    }
+
+    #[test]
+    fn codex_prompt_send_ready_requires_idle_session_state() {
+        let lines = vec![
+            "╭─────────────────────────────────────────────╮".to_string(),
+            "│ >_ OpenAI Codex (v0.135.0-alpha.1)          │".to_string(),
+            "│ model:     gpt-5.5 xhigh   /model to change │".to_string(),
+            "╰─────────────────────────────────────────────╯".to_string(),
+            "› Find and fix a bug in @filename".to_string(),
+            "  gpt-5.5 xhigh · ~/Projects/missiond".to_string(),
+        ];
+        let snapshot = recognize_screen(CliEngine::Codex, &lines, SessionState::Thinking);
+        let observation = CodexObservation {
+            text: lines.join("\n"),
+            lines,
+            session_state: SessionState::Thinking,
+            snapshot,
+        };
+
+        assert!(is_ready_for_codex_text(&observation));
+        assert!(!is_codex_ready_for_prompt_send(&observation));
+        assert!(is_codex_ready_screen_with_busy_session(&observation));
     }
 
     #[test]
@@ -5143,6 +5266,7 @@ mod tests {
         let observation = CodexObservation {
             text: lines.join("\n"),
             lines,
+            session_state: SessionState::Exited,
             snapshot,
         };
 
@@ -5166,6 +5290,7 @@ mod tests {
         let observation = CodexObservation {
             lines,
             text: "fixture".to_string(),
+            session_state: SessionState::Idle,
             snapshot,
         };
 
