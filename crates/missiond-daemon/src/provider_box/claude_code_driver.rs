@@ -35,6 +35,8 @@ const OBSERVE_STABLE_POLL_MS: u64 = 120;
 const OBSERVE_STABLE_MAX_MS: u64 = 1_000;
 const DURABLE_FINAL_IDLE_GRACE_SECS: u64 = 4;
 const PROMPT_SUBMISSION_IDLE_GRACE_SECS: u64 = 30;
+const OUTPUT_CONTRACT_FILE_MIN_BYTES: u64 = 40;
+const OUTPUT_CONTRACT_FILE_STABLE_SECS: u64 = 2;
 
 #[derive(Clone)]
 pub(crate) struct ClaudeCodeProviderDriver {
@@ -2140,6 +2142,8 @@ impl ClaudeCodeProviderDriver {
         let monitor_started_at = Instant::now();
         let mut idle_seen_at: Option<Instant> = None;
         let mut last_analysis_line_count = 0usize;
+        let output_contract_file = output_contract_must_write_file(request);
+        let mut output_contract_file_seen: Option<(u64, Instant)> = None;
 
         loop {
             let analysis =
@@ -2213,6 +2217,63 @@ impl ClaudeCodeProviderDriver {
                     Some(slot_status_value(slot_id, status.as_ref(), &observation));
                 result.final_text = Some(final_text.to_string());
                 return result.clone();
+            }
+
+            if let Some(path) = output_contract_file.as_ref() {
+                match output_contract_file_completion_state(
+                    path,
+                    output_contract_file_seen.as_ref(),
+                ) {
+                    OutputContractFileState::Pending { len } => {
+                        output_contract_file_seen = Some((len, Instant::now()));
+                    }
+                    OutputContractFileState::Stable { len } => {
+                        let _ = self.pty.write(slot_id, "\x1b").await;
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        let status = self.pty.get_status(slot_id).await;
+                        let observation = self.observe(slot_id).await;
+                        let durable_source = path.display().to_string();
+                        result.status = ProviderBoxStatus::Completed;
+                        result.provider = request
+                            .provider
+                            .clone()
+                            .or_else(|| Some("claude_code".to_string()));
+                        result.model = request.model.clone();
+                        result.model_profile = request.model_profile.clone();
+                        result.provider_conversation_id = Some(session_id.to_string());
+                        result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                            result.provider.clone(),
+                            CliEngine::ClaudeCode,
+                            Some(slot_id.to_string()),
+                            session_id.to_string(),
+                            "output_contract_file",
+                            Some(durable_source.clone()),
+                            request.cwd.clone().or_else(|| request.project_root.clone()),
+                            "must_write_file_stable",
+                        ));
+                        result.durable_source = Some(durable_source.clone());
+                        result.slot_status =
+                            Some(slot_status_value(slot_id, status.as_ref(), &observation));
+                        result.final_text =
+                            Some(format!("Output contract file written: {}", path.display()));
+                        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                            "PROVIDER_OUTPUT_CONTRACT_FILE_COMPLETED",
+                            "ClaudeCode worker-turn completed from stable output_contract.must_write_file",
+                            json!({
+                                "slot_id": slot_id,
+                                "session_id": session_id,
+                                "must_write_file": path.display().to_string(),
+                                "bytes": len,
+                                "line_count": analysis.line_count,
+                                "rule": "The requested artifact file is the canonical output; PTY screen text was not used as a semantic final"
+                            }),
+                        ));
+                        return result.clone();
+                    }
+                    OutputContractFileState::MissingOrTooSmall => {
+                        output_contract_file_seen = None;
+                    }
+                }
             }
 
             let observation = self.observe(slot_id).await;
@@ -3627,6 +3688,44 @@ fn analyze_claude_code_jsonl_after_cursor(
     analysis
 }
 
+enum OutputContractFileState {
+    MissingOrTooSmall,
+    Pending { len: u64 },
+    Stable { len: u64 },
+}
+
+fn output_contract_must_write_file(request: &ProviderInteractionRequest) -> Option<PathBuf> {
+    request
+        .output_contract
+        .as_ref()
+        .and_then(|contract| contract.get("must_write_file"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn output_contract_file_completion_state(
+    path: &Path,
+    previous: Option<&(u64, Instant)>,
+) -> OutputContractFileState {
+    let Ok(metadata) = fs::metadata(path) else {
+        return OutputContractFileState::MissingOrTooSmall;
+    };
+    if !metadata.is_file() || metadata.len() < OUTPUT_CONTRACT_FILE_MIN_BYTES {
+        return OutputContractFileState::MissingOrTooSmall;
+    }
+    let len = metadata.len();
+    if let Some((previous_len, seen_at)) = previous {
+        if *previous_len == len
+            && seen_at.elapsed() >= Duration::from_secs(OUTPUT_CONTRACT_FILE_STABLE_SECS)
+        {
+            return OutputContractFileState::Stable { len };
+        }
+    }
+    OutputContractFileState::Pending { len }
+}
+
 fn find_claude_code_session_jsonl(claude_home: &Path, session_id: &str) -> Option<PathBuf> {
     let filename = format!("{session_id}.jsonl");
     let roots = [claude_home.join("projects"), claude_home.to_path_buf()];
@@ -3841,11 +3940,13 @@ fn claude_code_message_content_text(content: &Value) -> Option<String> {
 mod tests {
     use std::fs;
     use std::io::Write;
-    use std::time::Duration;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use missiond_core::pty::{recognize_screen, PtyCanonicalState};
     use missiond_core::types::CliEngine;
     use missiond_core::SessionState;
+    use serde_json::json;
 
     use crate::provider_box::types::{BoxCommand, ProviderInteractionRequest};
 
@@ -3861,8 +3962,10 @@ mod tests {
         durable_final_missing_idle_grace_elapsed,
         extract_claude_code_mcp_server_entries_from_screen, find_claude_code_session_jsonl,
         is_claude_code_logout_success, normalize_claude_code_model_target,
-        normalize_claude_code_permission_mode, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,
-        ClaudeCodeObservation, ClaudeCodePermissionMode, DURABLE_FINAL_IDLE_GRACE_SECS,
+        normalize_claude_code_permission_mode, output_contract_file_completion_state,
+        output_contract_must_write_file, ClaudeCodeJsonlCursor, ClaudeCodeModelTarget,
+        ClaudeCodeObservation, ClaudeCodePermissionMode, OutputContractFileState,
+        DURABLE_FINAL_IDLE_GRACE_SECS, OUTPUT_CONTRACT_FILE_STABLE_SECS,
         PROMPT_SUBMISSION_IDLE_GRACE_SECS,
     };
 
@@ -3929,6 +4032,57 @@ mod tests {
         assert!(caps.status);
         assert!(caps.switch_model);
         assert!(caps.control_action);
+    }
+
+    #[test]
+    fn must_write_file_output_contract_resolves_path() {
+        let mut request =
+            ProviderInteractionRequest::new(BoxCommand::WorkerTurn, CliEngine::ClaudeCode);
+        request.output_contract = Some(json!({
+            "media_type": "text/markdown",
+            "must_write_file": "/tmp/missiond-grounding-report.md"
+        }));
+
+        assert_eq!(
+            output_contract_must_write_file(&request),
+            Some(PathBuf::from("/tmp/missiond-grounding-report.md"))
+        );
+    }
+
+    #[test]
+    fn output_contract_file_completion_requires_stable_size() {
+        let path = std::env::temp_dir().join(format!(
+            "missiond-output-contract-{}.md",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, "short").expect("write short output contract file");
+        assert!(matches!(
+            output_contract_file_completion_state(&path, None),
+            OutputContractFileState::MissingOrTooSmall
+        ));
+
+        std::fs::write(
+            &path,
+            "## Evidence\nThis grounding report has enough bytes to satisfy the contract.\n",
+        )
+        .expect("write output contract file");
+        let pending = output_contract_file_completion_state(&path, None);
+        let len = match pending {
+            OutputContractFileState::Pending { len } => len,
+            _ => panic!("expected pending file state"),
+        };
+        assert!(matches!(
+            output_contract_file_completion_state(
+                &path,
+                Some(&(
+                    len,
+                    Instant::now()
+                        - Duration::from_secs(OUTPUT_CONTRACT_FILE_STABLE_SECS + 1),
+                )),
+            ),
+            OutputContractFileState::Stable { len: stable_len } if stable_len == len
+        ));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
