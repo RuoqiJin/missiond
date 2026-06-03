@@ -3474,7 +3474,11 @@ impl PTYWebSocketServer {
                 Some("claude-code-mcp-grounding"),
             )
             .await?;
-            let result = match Self::gather_jarvis_grounding(
+            let result = match Self::gather_jarvis_grounding_with_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
                 &jarvis_grounding,
                 JarvisGroundingRequest {
                     query: objective_text.clone(),
@@ -3810,7 +3814,11 @@ impl PTYWebSocketServer {
                     Some("claude-code-mcp-grounding"),
                 )
                 .await?;
-                let result = match Self::gather_jarvis_grounding(
+                let result = match Self::gather_jarvis_grounding_with_progress(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &chat_id,
+                    Some(&interaction_id),
                     &jarvis_grounding,
                     JarvisGroundingRequest {
                         query: objective_text.clone(),
@@ -8348,6 +8356,50 @@ JSON 字段必须是：\n\
         })
     }
 
+    async fn gather_jarvis_grounding_with_progress(
+        stream: &mut TcpStream,
+        progress_bus: &JarvisProgressBus,
+        chat_id: &str,
+        interaction_id: Option<&str>,
+        slot: &JarvisGroundingSlot,
+        req: JarvisGroundingRequest,
+    ) -> Result<JarvisGroundingResult, String> {
+        const HEARTBEAT_SECS: u64 = 8;
+        const GROUNDING_AUTHOR: &str = "claude-code-mcp-grounding";
+
+        let started = tokio::time::Instant::now();
+        let mut gathering = Box::pin(Self::gather_jarvis_grounding(slot, req));
+        let mut heartbeat = Box::pin(tokio::time::sleep(std::time::Duration::from_secs(
+            HEARTBEAT_SECS,
+        )));
+        loop {
+            tokio::select! {
+                result = &mut gathering => return result,
+                _ = &mut heartbeat => {
+                    let elapsed = started.elapsed().as_secs();
+                    Self::write_jarvis_progress(
+                        stream,
+                        progress_bus,
+                        chat_id,
+                        interaction_id,
+                        "grounding",
+                        "context_gather_waiting",
+                        "running",
+                        &format!("ClaudeCode grounding 工位仍在运行，已等待 {elapsed}s；当前步骤：收集 MissionD 上下游全链上下文并写入 grounding report。"),
+                        Some(elapsed),
+                        None,
+                        Some(GROUNDING_AUTHOR),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    heartbeat.as_mut().reset(
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(HEARTBEAT_SECS),
+                    );
+                }
+            }
+        }
+    }
+
     async fn put_jarvis_artifact(
         slot: &JarvisArtifactSlot,
         req: JarvisArtifactRequest,
@@ -10939,7 +10991,11 @@ JSON 字段必须是：\n\
                     }
                 }
             } else if intent_confirmed {
-                match Self::gather_jarvis_grounding(
+                match Self::gather_jarvis_grounding_with_progress(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &chat_id,
+                    None,
                     &jarvis_grounding,
                     JarvisGroundingRequest {
                         query: objective_text.clone(),
@@ -11185,7 +11241,11 @@ JSON 字段必须是：\n\
                         Some("claude-code-mcp-grounding"),
                     )
                     .await?;
-                    let result = match Self::gather_jarvis_grounding(
+                    let result = match Self::gather_jarvis_grounding_with_progress(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        None,
                         &jarvis_grounding,
                         JarvisGroundingRequest {
                             query: objective_text.clone(),
