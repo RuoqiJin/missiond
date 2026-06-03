@@ -60,6 +60,7 @@ const INVENTORIED_LEGACY = [
     needles: [
       'jarvis_author_text_provider',
       'MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER',
+      'MISSIOND_JARVIS_ALLOW_NON_CODEX_AUTHORS',
       'semantic-authoring',
       'pure-text-single-turn',
     ],

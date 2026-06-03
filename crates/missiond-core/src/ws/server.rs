@@ -6415,11 +6415,16 @@ impl PTYWebSocketServer {
     }
 
     fn jarvis_author_text_provider() -> String {
-        std::env::var("MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER")
+        let requested = std::env::var("MISSIOND_JARVIS_AUTHOR_TEXT_ONLY_PROVIDER")
             .ok()
-            .map(|value| value.trim().to_string())
+            .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "codex_cli".to_string())
+            .unwrap_or_else(|| "codex_cli".to_string());
+        match requested.as_str() {
+            "codex" | "codex_cli" | "codex-cli" => "codex_cli".to_string(),
+            _ if env_flag("MISSIOND_JARVIS_ALLOW_NON_CODEX_AUTHORS") => requested,
+            _ => "codex_cli".to_string(),
+        }
     }
 
     fn jarvis_text_only_slot_id(
