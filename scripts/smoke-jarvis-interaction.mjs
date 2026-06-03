@@ -2,6 +2,7 @@
 
 const args = new Set(process.argv.slice(2));
 const json = args.has('--json');
+const allowPending = args.has('--allow-pending') || process.env.JARVIS_SMOKE_ALLOW_PENDING === '1';
 const baseUrl = stripTrailingSlash(
   process.env.JARVIS_BASE_URL || 'https://jarvis.xiaojinpro.top',
 );
@@ -14,7 +15,7 @@ let token =
   '';
 const objective =
   process.env.JARVIS_SMOKE_OBJECTIVE ||
-  '只读 smoke：请确认 MissionD Jarvis intent/plan gate 是否会先生成 intent draft，不要改文件、不要创建部署。';
+  '只读 smoke：请根据 MissionD 上下文回答：Jarvis 默认交互现在是否会归档 intent 和 plan 而不弹确认卡？不要改文件，不要创建 BoardTask。';
 
 function stripTrailingSlash(value) {
   return String(value).replace(/\/+$/, '');
@@ -80,7 +81,31 @@ function parseSseEvent(raw) {
 }
 
 function eventNames(events) {
-  return events.map((event) => event.event);
+  return events.map((event) => inferredEventName(event));
+}
+
+function inferredEventName(item) {
+  if (!item) return 'unknown';
+  if (item.event && item.event !== 'message') return item.event;
+  const data = item.data;
+  if (data && typeof data === 'object') {
+    if (data.schema === 'missiond.interaction-envelope.v1') return 'received';
+    if (data.authenticated === true) return 'authenticated';
+    if (data.permission_context) return 'permission_resolved';
+    if (data.phase === 'grounding') return 'grounding';
+    if (data.phase === 'intent_archived') return 'intent_archived';
+    if (data.phase === 'key_judgment_draft') return 'key_judgment_draft';
+    if (data.phase === 'plan_archived') return 'plan_archived';
+    if (data.plan_artifact_id) return 'plan_archived';
+    if (data.key_judgment_artifact_id) return 'key_judgment_draft';
+    if (data.intent_artifact_id) return 'intent_archived';
+    if (data.grounding_context_id) return 'grounding';
+    if (data.confirm_payload) return 'confirm_required';
+    if (data.board_task_id || data.board_task_ids) return 'board_task_created';
+    if (data.phase === 'result_pending' || data.status === 'result_pending') return 'result_pending';
+    if (data.artifact_hash || data.result_artifact_hash) return 'result_artifact';
+  }
+  return item.event || 'message';
 }
 
 function includesAny(events, candidates) {
@@ -121,6 +146,37 @@ function hasReviewableArtifactDraft(events, expectedEvent) {
           && data.author.trim().length > 0
           && data.artifact_body.includes(':authority')));
   });
+}
+
+function hasArchivedArtifact(events, expectedEvent) {
+  return events.some((event) => {
+    const data = event?.data;
+    if (!data || typeof data !== 'object') return false;
+    const inferred = inferredEventName(event);
+    const matchesIntent = expectedEvent === 'intent_archived'
+      && (inferred === 'intent_archived' || data.phase === 'intent_archived' || data.intent_artifact_id);
+    const matchesPlan = expectedEvent === 'plan_archived'
+      && (inferred === 'plan_archived' || data.phase === 'plan_archived' || data.plan_artifact_id);
+    const expectedForm = expectedEvent === 'plan_archived' ? '(plan-draft' : '(intent-draft';
+    return (matchesIntent || matchesPlan)
+      && typeof data.review_text === 'string'
+      && data.review_text.trim().length > 0
+      && data.artifact_language === 'lisp'
+      && typeof data.artifact_body === 'string'
+      && data.artifact_body.includes(expectedForm);
+  });
+}
+
+function hasTerminalDirectAnswer(events) {
+  const names = eventNames(events);
+  return names.includes('answer_delta')
+    && names.includes('result_artifact')
+    && names.includes('final');
+}
+
+function hasPendingDiagnostic(events) {
+  const names = eventNames(events);
+  return names.includes('diagnostic') && names.includes('result_pending');
 }
 
 function parseSecretRef(ref) {
@@ -213,7 +269,7 @@ async function main() {
     });
   } else {
     const names = eventNames(first.events);
-    for (const required of ['received', 'authenticated', 'grounding', 'intent_draft', 'confirm_required']) {
+    for (const required of ['received', 'authenticated', 'permission_resolved', 'intent_archived', 'grounding', 'key_judgment_draft', 'plan_archived']) {
       if (!names.includes(required)) {
         diagnostics.push({
           code: 'JARVIS_INTERACTION_EVENT_MISSING',
@@ -222,23 +278,37 @@ async function main() {
         });
       }
     }
-    if (includesAny(first.events, ['board_task_created', 'worker_dispatched'])) {
+    if (includesAny(first.events, ['intent_draft', 'plan_draft', 'confirm_required'])) {
       diagnostics.push({
-        code: 'JARVIS_CONFIRMATION_BYPASS',
-        message: 'Initial broad request created or dispatched work before intent/plan confirmation.',
-      });
-    }
-    if (!hasOpenAIArtifactProjection(first.events, 'intent_draft')) {
-      diagnostics.push({
-        code: 'OPENAI_ARTIFACT_PROJECTION_MISSING',
-        message: 'Initial broad request must mirror intent_draft as an OpenAI-compatible artifact delta for legacy iOS/chat clients.',
+        code: 'JARVIS_CONFIRMATION_CARD_LEAK',
+        message: 'Default Jarvis/iOS flow must archive intent.lisp and plan.lisp without emitting review/confirm cards.',
         events: names,
       });
     }
-    if (!hasReviewableArtifactDraft(first.events, 'intent_draft')) {
+    if (includesAny(first.events, ['board_task_created', 'worker_dispatched'])) {
       diagnostics.push({
-        code: 'REVIEWABLE_ARTIFACT_BODY_MISSING',
-        message: 'intent_draft must carry review_text plus Lisp artifact_body before the user can confirm intent.',
+        code: 'JARVIS_CONFIRMATION_BYPASS',
+        message: 'Default direct-answer smoke created or dispatched work instead of answering from grounded plan context.',
+      });
+    }
+    if (!hasArchivedArtifact(first.events, 'intent_archived')) {
+      diagnostics.push({
+        code: 'ARCHIVED_ARTIFACT_BODY_MISSING',
+        message: 'intent_archived must carry review_text plus Lisp artifact_body for replay analysis without a confirmation card.',
+        events: names,
+      });
+    }
+    if (!hasArchivedArtifact(first.events, 'plan_archived')) {
+      diagnostics.push({
+        code: 'ARCHIVED_ARTIFACT_BODY_MISSING',
+        message: 'plan_archived must carry review_text plus Lisp artifact_body for replay analysis without a confirmation card.',
+        events: names,
+      });
+    }
+    if (!hasTerminalDirectAnswer(first.events) && !(allowPending && hasPendingDiagnostic(first.events))) {
+      diagnostics.push({
+        code: 'TERMINAL_DIRECT_ANSWER_MISSING',
+        message: 'Default Jarvis smoke must end with answer_delta/result_artifact/final, or explicit diagnostic+result_pending when --allow-pending is set.',
         events: names,
       });
     }

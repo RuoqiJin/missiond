@@ -343,6 +343,8 @@ struct JarvisCodexPlanResponse {
     requires_board_task: bool,
     steps: Vec<String>,
     #[serde(default)]
+    direct_answer_draft: Option<String>,
+    #[serde(default)]
     key_judgment: Option<String>,
     #[serde(default)]
     answer_policy: Option<String>,
@@ -459,6 +461,7 @@ struct JarvisAuthoredPlanDraft {
     requires_board_task: bool,
     artifact_body: String,
     steps: Vec<String>,
+    direct_answer_draft: Option<String>,
     answer_policy: Option<String>,
     provider_hint: Option<String>,
     boundary: Option<String>,
@@ -4570,6 +4573,7 @@ impl PTYWebSocketServer {
         let mut generated_plan_atomization_graph: Option<serde_json::Value> = None;
         let mut generated_execution_mode: Option<String> = None;
         let mut generated_requires_board_task: Option<bool> = None;
+        let mut generated_direct_answer_draft: Option<String> = None;
         let plan_artifact_id = if !plan_confirmed {
             let authored_plan = match Self::author_jarvis_plan_draft_with_progress(
                 &mut stream,
@@ -4671,6 +4675,7 @@ impl PTYWebSocketServer {
                 "artifact_language": "lisp",
                 "artifact_body": plan_artifact_body,
                 "steps": plan_steps,
+                "direct_answer_draft": authored_plan.direct_answer_draft,
                 "workstreams": authored_plan.workstreams,
                 "atom_tasks": authored_plan.atom_tasks,
                 "dependency_edges": authored_plan.dependency_edges,
@@ -4780,6 +4785,12 @@ impl PTYWebSocketServer {
             generated_requires_board_task = plan
                 .get("requires_board_task")
                 .and_then(|value| value.as_bool());
+            generated_direct_answer_draft = plan
+                .get("direct_answer_draft")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
             let plan_event_name = if confirmation_required {
                 "plan_draft"
             } else {
@@ -4843,6 +4854,7 @@ impl PTYWebSocketServer {
                         "missiond_key_judgment_planning_implications": key_judgment_ref.planning_implications,
                         "missiond_key_judgment_acceptance_focus": key_judgment_ref.acceptance_focus,
                         "missiond_plan_artifact_id": plan_artifact_id,
+                        "missiond_direct_answer_draft": generated_direct_answer_draft.clone(),
                         "missiond_plan_atomization_graph_json": serde_json::to_string(
                             plan.get("atomization_graph").unwrap_or(&serde_json::Value::Null)
                         ).ok(),
@@ -4895,6 +4907,8 @@ impl PTYWebSocketServer {
             .unwrap_or_else(|| "work_order".to_string())
             .to_ascii_lowercase();
         if execution_mode == "grounded_direct_answer" {
+            let direct_answer_draft = generated_direct_answer_draft
+                .or_else(|| interaction_metadata_string(&envelope, "missiond_direct_answer_draft"));
             let requires_board_task = generated_requires_board_task.unwrap_or_else(|| {
                 interaction_metadata_bool(&envelope, "missiond_requires_board_task")
             });
@@ -4934,6 +4948,7 @@ impl PTYWebSocketServer {
                 &intent_artifact_id,
                 &plan_artifact_id,
                 &key_judgment_ref,
+                direct_answer_draft.as_deref(),
                 &permission_context,
                 &sources_used,
                 &provider_box_http,
@@ -6673,9 +6688,10 @@ JSON 字段必须是：\n\
   review_text: string，给用户看的审阅摘要，必须说明边界：确认 plan 后才会进入 execution_mode 指定路径，结果以 artifact 为准。\n\
   execution_mode: string，只能是 grounded_direct_answer、work_order、investigation_only 三者之一。普通问答/解释/身份确认/状态说明选 grounded_direct_answer；需要改代码、部署、长期运行或多工位任务选 work_order；只读调查但需要工位证据选 investigation_only。\n\
   requires_board_task: boolean。grounded_direct_answer 必须是 false；work_order 和 investigation_only 必须是 true。\n\
+  direct_answer_draft: string|null。grounded_direct_answer 时必须给出基于 grounding_report_preview、key_judgment 和 sources_used 的用户可见中文答案草稿，先用一到三行说明当前执行到哪一步，再直接回答用户；work_order/investigation_only 时必须为 null 或空字符串。\n\
   key_judgment: string，必须复述输入里的关键判断。\n\
   steps: string[]，2 到 6 个中文步骤，每步是可审阅的计划动作，不是执行结果。\n\
-  answer_policy: string，说明直接回答或工位结果如何使用 grounding sources；grounded_direct_answer 时必须说明使用 provider_box grounded-direct-answer 且不创建 BoardTask。\n\
+  answer_policy: string，说明直接回答或工位结果如何使用 grounding sources；grounded_direct_answer 时必须说明优先使用 plan direct_answer_draft 直接终止，必要时才使用 provider_box grounded-direct-answer fallback，且不创建 BoardTask。\n\
   provider_hint: string，例如 provider-box-codex、codex-review-worker、claude-code-default。\n\
   boundary: string，计划确认边界和不执行承诺。\n\
   assumptions: string[]，你做出的假设。\n\
@@ -7256,6 +7272,13 @@ JSON 字段必须是：\n\
                 if parsed.requires_board_task {
                     anyhow::bail!("grounded_direct_answer plan must set requires_board_task=false");
                 }
+                parsed.direct_answer_draft = parsed
+                    .direct_answer_draft
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                if parsed.direct_answer_draft.is_none() {
+                    anyhow::bail!("grounded_direct_answer plan must include direct_answer_draft");
+                }
             }
             "work_order" | "investigation_only" => {
                 if !parsed.requires_board_task {
@@ -7264,6 +7287,7 @@ JSON 字段必须是：\n\
                         parsed.execution_mode
                     );
                 }
+                parsed.direct_answer_draft = None;
             }
             other => {
                 anyhow::bail!(
@@ -7651,7 +7675,7 @@ JSON 字段必须是：\n\
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "(plan-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :key-judgment-artifact-id {}\n  :key-judgment-artifact-hash {}\n  :key-judgment {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:mode {}\n     :requires-board-task {}\n     :answer-policy {}\n     :provider-hint {}\n     :direct-answer-provider provider-box\n     :completion-authority {})\n  :steps [\n{}\n  ]\n  :atomization-json {}\n  :assignment-policy {}\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
+            "(plan-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :key-judgment-artifact-id {}\n  :key-judgment-artifact-hash {}\n  :key-judgment {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:mode {}\n     :requires-board-task {}\n     :answer-policy {}\n     :provider-hint {}\n     :direct-answer-provider provider-box\n     :direct-answer-draft {}\n     :completion-authority {})\n  :steps [\n{}\n  ]\n  :atomization-json {}\n  :assignment-policy {}\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
             Self::jarvis_lisp_string(schema),
             Self::jarvis_lisp_string(&authority),
             Self::jarvis_lisp_string(&provider),
@@ -7680,6 +7704,7 @@ JSON 字段必须是：\n\
             },
             Self::jarvis_lisp_optional(draft.answer_policy.as_deref()),
             Self::jarvis_lisp_optional(draft.provider_hint.as_deref()),
+            Self::jarvis_lisp_optional(draft.direct_answer_draft.as_deref()),
             if draft.requires_board_task {
                 "task-result-artifact"
             } else {
@@ -7969,6 +7994,7 @@ JSON 字段必须是：\n\
             requires_board_task: parsed.requires_board_task,
             artifact_body,
             steps: parsed.steps,
+            direct_answer_draft: parsed.direct_answer_draft,
             answer_policy: parsed.answer_policy,
             provider_hint: parsed.provider_hint,
             boundary: parsed.boundary,
@@ -8863,7 +8889,15 @@ JSON 字段必须是：\n\
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or_else(Self::jarvis_communicator_timeout_secs)
-            .clamp(10, 600)
+            .clamp(10, 240)
+    }
+
+    fn jarvis_direct_answer_stream_budget_secs(timeout_secs: u64) -> u64 {
+        std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_STREAM_BUDGET_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_else(|| timeout_secs.min(90))
+            .clamp(10, timeout_secs.max(10).min(180))
     }
 
     async fn read_jarvis_file_preview(path: Option<&str>, max_chars: usize) -> Option<String> {
@@ -8905,6 +8939,7 @@ JSON 字段必须是：\n\
         intent_artifact_id: &str,
         plan_artifact_id: &str,
         key_judgment: &JarvisKeyJudgmentArtifactRef,
+        plan_direct_answer_draft: Option<&str>,
         permission_context: &serde_json::Value,
         sources_used: &[String],
     ) -> (String, String) {
@@ -8920,6 +8955,7 @@ JSON 字段必须是：\n\
             "grounding_report_hash": grounding_report_hash,
             "grounding_report_preview": grounding_report_preview,
             "context_preview": context_preview,
+            "plan_direct_answer_draft": plan_direct_answer_draft,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
             "key_judgment_artifact_id": key_judgment.artifact_id,
@@ -9139,6 +9175,7 @@ JSON 字段必须是：\n\
         intent_artifact_id: &str,
         plan_artifact_id: &str,
         key_judgment: &JarvisKeyJudgmentArtifactRef,
+        plan_direct_answer_draft: Option<&str>,
         permission_context: &serde_json::Value,
         sources_used: &[String],
         provider_box_http: &ProviderBoxHttpSlot,
@@ -9146,7 +9183,6 @@ JSON 字段必须是：\n\
         conversation_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let provider = Self::jarvis_direct_answer_provider();
-        let engine = Self::provider_box_engine_for_provider(provider.as_str())?;
         let timeout_secs = Self::jarvis_direct_answer_timeout_secs();
         Self::write_jarvis_progress(
             stream,
@@ -9156,90 +9192,180 @@ JSON 字段必须是：\n\
             "direct_answer",
             "provider_box_grounded_direct_answer_start",
             "running",
-            "plan 已确认为 grounded_direct_answer，正在通过 provider_box 生成直接回答，不创建 BoardTask。",
+            "plan 已确认为 grounded_direct_answer，正在准备直接回答；优先使用 plan.lisp 草稿，必要时再进入 provider_box，不创建 BoardTask。",
             None,
             None,
             Some("provider-box"),
         )
         .await?;
 
-        let grounding_report_preview =
-            Self::read_jarvis_grounding_report_preview(grounding_report_file).await;
-        let context_preview = Self::read_jarvis_context_preview(context_pack_file).await;
-        let (system_prompt, prompt) = Self::build_jarvis_direct_answer_prompt(
-            objective,
-            grounding_context_id,
-            context_pack_path,
-            context_pack_file,
-            grounding_report_file,
-            grounding_report_artifact_path,
-            grounding_report_hash,
-            grounding_report_preview.as_deref(),
-            context_preview.as_deref(),
-            intent_artifact_id,
-            plan_artifact_id,
-            key_judgment,
-            permission_context,
-            sources_used,
-        );
-        let prompt = format!("{system_prompt}\n\n{prompt}");
-        let correlation_id = format!("jarvis-direct-answer-{}", uuid::Uuid::new_v4().simple());
-        let pure_text_command = engine == "agy";
-        let command = if pure_text_command {
-            "pure-text-single-turn"
+        let mut answer_provider = provider.clone();
+        let mut answer_source = "provider_box_grounded_direct_answer".to_string();
+        let answer = if let Some(draft) = plan_direct_answer_draft
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            answer_provider = "codex_cli_plan_author".to_string();
+            answer_source = "plan_direct_answer_draft".to_string();
+            Self::write_jarvis_progress(
+                stream,
+                progress_bus,
+                chat_id,
+                interaction_id,
+                "direct_answer",
+                "plan_direct_answer_draft_selected",
+                "completed",
+                "plan.lisp 已包含 grounded direct answer 草稿，直接归档为本次终态回答，不再额外等待慢 provider 回合。",
+                None,
+                None,
+                Some("codex-plan-author"),
+            )
+            .await?;
+            draft.to_string()
         } else {
-            "grounded-direct-answer"
-        };
-        let slot_id = Self::jarvis_text_only_slot_id(
-            provider.as_str(),
-            std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
-                .ok()
-                .or_else(|| std::env::var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID").ok())
-                .as_deref(),
-            "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
-        );
-        let model = Self::jarvis_direct_answer_model(provider.as_str());
-        let body = serde_json::json!({
-            "schema": "missiond.provider-interaction-request.v1",
-            "command": command,
-            "provider": &provider,
-            "engine": engine,
-            "prompt": prompt,
-            "model": model.clone(),
-            "timeout_secs": timeout_secs,
-            "correlation_id": correlation_id,
-            "slot_id": slot_id,
-            "provider_box_lane": "jarvis-communication-officer",
-            "xjp_request_stage": "grounded_direct_answer",
-            "dangerously_bypass_approvals_and_sandbox": pure_text_command && engine == "agy",
-            "allow_model_switch": pure_text_command && engine == "agy",
-            "allow_respawn": true,
-            "require_verification": true,
-            "model_switch_policy": {
-                "target_model": model,
+            let engine = Self::provider_box_engine_for_provider(provider.as_str())?;
+            let grounding_report_preview =
+                Self::read_jarvis_grounding_report_preview(grounding_report_file).await;
+            let context_preview = Self::read_jarvis_context_preview(context_pack_file).await;
+            let (system_prompt, prompt) = Self::build_jarvis_direct_answer_prompt(
+                objective,
+                grounding_context_id,
+                context_pack_path,
+                context_pack_file,
+                grounding_report_file,
+                grounding_report_artifact_path,
+                grounding_report_hash,
+                grounding_report_preview.as_deref(),
+                context_preview.as_deref(),
+                intent_artifact_id,
+                plan_artifact_id,
+                key_judgment,
+                plan_direct_answer_draft,
+                permission_context,
+                sources_used,
+            );
+            let prompt = format!("{system_prompt}\n\n{prompt}");
+            let correlation_id = format!("jarvis-direct-answer-{}", uuid::Uuid::new_v4().simple());
+            let pure_text_command = engine == "agy";
+            let command = if pure_text_command {
+                "pure-text-single-turn"
+            } else {
+                "grounded-direct-answer"
+            };
+            let slot_id = Self::jarvis_text_only_slot_id(
+                provider.as_str(),
+                std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
+                    .ok()
+                    .or_else(|| std::env::var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID").ok())
+                    .as_deref(),
+                "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
+            );
+            let model = Self::jarvis_direct_answer_model(provider.as_str());
+            let body = serde_json::json!({
+                "schema": "missiond.provider-interaction-request.v1",
+                "command": command,
+                "provider": &provider,
+                "engine": engine,
+                "prompt": prompt,
+                "model": model.clone(),
+                "timeout_secs": timeout_secs,
+                "correlation_id": correlation_id,
+                "slot_id": slot_id,
+                "provider_box_lane": "jarvis-communication-officer",
+                "xjp_request_stage": "grounded_direct_answer",
+                "dangerously_bypass_approvals_and_sandbox": pure_text_command && engine == "agy",
+                "allow_model_switch": pure_text_command && engine == "agy",
                 "allow_respawn": true,
-                "require_verification": true
-            },
-            "no_tools": true,
-            "no_mcp": true,
-            "no_shell": true,
-            "no_file_access": true,
-            "output_contract": {
-                "media_type": "text/plain",
-                "single_turn": true
-            },
-            "tool_policy": {
-                "sandbox": "read-only",
-                "approval_policy": "never"
+                "require_verification": true,
+                "model_switch_policy": {
+                    "target_model": model,
+                    "allow_respawn": true,
+                    "require_verification": true
+                },
+                "no_tools": true,
+                "no_mcp": true,
+                "no_shell": true,
+                "no_file_access": true,
+                "output_contract": {
+                    "media_type": "text/plain",
+                    "single_turn": true
+                },
+                "tool_policy": {
+                    "sandbox": "read-only",
+                    "approval_policy": "never"
+                }
+            });
+            let stream_budget_secs = Self::jarvis_direct_answer_stream_budget_secs(timeout_secs);
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(stream_budget_secs),
+                Self::call_provider_box_turn(
+                    provider_box_http,
+                    body,
+                    timeout_secs,
+                    "JARVIS_DIRECT_ANSWER",
+                ),
+            )
+            .await
+            {
+                Ok(answer) => answer?,
+                Err(_) => {
+                    let diagnostic = serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "phase": "direct_answer",
+                        "phase_code": "direct_answer",
+                        "error": {
+                            "code": "JARVIS_DIRECT_ANSWER_STREAM_BUDGET_EXCEEDED",
+                            "message": format!("provider-box direct answer did not finish within the public stream budget of {stream_budget_secs}s")
+                        },
+                        "timeout_secs": timeout_secs,
+                        "stream_budget_secs": stream_budget_secs,
+                        "terminal_task_result": false,
+                        "next_action": "Replay/follow the interaction ledger or retry after inspecting provider-box lane state; do not keep the public SSE stream open past edge timeout."
+                    });
+                    Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                    Self::persist_interaction_event(
+                        db,
+                        conversation_id,
+                        interaction_id,
+                        "diagnostic",
+                        &diagnostic,
+                    )
+                    .await;
+                    let pending_event = serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "phase": "direct_answer",
+                        "status": "provider_box_running_or_cancelled",
+                        "terminal_task_result": false,
+                        "follow_payload": {
+                            "missiond_follow_interaction_id": interaction_id,
+                            "grounding_context_id": grounding_context_id,
+                            "intent_artifact_id": intent_artifact_id,
+                            "plan_artifact_id": plan_artifact_id,
+                            "stream": true
+                        }
+                    });
+                    Self::write_sse_event(stream, "result_pending", &pending_event).await?;
+                    Self::persist_interaction_event(
+                        db,
+                        conversation_id,
+                        interaction_id,
+                        "result_pending",
+                        &pending_event,
+                    )
+                    .await;
+                    Self::write_sse_openai_text_and_persist(
+                        stream,
+                        chat_id,
+                        "plan.lisp 已归档，但直接回答 provider 未在公网流预算内完成；我先结束本次流，避免 iOS/edge 超时。请稍后通过 interaction follow/replay 查看结果。",
+                        Some("stop"),
+                        db,
+                        conversation_id,
+                    )
+                    .await?;
+                    return Ok(());
+                }
             }
-        });
-        let answer = Self::call_provider_box_turn(
-            provider_box_http,
-            body,
-            timeout_secs,
-            "JARVIS_DIRECT_ANSWER",
-        )
-        .await?;
+        };
         if answer.trim().is_empty() {
             anyhow::bail!("JARVIS_DIRECT_ANSWER_EMPTY: provider-box returned no visible answer");
         }
@@ -9248,7 +9374,8 @@ JSON 字段必须是：\n\
             "worker_status",
             &serde_json::json!({
                 "phase": "direct_answer",
-                "provider": &provider,
+                "provider": &answer_provider,
+                "answer_source": &answer_source,
                 "status": "completed",
                 "terminal_task_result": false,
             }),
@@ -9259,7 +9386,8 @@ JSON 字段必须是：\n\
             "answer_delta",
             &serde_json::json!({
                 "phase": "direct_answer",
-                "provider": &provider,
+                "provider": &answer_provider,
+                "answer_source": &answer_source,
                 "content": answer.clone(),
             }),
         )
@@ -9283,7 +9411,8 @@ JSON 字段必须是：\n\
             "key_judgment_artifact_id": key_judgment.artifact_id,
             "key_judgment_artifact_hash": key_judgment.artifact_hash,
             "key_judgment": key_judgment.judgment,
-            "provider": &provider,
+            "provider": &answer_provider,
+            "answer_source": &answer_source,
             "answer_text": answer,
             "sources_used": sources_used,
             "terminal_task_result": true,
@@ -9308,6 +9437,7 @@ JSON 字段必须是：\n\
                     "key_judgment_artifact_id": key_judgment.artifact_id,
                     "key_judgment_artifact_hash": key_judgment.artifact_hash,
                     "execution_mode": "grounded_direct_answer",
+                    "answer_source": &answer_source,
                 }),
             },
         )
@@ -9323,6 +9453,7 @@ JSON 字段必须是：\n\
                 "artifact_hash": &artifact.artifact_hash,
                 "artifact_path": &artifact.path,
                 "execution_mode": "grounded_direct_answer",
+                "answer_source": &answer_source,
                 "terminal_task_result": true,
                 "board_task_created": false,
             }),
@@ -9335,6 +9466,7 @@ JSON 字段必须是：\n\
             "artifact_hash": &artifact.artifact_hash,
             "artifact_path": &artifact.path,
             "execution_mode": "grounded_direct_answer",
+            "answer_source": &answer_source,
             "terminal_task_result": true,
             "board_task_created": false,
         });
@@ -9354,6 +9486,7 @@ JSON 字段必须是：\n\
                 "interaction_id": interaction_id,
                 "status": "done",
                 "execution_mode": "grounded_direct_answer",
+                "answer_source": &answer_source,
                 "terminal_task_result": true,
                 "result_artifact_id": &artifact.artifact_id,
                 "result_artifact_hash": &artifact.artifact_hash,
@@ -9365,6 +9498,7 @@ JSON 字段必须是：\n\
             "interaction_id": interaction_id,
             "status": "done",
             "execution_mode": "grounded_direct_answer",
+            "answer_source": &answer_source,
             "terminal_task_result": true,
             "result_artifact_id": &artifact.artifact_id,
             "result_artifact_hash": &artifact.artifact_hash,
@@ -11906,6 +12040,7 @@ JSON 字段必须是：\n\
             let mut generated_plan_atomization_graph: Option<serde_json::Value> = None;
             let mut generated_execution_mode: Option<String> = None;
             let mut generated_requires_board_task: Option<bool> = None;
+            let mut generated_direct_answer_draft: Option<String> = None;
             let plan_artifact_id = if !plan_confirmed {
                 let jarvis_plan_author = JarvisPlanAuthorConfig::default();
                 let authored_plan = match Self::author_jarvis_plan_draft_with_progress(
@@ -12006,6 +12141,7 @@ JSON 字段必须是：\n\
                 "artifact_language": "lisp",
                 "artifact_body": plan_artifact_body,
                 "steps": plan_steps,
+                "direct_answer_draft": authored_plan.direct_answer_draft,
                 "workstreams": authored_plan.workstreams,
                 "atom_tasks": authored_plan.atom_tasks,
                 "dependency_edges": authored_plan.dependency_edges,
@@ -12071,6 +12207,12 @@ JSON 字段必须是：\n\
                 generated_requires_board_task = plan
                     .get("requires_board_task")
                     .and_then(|value| value.as_bool());
+                generated_direct_answer_draft = plan
+                    .get("direct_answer_draft")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned);
                 let plan_event_name = if confirmation_required {
                     "plan_draft"
                 } else {
@@ -12134,6 +12276,7 @@ JSON 字段必须是：\n\
                             "missiond_key_judgment_planning_implications": key_judgment_ref.planning_implications,
                             "missiond_key_judgment_acceptance_focus": key_judgment_ref.acceptance_focus,
                             "missiond_plan_artifact_id": plan_artifact_id,
+                            "missiond_direct_answer_draft": generated_direct_answer_draft.clone(),
                             "missiond_plan_atomization_graph_json": serde_json::to_string(
                                 plan.get("atomization_graph").unwrap_or(&serde_json::Value::Null)
                             ).ok(),
@@ -12178,6 +12321,9 @@ JSON 字段必须是：\n\
                 .unwrap_or_else(|| "work_order".to_string())
                 .to_ascii_lowercase();
             if execution_mode == "grounded_direct_answer" {
+                let direct_answer_draft = generated_direct_answer_draft.or_else(|| {
+                    jarvis_confirm_string(&effective_req, "missiond_direct_answer_draft")
+                });
                 let requires_board_task = generated_requires_board_task.unwrap_or_else(|| {
                     jarvis_confirm_bool(&effective_req, "missiond_requires_board_task")
                 });
@@ -12207,6 +12353,7 @@ JSON 字段必须是：\n\
                     &intent_artifact_id,
                     &plan_artifact_id,
                     &key_judgment_ref,
+                    direct_answer_draft.as_deref(),
                     &permission_context,
                     &sources_used,
                     &provider_box_http,
@@ -15208,6 +15355,9 @@ done"#;
                 "创建可审阅 plan draft".to_string(),
                 "等待用户确认 plan".to_string(),
             ],
+            direct_answer_draft: Some(
+                "当前步骤：plan.lisp 已归档。\n结论：这是基于 grounding 的直接回答。".to_string(),
+            ),
             answer_policy: Some("使用 provider_box 基于 grounding 直接回答。".to_string()),
             provider_hint: Some("provider-box-codex".to_string()),
             boundary: Some("确认 plan 后才创建 BoardTask。".to_string()),
@@ -15249,6 +15399,7 @@ done"#;
         assert!(body.contains(":objective \"生成 Codex-authored plan\""));
         assert!(body.contains(":mode grounded-direct-answer"));
         assert!(body.contains(":requires-board-task false"));
+        assert!(body.contains(":direct-answer-draft"));
         assert!(body.contains(":key-judgment-artifact-id \"key-judgment-test\""));
         assert!(body.contains(":atomization-json"));
         assert!(body.contains(":completion-authority interaction-result-artifact"));

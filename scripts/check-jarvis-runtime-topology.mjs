@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const json = process.argv.includes('--json');
 const diagnostics = [];
 
 const SERVICE_RUNTIME = '.missiond/v3/shards/universe/service-runtime.lisp';
-const COMPILED_UNIVERSE = '.missiond/v3/runtime/compiled/compiled-project-universe.json';
+const COMPILED_UNIVERSE_REL = 'compiled-project-universe.json';
+const REPO_COMPILED_UNIVERSE = path.join('.missiond/v3/runtime/compiled', COMPILED_UNIVERSE_REL);
 
 const expected = {
   service_id: 'missiond-jarvis-edge',
@@ -42,6 +45,35 @@ function read(path) {
   }
 }
 
+function compiledUniverseCandidates() {
+  const candidates = [];
+  const compiledRuntimeDir = String(process.env.MISSIOND_COMPILED_RUNTIME_DIR || '').trim();
+  if (compiledRuntimeDir) {
+    candidates.push(path.join(compiledRuntimeDir, COMPILED_UNIVERSE_REL));
+  }
+  const runtimeDir = String(process.env.MISSIOND_RUNTIME_DIR || '').trim();
+  if (runtimeDir) {
+    candidates.push(path.join(runtimeDir, 'compiled', COMPILED_UNIVERSE_REL));
+  }
+  candidates.push(path.join(os.homedir(), '.xjp-mission/active/compiled-runtime', COMPILED_UNIVERSE_REL));
+  candidates.push(path.join(os.homedir(), '.missiond/runtime/missiond/compiled', COMPILED_UNIVERSE_REL));
+  candidates.push(REPO_COMPILED_UNIVERSE);
+  return [...new Set(candidates)];
+}
+
+function resolveCompiledUniversePath() {
+  const candidates = compiledUniverseCandidates();
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (found) return { path: found, candidates };
+  diagnostics.push({
+    code: 'COMPILED_UNIVERSE_NOT_FOUND',
+    path: candidates[0] ?? REPO_COMPILED_UNIVERSE,
+    candidates,
+    message: 'compiled-project-universe.json was not found in MISSIOND_COMPILED_RUNTIME_DIR, MISSIOND_RUNTIME_DIR/compiled, active release, runtime cache, or repo dev fallback.',
+  });
+  return { path: '', candidates };
+}
+
 function requireSource(fragment, code) {
   if (!source.includes(fragment)) {
     diagnostics.push({
@@ -66,17 +98,18 @@ requireSource(':proxy-read-timeout "75s"', 'JARVIS_PROXY_READ_TIMEOUT_MISSING');
 requireSource(':proxy-write-timeout "75s"', 'JARVIS_PROXY_WRITE_TIMEOUT_MISSING');
 requireSource(':proxy-stream-timeout "0"', 'JARVIS_PROXY_STREAM_TIMEOUT_MISSING');
 
-const compiledRaw = read(COMPILED_UNIVERSE);
+const compiledResolution = resolveCompiledUniversePath();
+const compiledRaw = compiledResolution.path ? read(compiledResolution.path) : '';
 if (compiledRaw) {
   let compiled = null;
   try {
     compiled = JSON.parse(compiledRaw);
   } catch (error) {
-    diagnostics.push({
-      code: 'COMPILED_UNIVERSE_INVALID_JSON',
-      path: COMPILED_UNIVERSE,
-      message: error.message,
-    });
+      diagnostics.push({
+        code: 'COMPILED_UNIVERSE_INVALID_JSON',
+        path: compiledResolution.path,
+        message: error.message,
+      });
   }
   if (compiled) {
     const topologies = compiled?.payload?.jarvis_runtime_topologies ?? [];
@@ -84,7 +117,7 @@ if (compiledRaw) {
     if (!topology) {
       diagnostics.push({
         code: 'COMPILED_JARVIS_TOPOLOGY_MISSING',
-        path: COMPILED_UNIVERSE,
+        path: compiledResolution.path,
         message: 'compiled-project-universe must project missiond-jarvis-edge jarvis_runtime_topology.',
       });
     } else {
@@ -92,7 +125,7 @@ if (compiledRaw) {
         if (topology[key] !== value) {
           diagnostics.push({
             code: 'COMPILED_JARVIS_TOPOLOGY_DRIFT',
-            path: COMPILED_UNIVERSE,
+            path: compiledResolution.path,
             field: key,
             expected: value,
             actual: topology[key] ?? null,
@@ -104,7 +137,7 @@ if (compiledRaw) {
     if (!service?.jarvis_runtime_topology) {
       diagnostics.push({
         code: 'COMPILED_SERVICE_TOPOLOGY_MISSING',
-        path: COMPILED_UNIVERSE,
+        path: compiledResolution.path,
         message: 'missiond-jarvis-edge service must carry jarvis_runtime_topology for runtime monitor lookup.',
       });
     }
@@ -116,7 +149,8 @@ const result = {
   schema: 'missiond.jarvis-runtime-topology-check.v1',
   checked: {
     source: SERVICE_RUNTIME,
-    compiled: COMPILED_UNIVERSE,
+    compiled: compiledResolution.path || null,
+    compiled_candidates: compiledResolution.candidates,
   },
   diagnostics,
 };
