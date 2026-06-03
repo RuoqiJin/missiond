@@ -1673,11 +1673,29 @@ fn evidence_source_item_count(key: &str, value: &Value) -> usize {
         "credential_refs" => array_len(value.get("credentialRefs"))
             .max(array_len(value.get("credential_refs")))
             .max(value.as_array().map(Vec::len).unwrap_or(0)),
-        "deployment_events" => array_len(value.get("events")),
+        "deployment_events" => {
+            let summary_count = usize::from(deployment_events_summary_has_content(value));
+            summary_count + array_len(value.get("events"))
+        }
         _ if value.is_null() => 0,
         _ if value.as_object().is_some_and(|object| object.is_empty()) => 0,
         _ => 1,
     }
+}
+
+fn deployment_events_summary_has_content(value: &Value) -> bool {
+    any_field_has_content(
+        value,
+        &[
+            "status",
+            "authority",
+            "candidate_count",
+            "observed_candidates",
+            "relay_diagnostics",
+            "diagnostic",
+            "events",
+        ],
+    )
 }
 
 fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
@@ -2302,6 +2320,7 @@ fn build_evidence_items_with_options(
         project_id,
         task_id,
     );
+    add_deployment_events_summary_item(&mut items, source_summaries, profile, project_id, task_id);
     add_summary_collection_items(
         &mut items,
         source_summaries,
@@ -3609,6 +3628,126 @@ fn add_summary_collection_items(
     }
 }
 
+fn add_deployment_events_summary_item(
+    items: &mut Vec<EvidenceItemInput>,
+    source_summaries: &Value,
+    profile: SourceProfile,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+) {
+    let Some(summary) = source_summaries.get("deployment_events") else {
+        return;
+    };
+    if !deployment_events_summary_has_content(summary) {
+        return;
+    }
+
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_count = summary
+        .get("event_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let inferred_gap = summary
+        .get("relay_diagnostics")
+        .and_then(|value| value.get("inferred_gap"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let title = if status == "ok" || event_count > 0 {
+        "Deployment event provenance"
+    } else if status == "no_matching_deploy_center_events" || inferred_gap != "unknown" {
+        "Deployment event authority gap"
+    } else {
+        "Deployment event diagnostics"
+    };
+    let source_id = deployment_events_summary_source_id(summary);
+    let summary_text = deployment_events_summary_evidence_text(summary);
+    push_evidence_item(
+        items,
+        "runtime_truth",
+        "deploy_center_provenance",
+        source_id.as_deref(),
+        Some("source_summaries.deployment_events"),
+        project_id,
+        task_id,
+        title,
+        &summary_text,
+        summary,
+        profile,
+        None,
+    );
+}
+
+fn deployment_events_summary_source_id(summary: &Value) -> Option<String> {
+    let filters = summary.get("filters");
+    text_from_sources(
+        &[filters, Some(summary)],
+        &[
+            "deploy_center_slug",
+            "deployCenterSlug",
+            "service_id",
+            "serviceId",
+            "project_id",
+            "projectId",
+        ],
+    )
+}
+
+fn deployment_events_summary_evidence_text(summary: &Value) -> String {
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_count = summary
+        .get("event_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let candidate_count = summary
+        .get("candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let dropped_count = summary
+        .get("dropped_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let observed = summary.get("observed_candidates").unwrap_or(&Value::Null);
+    let authoritative_count = observed
+        .get("authoritative_deploy_center_candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let webhook_probe_count = observed
+        .get("webhook_ingest_probe_candidate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let relay = summary.get("relay_diagnostics").unwrap_or(&Value::Null);
+    let inferred_gap = relay
+        .get("inferred_gap")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let next_actions = relay
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(Value::as_str)
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+
+    compact_text(
+        &format!(
+            "Deploy Center deployment_events status {status}; event_count {event_count}; candidate_count {candidate_count}; dropped_count {dropped_count}; authoritative deploy-center.deploy_events candidates {authoritative_count}; non-authoritative webhook ingest probes {webhook_probe_count}; inferred_gap {inferred_gap}. Webhook probes prove MissionD ingest health only, not Deploy Center release provenance. Next actions: {next_actions}.",
+        ),
+        1200,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_evidence_item(
     items: &mut Vec<EvidenceItemInput>,
@@ -3771,7 +3910,10 @@ fn evidence_item_id(
 fn evidence_item_uses_stable_projection_id(source_type: &str) -> bool {
     matches!(
         source_type,
-        "runtime_environment" | "support_catalog" | "deployment_closure_policy"
+        "runtime_environment"
+            | "deploy_center_provenance"
+            | "support_catalog"
+            | "deployment_closure_policy"
     )
 }
 
@@ -6836,6 +6978,122 @@ mod tests {
                 .and_then(Value::as_str),
             Some("missiond_webhook_ingest_ok_deploy_center_relay_absent")
         );
+    }
+
+    #[test]
+    fn deployment_event_gap_counts_as_runtime_truth_lane_item_without_events() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "deployment_events".to_string(),
+            json!({
+                "schema": "missiond.deployment-events-context.v1",
+                "status": "no_matching_deploy_center_events",
+                "authority": "deploy-center ExternalServiceEvent via MissionD EventBridge",
+                "candidate_count": 64,
+                "dropped_count": 64,
+                "observed_candidates": {
+                    "authoritative_deploy_center_candidate_count": 0,
+                    "webhook_ingest_probe_candidate_count": 2
+                },
+                "relay_diagnostics": {
+                    "inferred_gap": "missiond_webhook_ingest_ok_deploy_center_relay_absent"
+                },
+                "events": []
+            }),
+        );
+
+        let lanes = build_evidence_lanes(&sources);
+        let runtime_lane = lanes
+            .get("lanes")
+            .and_then(|value| value.get("runtime_truth"))
+            .expect("runtime lane");
+        assert_eq!(
+            runtime_lane.get("source_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            runtime_lane.get("item_count").and_then(Value::as_u64),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn deployment_event_gap_projects_stable_runtime_truth_evidence_item() {
+        let source = json!({
+            "schema": "missiond.deployment-events-context.v1",
+            "status": "no_matching_deploy_center_events",
+            "authority": "deploy-center ExternalServiceEvent via MissionD EventBridge",
+            "candidate_count": 64,
+            "dropped_count": 64,
+            "filters": {
+                "project_id": "payments",
+                "service_id": "payments",
+                "deploy_center_slug": "xjp-payments"
+            },
+            "observed_candidates": {
+                "authoritative_deploy_center_candidate_count": 0,
+                "webhook_ingest_probe_candidate_count": 2
+            },
+            "relay_diagnostics": {
+                "inferred_gap": "missiond_webhook_ingest_ok_deploy_center_relay_absent",
+                "next_actions": [
+                    "deploy_events cursor inspection",
+                    "deploy_logs-to-deploy_events write-path verification"
+                ]
+            },
+            "events": []
+        });
+        let mut sources = serde_json::Map::new();
+        sources.insert("deployment_events".to_string(), source.clone());
+        let summaries = build_source_summaries(&sources);
+        let catalog = build_support_catalog(&sources);
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::DeployOps,
+            Some("payments"),
+            None,
+        );
+        let item = items
+            .iter()
+            .find(|item| item.source_type == "deploy_center_provenance")
+            .expect("deployment event provenance item");
+        assert_eq!(item.lane_id, "runtime_truth");
+        assert_eq!(item.title, "Deployment event authority gap");
+        assert_eq!(item.source_id.as_deref(), Some("xjp-payments"));
+        assert_eq!(
+            item.source_ref.as_deref(),
+            Some("source_summaries.deployment_events")
+        );
+        assert!(item
+            .summary
+            .contains("missiond_webhook_ingest_ok_deploy_center_relay_absent"));
+        assert!(item
+            .summary
+            .contains("Webhook probes prove MissionD ingest"));
+        let item_id = item.id.clone();
+
+        let mut changed_source = source;
+        changed_source
+            .as_object_mut()
+            .expect("deployment event source object")
+            .insert("candidate_count".to_string(), json!(65));
+        sources.insert("deployment_events".to_string(), changed_source);
+        let summaries = build_source_summaries(&sources);
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::DeployOps,
+            Some("payments"),
+            None,
+        );
+        let changed_item = items
+            .iter()
+            .find(|item| item.source_type == "deploy_center_provenance")
+            .expect("changed deployment event provenance item");
+        assert_eq!(changed_item.id, item_id);
     }
 
     #[test]
