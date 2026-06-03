@@ -44,6 +44,11 @@ const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
 const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
 const CODEX_STARTUP_READY_WAIT_SECS: u64 = 60;
 const CODEX_TRUST_READY_WAIT_SECS: u64 = 12;
+const CODEX_PROMPT_SEND_READY_WAIT_SECS: u64 = 12;
+const CODEX_PROMPT_ROLLOUT_ACK_WAIT_SECS: u64 = 15;
+const CODEX_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS: u64 = 45;
+const CODEX_DURABLE_FINAL_IDLE_GRACE_MIN_SECS: u64 = 10;
+const CODEX_DURABLE_FINAL_IDLE_GRACE_MAX_SECS: u64 = 300;
 const CODEX_MANUAL_TEXT_LIMIT: usize = 4096;
 const CODEX_MANUAL_KEY_NAMES: &[&str] = &[
     "enter",
@@ -81,6 +86,7 @@ pub(crate) struct CodexProviderDriver {
 struct CodexObservation {
     lines: Vec<String>,
     text: String,
+    session_state: SessionState,
     snapshot: missiond_core::pty::PtyRecognitionSnapshot,
 }
 
@@ -933,12 +939,14 @@ impl CodexProviderDriver {
         CodexObservation {
             lines,
             text,
+            session_state: state,
             snapshot,
         }
     }
 
     fn observations_equivalent(left: &CodexObservation, right: &CodexObservation) -> bool {
         left.text == right.text
+            && left.session_state == right.session_state
             && left.snapshot.state == right.snapshot.state
             && left.snapshot.reason == right.snapshot.reason
             && left.snapshot.blocked_kind == right.snapshot.blocked_kind
@@ -1404,6 +1412,12 @@ impl CodexProviderDriver {
             if self.codex_ready_for_prompt(slot_id, &observation).await {
                 return true;
             }
+            if is_ready_for_codex_text(&observation) {
+                return self
+                    .wait_for_prompt_send_ready(result, slot_id, observation)
+                    .await
+                    .is_some();
+            }
             if started.elapsed() > Duration::from_secs(8) {
                 let session_state = self
                     .pty
@@ -1429,23 +1443,110 @@ impl CodexProviderDriver {
         }
     }
 
+    async fn wait_for_prompt_send_ready(
+        &self,
+        result: &mut ProviderBoxResult,
+        slot_id: &str,
+        initial: CodexObservation,
+    ) -> Option<CodexObservation> {
+        let before = initial.clone();
+        let mut observation = initial;
+        if is_codex_ready_screen_with_busy_session(&observation) {
+            let started = Instant::now();
+            loop {
+                if started.elapsed() >= Duration::from_secs(CODEX_PROMPT_SEND_READY_WAIT_SECS) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                observation = self.observe(slot_id).await;
+                if is_codex_ready_for_prompt_send(&observation) {
+                    result.record_step(PtyStepRecord::new(
+                        Self::pty_observation(slot_id, &before),
+                        PtyStepAction {
+                            action_type: "wait".to_string(),
+                            human_input: format!(
+                                "wait until Codex PTY session state is idle before prompt submit ({}s)",
+                                CODEX_PROMPT_SEND_READY_WAIT_SECS
+                            ),
+                            redacted: false,
+                        },
+                        Self::pty_observation(slot_id, &observation),
+                        Some("Codex screen and PTY session are both ready for prompt input".to_string()),
+                        PtyStepVerificationStatus::Verified,
+                    ));
+                    return Some(observation);
+                }
+            }
+        }
+
+        let mut step = PtyStepRecord::new(
+            Self::pty_observation(slot_id, &before),
+            PtyStepAction {
+                action_type: "wait".to_string(),
+                human_input: format!(
+                    "wait until Codex PTY session state is idle before prompt submit ({}s)",
+                    CODEX_PROMPT_SEND_READY_WAIT_SECS
+                ),
+                redacted: false,
+            },
+            Self::pty_observation(slot_id, &observation),
+            Some("Codex screen and PTY session are both ready for prompt input".to_string()),
+            PtyStepVerificationStatus::Failed,
+        );
+        step.diagnostics.push(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+            "Codex screen is ready, but PTY session state did not become idle for prompt submission",
+            json!({
+                "slot_id": slot_id,
+                "session_state": observation.session_state,
+                "screen_state": observation.snapshot.state,
+                "reason": observation.snapshot.reason,
+            }),
+        ));
+        result.record_step(step);
+        result.status = ProviderBoxStatus::Blocked;
+        result.add_diagnostic(ProviderBoxDiagnostic::error(
+            DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
+            "Codex slot is not ready for prompt submission",
+            json!({
+                "slot_id": slot_id,
+                "session_state": observation.session_state,
+                "screen_state": observation.snapshot.state,
+                "reason": observation.snapshot.reason,
+            }),
+        ));
+        None
+    }
+
     async fn submit_prompt_step(
         &self,
         result: &mut ProviderBoxResult,
+        request: &ProviderInteractionRequest,
         slot_id: &str,
         prompt: &str,
     ) -> bool {
         let before = self.observe(slot_id).await;
         let send_result = self.pty.send_fire_and_forget(slot_id, prompt).await;
         let after = self.observe_after_action(slot_id).await;
+        let rollout_ack = if send_result.is_ok() {
+            self.wait_for_correlated_rollout_input(
+                &request.correlation_id,
+                Duration::from_secs(CODEX_PROMPT_ROLLOUT_ACK_WAIT_SECS),
+            )
+            .await
+        } else {
+            None
+        };
         let mut action = PtyStepAction::text("<codex prompt paste + enter>");
         action.redacted = true;
         let status = if send_result.is_err() {
             PtyStepVerificationStatus::Failed
+        } else if rollout_ack.is_some() {
+            PtyStepVerificationStatus::Verified
         } else if after.snapshot.state == PtyCanonicalState::Running
             || Self::observations_changed(&before, &after)
         {
-            PtyStepVerificationStatus::Verified
+            PtyStepVerificationStatus::Ambiguous
         } else {
             PtyStepVerificationStatus::Ambiguous
         };
@@ -1465,8 +1566,20 @@ impl CodexProviderDriver {
                     "error": err.to_string(),
                 }),
             ));
+        } else if rollout_ack.is_none() {
+            step.diagnostics.push(ProviderBoxDiagnostic::error(
+                DIAG_PROVIDER_DURABLE_FINAL_MISSING,
+                "Codex prompt submission did not produce a correlated durable rollout user message",
+                json!({
+                    "slot_id": slot_id,
+                    "correlation_id": request.correlation_id,
+                    "codex_home": self.codex_home.display().to_string(),
+                    "ack_wait_secs": CODEX_PROMPT_ROLLOUT_ACK_WAIT_SECS,
+                    "rule": "provider-box requires durable Codex rollout evidence before treating a prompt submission as verified"
+                }),
+            ));
         }
-        let ok = step.verification_status != PtyStepVerificationStatus::Failed;
+        let ok = step.verification_status == PtyStepVerificationStatus::Verified;
         result.record_step(step);
         ok
     }
@@ -1479,6 +1592,7 @@ impl CodexProviderDriver {
     ) -> ProviderBoxResult {
         let timeout_secs = request.timeout_secs.unwrap_or(180).clamp(10, 7_200);
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let durable_final_idle_grace_secs = codex_durable_final_idle_grace_secs();
         let mut idle_seen_at: Option<Instant> = None;
         let mut unconfirmed_idle_seen_at: Option<Instant> = None;
         let mut prompt_submission_confirmed = false;
@@ -1582,7 +1696,7 @@ impl CodexProviderDriver {
                 }
                 unconfirmed_idle_seen_at = None;
                 if let Some(seen_at) = idle_seen_at {
-                    if seen_at.elapsed() >= Duration::from_secs(3) {
+                    if seen_at.elapsed() >= Duration::from_secs(durable_final_idle_grace_secs) {
                         let mut failed =
                             ProviderBoxResult::base(request, ProviderBoxStatus::Failed);
                         failed.slot_id = Some(slot_id.to_string());
@@ -3033,6 +3147,46 @@ impl CodexProviderDriver {
         .flatten()
     }
 
+    async fn wait_for_correlated_rollout_input(
+        &self,
+        correlation_id: &str,
+        max_wait: Duration,
+    ) -> Option<String> {
+        let started = Instant::now();
+        loop {
+            if let Some(path) = self.find_correlated_rollout_input(correlation_id).await {
+                return Some(path);
+            }
+            if started.elapsed() >= max_wait {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn find_correlated_rollout_input(&self, correlation_id: &str) -> Option<String> {
+        let roots = [
+            self.codex_home.join("sessions"),
+            self.codex_home.join("archived_sessions"),
+        ];
+        let correlation_id = correlation_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut files = Vec::new();
+            for root in roots {
+                collect_jsonl_files(&root, &mut files);
+            }
+            files.sort_by(|a, b| modified_at(b).cmp(&modified_at(a)));
+            files.truncate(80);
+            files
+                .iter()
+                .find(|path| rollout_contains_correlated_input(path, &correlation_id))
+                .map(|path| path.display().to_string())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     async fn extract_image_generation_from_rollouts(
         &self,
         thread_id: &str,
@@ -3317,7 +3471,7 @@ impl ProviderDriver for CodexProviderDriver {
         }
         let prompt = correlate_prompt(request);
         if !self
-            .submit_prompt_step(&mut result, &slot_id, prompt.as_str())
+            .submit_prompt_step(&mut result, request, &slot_id, prompt.as_str())
             .await
         {
             result.status = ProviderBoxStatus::Failed;
@@ -3816,6 +3970,7 @@ fn codex_status_field(text: &str, field: &str) -> Option<String> {
 
 fn should_resolve_codex_startup_surface(observation: &CodexObservation) -> bool {
     is_codex_workspace_trust_prompt(observation)
+        || is_codex_rate_limit_model_switch_prompt(observation)
         || observation.snapshot.reason == "codex:mcp_startup_running"
         || observation.snapshot.state == PtyCanonicalState::Unknown
 }
@@ -4100,6 +4255,23 @@ fn default_codex_home() -> PathBuf {
                 .map(|home| PathBuf::from(home).join(".codex"))
         })
         .unwrap_or_else(|| PathBuf::from(".codex"))
+}
+
+fn clamp_codex_durable_final_idle_grace_secs(value: Option<u64>) -> u64 {
+    value
+        .unwrap_or(CODEX_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS)
+        .clamp(
+            CODEX_DURABLE_FINAL_IDLE_GRACE_MIN_SECS,
+            CODEX_DURABLE_FINAL_IDLE_GRACE_MAX_SECS,
+        )
+}
+
+fn codex_durable_final_idle_grace_secs() -> u64 {
+    clamp_codex_durable_final_idle_grace_secs(
+        std::env::var("MISSIOND_CODEX_DURABLE_FINAL_IDLE_GRACE_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok()),
+    )
 }
 
 fn codex_exec_text_args(output_file: &Path, model: &str, reasoning: Option<&str>) -> Vec<String> {
@@ -4850,6 +5022,18 @@ fn modified_at(path: &Path) -> std::time::SystemTime {
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
+fn rollout_contains_correlated_input(path: &Path, correlation_id: &str) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let reader = BufReader::new(file);
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .any(|event| event_contains_text(&event, correlation_id))
+}
+
 fn extract_correlated_rollout(path: &Path, correlation_id: &str) -> Option<CodexTurnFinal> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
@@ -5202,6 +5386,7 @@ mod tests {
         let observation = CodexObservation {
             text: lines.join("\n"),
             snapshot: recognize_screen(CliEngine::Codex, &lines, SessionState::Idle),
+            session_state: SessionState::Idle,
             lines,
         };
         assert!(codex_workspace_candidate_strings(&observation)
@@ -5565,10 +5750,12 @@ mod tests {
         let observation = CodexObservation {
             text: lines.join("\n"),
             lines,
+            session_state: SessionState::Idle,
             snapshot,
         };
 
         assert!(is_ready_for_codex_text(&observation));
+        assert!(is_codex_ready_for_prompt_send(&observation));
         assert!(is_codex_empty_composer(&observation));
     }
 
@@ -5607,6 +5794,7 @@ mod tests {
         let observation = CodexObservation {
             text: lines.join("\n"),
             lines,
+            session_state: SessionState::Exited,
             snapshot,
         };
 
@@ -5630,6 +5818,7 @@ mod tests {
         let observation = CodexObservation {
             lines,
             text: "fixture".to_string(),
+            session_state: SessionState::Idle,
             snapshot,
         };
 

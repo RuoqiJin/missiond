@@ -166,6 +166,14 @@ impl EngineController for ClaudeCodeController {
 
         self.pty.init_slot(&pty_slot).await;
 
+        let mut extra_env = HashMap::new();
+        if req.skip_permissions {
+            extra_env.insert(
+                "MISSIOND_ALLOW_BROAD_SKIP_PERMISSIONS".to_string(),
+                "true".to_string(),
+            );
+        }
+
         crate::slot_orchestrator::spawner::spawn_tracked_slot(
             &self.pty,
             &self.store,

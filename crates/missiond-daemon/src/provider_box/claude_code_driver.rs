@@ -62,6 +62,7 @@ pub(crate) struct ClaudeCodeProviderDriver {
 struct ClaudeCodeObservation {
     lines: Vec<String>,
     text: String,
+    session_state: SessionState,
     snapshot: missiond_core::pty::PtyRecognitionSnapshot,
 }
 
@@ -806,6 +807,7 @@ impl ClaudeCodeProviderDriver {
         ClaudeCodeObservation {
             lines,
             text,
+            session_state: state,
             snapshot,
         }
     }
@@ -815,6 +817,7 @@ impl ClaudeCodeProviderDriver {
         right: &ClaudeCodeObservation,
     ) -> bool {
         left.text == right.text
+            && left.session_state == right.session_state
             && left.snapshot.state == right.snapshot.state
             && left.snapshot.reason == right.snapshot.reason
             && left.snapshot.blocked_kind == right.snapshot.blocked_kind
@@ -2471,8 +2474,70 @@ impl ClaudeCodeProviderDriver {
         let mut output_contract_file_continue_attempts: usize = 0;
 
         loop {
+            if let Some(path) = output_contract_file.as_ref() {
+                match output_contract_file_completion_state(
+                    path,
+                    output_contract_file_seen.as_ref(),
+                ) {
+                    OutputContractFileState::Pending { len } => {
+                        output_contract_file_seen = Some((len, Instant::now()));
+                    }
+                    OutputContractFileState::Stable { len } => {
+                        let durable_source = path.display().to_string();
+                        result.status = ProviderBoxStatus::Completed;
+                        result.provider = request
+                            .provider
+                            .clone()
+                            .or_else(|| Some("claude_code".to_string()));
+                        result.model = request.model.clone();
+                        result.model_profile = request.model_profile.clone();
+                        result.provider_conversation_id = Some(session_id.to_string());
+                        result.provider_session_identity = Some(ProviderSessionIdentity::resolved(
+                            result.provider.clone(),
+                            CliEngine::ClaudeCode,
+                            Some(slot_id.to_string()),
+                            session_id.to_string(),
+                            "output_contract_file",
+                            Some(durable_source.clone()),
+                            request.cwd.clone().or_else(|| request.project_root.clone()),
+                            "must_write_file_stable",
+                        ));
+                        result.durable_source = Some(durable_source.clone());
+                        result.slot_status = Some(json!({
+                            "slot_id": slot_id,
+                            "completion_source": "output_contract_file",
+                            "observation_skipped": true,
+                            "reason": "The requested output_contract.must_write_file is stable; PTY screen observation is diagnostic only."
+                        }));
+                        result.final_text =
+                            Some(format!("Output contract file written: {}", path.display()));
+                        result.add_diagnostic(ProviderBoxDiagnostic::warning(
+                            "PROVIDER_OUTPUT_CONTRACT_FILE_COMPLETED",
+                            "ClaudeCode worker-turn completed from stable output_contract.must_write_file",
+                            json!({
+                                "slot_id": slot_id,
+                                "session_id": session_id,
+                                "must_write_file": path.display().to_string(),
+                                "bytes": len,
+                                "rule": "The requested artifact file is the canonical output; PTY screen text and JSONL final extraction were not required"
+                            }),
+                        ));
+                        return result.clone();
+                    }
+                    OutputContractFileState::MissingOrTooSmall => {
+                        output_contract_file_seen = None;
+                    }
+                }
+            }
+
             let analysis =
                 analyze_claude_code_jsonl_after_cursor(&self.claude_home, session_id, &cursor);
+            if claude_code_analysis_line_count_advanced(
+                analysis.line_count,
+                &mut last_analysis_line_count,
+            ) {
+                idle_seen_at = None;
+            }
             if let Some(upstream_error) = analysis.upstream_error {
                 let status = upstream_error
                     .pointer("/error/status")
@@ -2787,10 +2852,17 @@ impl ClaudeCodeProviderDriver {
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         let monitor_started_at = Instant::now();
         let mut idle_seen_at: Option<Instant> = None;
+        let mut last_analysis_line_count = 0usize;
 
         loop {
             let analysis =
                 analyze_claude_code_jsonl_after_cursor(&self.claude_home, session_id, &cursor);
+            if claude_code_analysis_line_count_advanced(
+                analysis.line_count,
+                &mut last_analysis_line_count,
+            ) {
+                idle_seen_at = None;
+            }
             if let Some(violation) = analysis.violation {
                 result.status = ProviderBoxStatus::Failed;
                 result.add_diagnostic(ProviderBoxDiagnostic::error(
@@ -2913,10 +2985,7 @@ impl ClaudeCodeProviderDriver {
                 return false;
             }
 
-            if matches!(
-                observation.snapshot.state,
-                PtyCanonicalState::Idle | PtyCanonicalState::Complete
-            ) {
+            if claude_code_observation_is_terminal_idle(&observation) {
                 if let Some(seen_at) = idle_seen_at {
                     if durable_final_missing_idle_grace_elapsed(
                         seen_at.elapsed(),
@@ -4079,6 +4148,21 @@ fn is_ready_for_claude_code_text(observation: &ClaudeCodeObservation) -> bool {
         && observation.snapshot.reason != "session_state:Exited"
 }
 
+fn claude_code_observation_is_terminal_idle(observation: &ClaudeCodeObservation) -> bool {
+    matches!(
+        observation.snapshot.state,
+        PtyCanonicalState::Idle | PtyCanonicalState::Complete
+    ) && matches!(
+        observation.session_state,
+        SessionState::Idle | SessionState::Exited
+    )
+}
+
+fn claude_code_observation_is_auto_confirming(observation: &ClaudeCodeObservation) -> bool {
+    observation.snapshot.state == PtyCanonicalState::Blocked
+        && observation.session_state == SessionState::Confirming
+}
+
 fn is_claude_code_logout_success(observation: &ClaudeCodeObservation) -> bool {
     matches!(
         observation.snapshot.blocked_kind.as_deref(),
@@ -4140,7 +4224,12 @@ fn claude_code_composer_text(observation: &ClaudeCodeObservation) -> Option<Stri
             .strip_prefix('❯')
             .or_else(|| trimmed.strip_prefix('›'))
             .or_else(|| trimmed.strip_prefix('>'))?;
-        Some(rest.trim().to_string())
+        let text = rest.trim();
+        if is_claude_code_placeholder_text(text) {
+            Some(String::new())
+        } else {
+            Some(text.to_string())
+        }
     })
 }
 
@@ -5119,7 +5208,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use missiond_core::pty::recognize_screen;
+    use missiond_core::pty::{recognize_screen, PtyCanonicalState};
     use missiond_core::types::CliEngine;
     use missiond_core::SessionState;
     use serde_json::json;
@@ -5149,6 +5238,13 @@ mod tests {
     };
 
     fn observation(lines: &[&str]) -> ClaudeCodeObservation {
+        observation_with_session_state(lines, SessionState::Idle)
+    }
+
+    fn observation_with_session_state(
+        lines: &[&str],
+        session_state: SessionState,
+    ) -> ClaudeCodeObservation {
         let owned = lines
             .iter()
             .map(|line| line.to_string())
@@ -5156,8 +5252,42 @@ mod tests {
         ClaudeCodeObservation {
             lines: owned.clone(),
             text: owned.join("\n"),
-            snapshot: recognize_screen(CliEngine::ClaudeCode, &owned, SessionState::Idle),
+            session_state,
+            snapshot: recognize_screen(CliEngine::ClaudeCode, &owned, session_state),
         }
+    }
+
+    #[test]
+    fn claude_code_placeholder_composer_is_treated_as_empty_input() {
+        let observation = observation(&[
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+            "────────────────────────────────────────────────────────────────",
+            "❯ Try \"edit <filepath> to...\"",
+            "────────────────────────────────────────────────────────────────",
+            "  ▘▘ ▝▝    ~/.xjp-mission/releases/current/source",
+            "▝▜█████▛▘  Opus 4.8 (1M context) · Claude Max",
+            " ▐▛███▜▌   Claude Code v2.1.161",
+        ]);
+
+        assert_eq!(claude_code_composer_text(&observation).as_deref(), Some(""));
+        assert!(!claude_code_staged_command_matches(&observation, "/mcp"));
+    }
+
+    #[test]
+    fn claude_code_real_composer_text_is_preserved() {
+        let observation = observation(&[
+            " ▐▛███▜▌   Claude Code v2.1.161",
+            "▝▜█████▛▘  Opus 4.8 (1M context) · Claude Max",
+            "  ▘▘ ▝▝    ~/Projects/missiond",
+            "❯ /mcp",
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+        ]);
+
+        assert_eq!(
+            claude_code_composer_text(&observation).as_deref(),
+            Some("/mcp")
+        );
+        assert!(claude_code_staged_command_matches(&observation, "/mcp"));
     }
 
     #[test]

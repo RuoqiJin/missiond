@@ -315,7 +315,7 @@ struct JarvisCodexIntentResponse {
     non_goals: Vec<String>,
     #[serde(default)]
     acceptance_signals: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_jarvis_confidence")]
     confidence: Option<String>,
 }
 
@@ -323,7 +323,7 @@ struct JarvisCodexIntentResponse {
 struct JarvisCodexKeyJudgmentResponse {
     judgment: String,
     review_text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_jarvis_confidence")]
     confidence: Option<String>,
     #[serde(default)]
     rejected_hypotheses: Vec<String>,
@@ -356,7 +356,7 @@ struct JarvisCodexPlanResponse {
     non_goals: Vec<String>,
     #[serde(default)]
     acceptance_signals: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_jarvis_confidence")]
     confidence: Option<String>,
     #[serde(default)]
     workstreams: Vec<serde_json::Value>,
@@ -370,6 +370,46 @@ struct JarvisCodexPlanResponse {
     parallel_groups: Vec<serde_json::Value>,
     #[serde(default)]
     assignment_policy: serde_json::Value,
+}
+
+fn deserialize_jarvis_confidence<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::String(text) => normalize_jarvis_confidence_text(&text),
+        serde_json::Value::Number(number) => number.as_f64().map(normalize_jarvis_confidence_score),
+        serde_json::Value::Bool(true) => Some("high".to_string()),
+        serde_json::Value::Bool(false) => Some("low".to_string()),
+        _ => None,
+    }))
+}
+
+fn normalize_jarvis_confidence_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        "high" | "medium" | "low" => Some(lower),
+        _ => trimmed
+            .parse::<f64>()
+            .ok()
+            .map(normalize_jarvis_confidence_score)
+            .or_else(|| Some(trimmed.to_string())),
+    }
+}
+
+fn normalize_jarvis_confidence_score(score: f64) -> String {
+    if score >= 0.75 {
+        "high".to_string()
+    } else if score >= 0.4 {
+        "medium".to_string()
+    } else {
+        "low".to_string()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -4561,24 +4601,17 @@ impl PTYWebSocketServer {
             {
                 Ok(draft) => draft,
                 Err(error) => {
-                    let diagnostic = serde_json::json!({
-                        "phase": "plan_authoring_failed",
-                        "error": {
-                            "code": "JARVIS_PLAN_AUTHOR_FAILED",
-                            "message": error.to_string()
-                        }
-                    });
-                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                    Self::write_sse_openai_text_and_persist(
+                    Self::fail_jarvis_gate_visible(
                         &mut stream,
+                        &jarvis_progress_bus,
                         &chat_id,
-                        "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
-                        Some("stop"),
+                        Some(&interaction_id),
+                        format!("plan.lisp 生成失败：{error}。plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。"),
+                        "plan_authoring_failed",
                         db.as_ref(),
                         jarvis_conv_id.as_deref(),
                     )
                     .await?;
-                    Self::finish_sse(&mut stream).await?;
                     return Ok(());
                 }
             };
@@ -5946,11 +5979,57 @@ impl PTYWebSocketServer {
         event: &str,
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
-        stream
-            .write_all(format!("event: {event}\ndata: {payload}\n\n").as_bytes())
-            .await?;
-        stream.flush().await?;
+        Self::write_sse_bytes(
+            stream,
+            format!("event: {event}\ndata: {payload}\n\n").as_bytes(),
+            "event",
+            Some(event),
+        )
+        .await
+    }
+
+    async fn write_sse_bytes(
+        stream: &mut TcpStream,
+        bytes: &[u8],
+        kind: &str,
+        event: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if let Err(error) = stream.write_all(bytes).await {
+            return Self::handle_sse_write_error(error, kind, event);
+        }
+        if let Err(error) = stream.flush().await {
+            return Self::handle_sse_write_error(error, kind, event);
+        }
         Ok(())
+    }
+
+    fn handle_sse_write_error(
+        error: std::io::Error,
+        kind: &str,
+        event: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if Self::is_client_disconnect_error(&error) {
+            warn!(
+                kind,
+                event = event.unwrap_or(""),
+                error = %error,
+                "Jarvis SSE client disconnected; continuing durable interaction workflow"
+            );
+            Ok(())
+        } else {
+            Err(error.into())
+        }
+    }
+
+    fn is_client_disconnect_error(error: &std::io::Error) -> bool {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::UnexpectedEof
+        )
     }
 
     async fn persist_interaction_event(
@@ -6027,11 +6106,13 @@ impl PTYWebSocketServer {
                 "finish_reason": finish_reason_value
             }]
         });
-        stream
-            .write_all(format!("data: {chunk}\n\n").as_bytes())
-            .await?;
-        stream.flush().await?;
-        Ok(())
+        Self::write_sse_bytes(
+            stream,
+            format!("data: {chunk}\n\n").as_bytes(),
+            "openai_delta",
+            None,
+        )
+        .await
     }
 
     async fn write_jarvis_progress(
@@ -6327,7 +6408,7 @@ impl PTYWebSocketServer {
             return slot_id.to_string();
         }
         match provider {
-            "agy" | "agy_cli" | "agy-cli" => "slot-agy-research".to_string(),
+            "agy" | "agy_cli" | "agy-cli" => "slot-agy-gemini-31-pro-high".to_string(),
             "claude_code" | "claude-code" | "claude" => "slot-claude-code-default".to_string(),
             "gemini" | "gemini_cli" | "gemini-cli" => "slot-gemini-fast-survey".to_string(),
             _ => default_slot.to_string(),
@@ -7829,7 +7910,7 @@ JSON 字段必须是：\n\
         context_sufficiency: Option<&str>,
     ) -> anyhow::Result<JarvisAuthoredPlanDraft> {
         let grounding_report_preview =
-            Self::read_jarvis_grounding_report_preview(grounding_report_file).await;
+            Self::read_jarvis_plan_grounding_report_preview(grounding_report_file).await;
         let prompt = Self::jarvis_codex_plan_prompt(
             config,
             schema,
@@ -8274,9 +8355,10 @@ JSON 字段必须是：\n\
     }
 
     async fn finish_sse(stream: &mut TcpStream) -> anyhow::Result<()> {
-        stream.write_all(b"data: [DONE]\n\n").await?;
-        stream.flush().await?;
-        stream.shutdown().await?;
+        Self::write_sse_bytes(stream, b"data: [DONE]\n\n", "done", None).await?;
+        if let Err(error) = stream.shutdown().await {
+            return Self::handle_sse_write_error(error, "shutdown", None);
+        }
         Ok(())
     }
 
@@ -8338,6 +8420,14 @@ JSON 字段必须是：\n\
             "error": {"code": error_code, "message": message},
             "next_action": "Fix the missing runtime capability instead of falling back to direct PTY execution."
         });
+        Self::persist_interaction_event(
+            db,
+            conversation_id,
+            interaction_id,
+            "diagnostic",
+            &diagnostic,
+        )
+        .await;
         Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
         Self::write_sse_openai_text_and_persist(
             stream,
@@ -8687,11 +8777,15 @@ JSON 字段必须是：\n\
     }
 
     fn jarvis_direct_answer_provider() -> String {
+        Self::jarvis_direct_answer_provider_override()
+            .unwrap_or_else(|| Self::jarvis_communicator_provider())
+    }
+
+    fn jarvis_direct_answer_provider_override() -> Option<String> {
         std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_PROVIDER")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| Self::jarvis_communicator_provider())
     }
 
     fn provider_box_engine_for_provider(provider: &str) -> anyhow::Result<&'static str> {
@@ -8724,7 +8818,15 @@ JSON 字段必须是：\n\
         )
     }
 
-    fn jarvis_communicator_model() -> Option<String> {
+    fn jarvis_default_text_only_model(provider: &str) -> Option<String> {
+        match provider {
+            "agy" | "agy_cli" | "agy-cli" => Some("Gemini 3.1 Pro (High)".to_string()),
+            "codex" | "codex_cli" | "codex-cli" => Some("gpt-5.5".to_string()),
+            _ => None,
+        }
+    }
+
+    fn jarvis_communicator_model_for_provider(provider: &str) -> Option<String> {
         std::env::var("MISSIOND_JARVIS_COMMUNICATOR_MODEL")
             .ok()
             .map(|value| value.trim().to_string())
@@ -8774,6 +8876,12 @@ JSON 字段必须是：\n\
         grounding_report_file: Option<&str>,
     ) -> Option<String> {
         Self::read_jarvis_file_preview(grounding_report_file, 24_000).await
+    }
+
+    async fn read_jarvis_plan_grounding_report_preview(
+        grounding_report_file: Option<&str>,
+    ) -> Option<String> {
+        Self::read_jarvis_file_preview(grounding_report_file, 12_000).await
     }
 
     fn build_jarvis_direct_answer_prompt(
@@ -11822,24 +11930,17 @@ JSON 字段必须是：\n\
                 {
                     Ok(draft) => draft,
                     Err(error) => {
-                        let diagnostic = serde_json::json!({
-                            "phase": "plan_authoring_failed",
-                            "error": {
-                                "code": "JARVIS_PLAN_AUTHOR_FAILED",
-                                "message": error.to_string()
-                            }
-                        });
-                        Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                        Self::write_sse_openai_text_and_persist(
+                        Self::fail_jarvis_gate_visible(
                             &mut stream,
+                            &jarvis_progress_bus,
                             &chat_id,
-                            "plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。",
-                            Some("stop"),
+                            None,
+                            format!("plan.lisp 生成失败：{error}。plan.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的计划生成。"),
+                            "plan_authoring_failed",
                             db.as_ref(),
                             jarvis_conv_id.as_deref(),
                         )
                         .await?;
-                        Self::finish_sse(&mut stream).await?;
                         return Ok(());
                     }
                 };
@@ -14943,6 +15044,19 @@ done"#;
     }
 
     #[test]
+    fn jarvis_author_response_accepts_numeric_confidence() {
+        let output = r#"```json
+{"recognized_objective":"确认 ROUTER 部署方式","intent_kind":"question","understanding":"用户要查明 ROUTER 当前部署链路。","review_text":"确认意图后继续 grounding。","assumptions":[],"non_goals":[],"acceptance_signals":["回答部署方式"],"confidence":0.85}
+```"#;
+        let parsed = PTYWebSocketServer::parse_codex_intent_response(output).unwrap();
+        assert_eq!(parsed.confidence.as_deref(), Some("high"));
+
+        let low = r#"{"judgment":"证据不足","review_text":"需要继续查证","confidence":0.2,"rejected_hypotheses":[],"evidence_refs":["grounding"],"planning_implications":["先查证"],"acceptance_focus":["证据闭环"]}"#;
+        let parsed = PTYWebSocketServer::parse_codex_key_judgment_response(low).unwrap();
+        assert_eq!(parsed.confidence.as_deref(), Some("low"));
+    }
+
+    #[test]
     fn jarvis_codex_key_judgment_response_parses_from_wrapped_output() {
         let output = r#"noise
 {"judgment":"不是算力差异，是用量差异","review_text":"关键判断用于 plan 前提。","confidence":"high","rejected_hypotheses":["算力不足是主因"],"evidence_refs":["grounding-report#usage"],"planning_implications":["查询任务先于代码修改"],"acceptance_focus":["验收用量证据是否支撑判断"]}
@@ -15431,6 +15545,22 @@ done"#;
             "/v1/chat/completions"
         );
         assert_eq!(normalize_public_jarvis_path("/api/slots"), "/api/slots");
+    }
+
+    #[test]
+    fn jarvis_sse_disconnect_errors_are_non_terminal() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            let error = std::io::Error::new(kind, "client went away");
+            assert!(PTYWebSocketServer::is_client_disconnect_error(&error));
+        }
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "bad fd");
+        assert!(!PTYWebSocketServer::is_client_disconnect_error(&error));
     }
 
     #[test]

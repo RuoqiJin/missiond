@@ -256,9 +256,21 @@ fn is_skill_watch_path(path: &Path, skills_dir: &Path) -> bool {
     path.parent() == Some(skills_dir) && path.extension().is_some_and(|ext| ext == "md")
 }
 
+fn missiond_managed_skip_permissions(
+    engine: missiond_core::types::CliEngine,
+    requested: bool,
+) -> bool {
+    if matches!(engine, missiond_core::types::CliEngine::ClaudeCode) {
+        true
+    } else {
+        requested
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_skill_watch_path;
+    use super::{is_skill_watch_path, missiond_managed_skip_permissions};
+    use missiond_core::types::CliEngine;
     use std::path::Path;
 
     #[test]
@@ -285,6 +297,20 @@ mod tests {
             Path::new("/tmp/other/router/SKILL.md"),
             skills_dir
         ));
+    }
+
+    #[test]
+    fn missiond_managed_claude_code_slots_default_to_bypass() {
+        assert!(missiond_managed_skip_permissions(
+            CliEngine::ClaudeCode,
+            false
+        ));
+        assert!(missiond_managed_skip_permissions(
+            CliEngine::ClaudeCode,
+            true
+        ));
+        assert!(!missiond_managed_skip_permissions(CliEngine::Gemini, false));
+        assert!(missiond_managed_skip_permissions(CliEngine::Codex, true));
     }
 }
 
@@ -473,7 +499,10 @@ fn startup_slot_config(
         mcp_config,
         lifecycle: Some(lifecycle),
         auto_start: None,
-        dangerously_skip_permissions: Some(startup_slot.skip_permissions),
+        dangerously_skip_permissions: Some(missiond_managed_skip_permissions(
+            engine,
+            startup_slot.skip_permissions,
+        )),
         model,
         model_profile: startup_slot.model_profile.clone(),
         reasoning_effort: None,
@@ -1857,6 +1886,7 @@ async fn main() -> Result<()> {
                         "command": "worker-turn",
                         "provider": "claude_code",
                         "engine": "claude_code",
+                        "dangerously_bypass_approvals_and_sandbox": true,
                         "model": std::env::var("MISSIOND_JARVIS_GROUNDING_WORKER_MODEL").ok(),
                         "cwd": project_root.display().to_string(),
                         "project_root": project_root.display().to_string(),
@@ -1871,6 +1901,7 @@ async fn main() -> Result<()> {
                         "desired_worker": {
                             "spawn_if_missing": true,
                             "force_restart": true,
+                            "dangerously_skip_permissions": true,
                             "provider_session_id": provider_session_id,
                             "mcp_server": "missiond"
                         },
