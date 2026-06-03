@@ -1202,7 +1202,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         args.task_id.as_deref(),
         include_deployment_closure_policy,
     ));
-    dedupe_evidence_items(&mut evidence_item_inputs);
+    dedupe_evidence_items(&mut evidence_item_inputs, profile);
     let evidence_items = serde_json::to_value(&evidence_item_inputs).unwrap_or_else(|_| json!([]));
     let response_sources =
         response_sources(&sources, &source_summaries, selection.include_raw_sources);
@@ -3946,13 +3946,13 @@ fn evidence_item_uses_stable_projection_id(source_type: &str) -> bool {
     )
 }
 
-fn dedupe_evidence_items(items: &mut Vec<EvidenceItemInput>) {
+fn dedupe_evidence_items(items: &mut Vec<EvidenceItemInput>, profile: SourceProfile) {
     let mut positions = HashMap::new();
     let mut deduped = Vec::with_capacity(items.len());
     for item in items.drain(..) {
         let key = evidence_item_projection_dedupe_key(&item);
         if let Some(index) = positions.get(&key).copied() {
-            if evidence_item_should_replace_duplicate(&item, &deduped[index]) {
+            if evidence_item_should_replace_duplicate(&item, &deduped[index], profile) {
                 deduped[index] = item;
             }
         } else {
@@ -3981,6 +3981,7 @@ fn evidence_item_projection_dedupe_key(item: &EvidenceItemInput) -> String {
 fn evidence_item_should_replace_duplicate(
     candidate: &EvidenceItemInput,
     existing: &EvidenceItemInput,
+    profile: SourceProfile,
 ) -> bool {
     if !evidence_item_is_current_context_projection(candidate) {
         return false;
@@ -3988,7 +3989,13 @@ fn evidence_item_should_replace_duplicate(
     if !evidence_item_is_current_context_projection(existing) {
         return true;
     }
-    evidence_item_source_profile(candidate) != evidence_item_source_profile(existing)
+    let requested_profile = Some(profile.as_str());
+    let candidate_matches_request = evidence_item_source_profile(candidate) == requested_profile;
+    let existing_matches_request = evidence_item_source_profile(existing) == requested_profile;
+    if candidate_matches_request != existing_matches_request {
+        return candidate_matches_request;
+    }
+    candidate_matches_request
 }
 
 fn evidence_item_is_current_context_projection(item: &EvidenceItemInput) -> bool {
@@ -6004,7 +6011,7 @@ mod tests {
         current.metadata = json!({"projection": "mission_context_gather.compact_evidence"});
 
         let mut items = vec![backfill, current];
-        dedupe_evidence_items(&mut items);
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "evi-current");
@@ -6012,7 +6019,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_items_dedupe_prefers_current_profile_projection() {
+    fn evidence_items_dedupe_prefers_requested_profile_projection() {
         let stale_profile = missiond_core::types::EvidenceItemInput {
             id: "evi-intent-default".to_string(),
             lane_id: "support_refs".to_string(),
@@ -6045,7 +6052,7 @@ mod tests {
         });
 
         let mut items = vec![stale_profile, deploy_ops];
-        dedupe_evidence_items(&mut items);
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "evi-deploy-ops");
@@ -6055,6 +6062,58 @@ mod tests {
                 .get("source_profile")
                 .and_then(Value::as_str),
             Some("deploy_ops")
+        );
+    }
+
+    #[test]
+    fn evidence_items_dedupe_keeps_requested_profile_when_stale_profile_is_later() {
+        let mut deploy_ops = missiond_core::types::EvidenceItemInput {
+            id: "evi-deploy-ops".to_string(),
+            lane_id: "support_refs".to_string(),
+            source_type: "deployment_closure_policy".to_string(),
+            source_id: Some("asr".to_string()),
+            source_ref: None,
+            project_id: Some("asr".to_string()),
+            task_id: None,
+            title: "Deployment closure policy".to_string(),
+            summary: "deploy_ops projection from current context gather".to_string(),
+            authority_class: "redacted-support-catalog".to_string(),
+            validity: "current_reference".to_string(),
+            privacy_class: "reference".to_string(),
+            freshness: "runtime_or_catalog_bound".to_string(),
+            score: None,
+            raw_policy: "secret_refs_only".to_string(),
+            evidence_refs: json!([]),
+            metadata: json!({
+                "projection": "mission_context_gather.compact_evidence",
+                "source_profile": "deploy_ops"
+            }),
+        };
+        let mut stale_profile = deploy_ops.clone();
+        stale_profile.id = "evi-intent-default".to_string();
+        stale_profile.summary = "intent_default projection from read model".to_string();
+        stale_profile.score = Some(2.0);
+        stale_profile.metadata = json!({
+            "projection": "mission_context_gather.compact_evidence",
+            "source_profile": "intent_default"
+        });
+
+        let mut items = vec![deploy_ops.clone(), stale_profile];
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "evi-deploy-ops");
+
+        deploy_ops.id = "evi-deploy-ops-fresh".to_string();
+        deploy_ops.summary = "fresh deploy_ops projection from this context gather".to_string();
+        let mut items = vec![items.remove(0), deploy_ops];
+        dedupe_evidence_items(&mut items, SourceProfile::DeployOps);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "evi-deploy-ops-fresh");
+        assert_eq!(
+            items[0].summary,
+            "fresh deploy_ops projection from this context gather"
         );
     }
 
