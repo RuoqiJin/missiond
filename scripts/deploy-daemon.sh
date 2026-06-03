@@ -918,10 +918,56 @@ truthy_env_value() {
   esac
 }
 
+try_recover_stale_self_deploy_release_lease() {
+  [ -d "$SELF_DEPLOY_LEASE_ROOT" ] || return 1
+  local lease_file="$SELF_DEPLOY_LEASE_ROOT/release-lease.json"
+  [ -f "$lease_file" ] || return 1
+
+  local owner_pid expires_status
+  owner_pid="$(node - "$lease_file" <<'NODE' 2>/dev/null || true
+const fs = require('node:fs');
+const file = process.argv[2];
+const lease = JSON.parse(fs.readFileSync(file, 'utf8'));
+const owner = typeof lease.owner === 'string' ? lease.owner : '';
+const match = owner.match(/:(\d+)$/);
+if (!match) process.exit(1);
+process.stdout.write(match[1]);
+NODE
+)"
+  if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+    log "release-lease: removing stale lock owned by exited pid=$owner_pid"
+    rm -rf "$SELF_DEPLOY_LEASE_ROOT"
+    return 0
+  fi
+
+  expires_status="$(node - "$lease_file" <<'NODE' 2>/dev/null || true
+const fs = require('node:fs');
+const file = process.argv[2];
+const lease = JSON.parse(fs.readFileSync(file, 'utf8'));
+const expires = Date.parse(lease.expires_at || '');
+if (Number.isNaN(expires)) process.exit(1);
+process.stdout.write(expires <= Date.now() ? 'expired' : 'fresh');
+NODE
+)"
+  if [ "$expires_status" = "expired" ]; then
+    log "release-lease: removing expired lock $SELF_DEPLOY_LEASE_ROOT"
+    rm -rf "$SELF_DEPLOY_LEASE_ROOT"
+    return 0
+  fi
+
+  return 1
+}
+
 acquire_self_deploy_release_lease() {
   mkdir -p "$INSTALL_ROOT"
   SELF_DEPLOY_LEASE_ID="missiond-daemon:${RELEASE_ID}:$$"
   if ! mkdir "$SELF_DEPLOY_LEASE_ROOT" 2>/dev/null; then
+    try_recover_stale_self_deploy_release_lease || true
+  fi
+  if [ ! -d "$SELF_DEPLOY_LEASE_ROOT" ]; then
+    mkdir "$SELF_DEPLOY_LEASE_ROOT" 2>/dev/null || true
+  fi
+  if [ ! -d "$SELF_DEPLOY_LEASE_ROOT" ]; then
     log "release-lease: conflict lock=$SELF_DEPLOY_LEASE_ROOT"
     if [ -f "$SELF_DEPLOY_LEASE_ROOT/release-lease.json" ]; then
       sed 's/^/[release-lease-conflict] /' "$SELF_DEPLOY_LEASE_ROOT/release-lease.json" >&2 || true
