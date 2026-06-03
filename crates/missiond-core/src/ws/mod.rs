@@ -14,6 +14,6 @@ pub use server::{
     ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, JarvisArtifactFn,
     JarvisArtifactRequest, JarvisArtifactResult, JarvisArtifactSlot, JarvisGroundingFn,
     JarvisGroundingRequest, JarvisGroundingResult, JarvisGroundingSlot, JarvisIntentAuthorConfig,
-    JarvisPlanAuthorConfig, PTYWebSocketServer, ProviderBoxHttpFn, ProviderBoxHttpRequest,
-    ProviderBoxHttpResponse, ProviderBoxHttpSlot, WSServerOptions,
+    JarvisKeyJudgmentAuthorConfig, JarvisPlanAuthorConfig, PTYWebSocketServer, ProviderBoxHttpFn,
+    ProviderBoxHttpRequest, ProviderBoxHttpResponse, ProviderBoxHttpSlot, WSServerOptions,
 };

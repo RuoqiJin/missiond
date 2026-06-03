@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! missiond-core - Core library for Mission Control daemon
 //!
 //! This crate provides core functionality for missiond, including:
@@ -78,8 +80,8 @@ pub use ws::{
     ContextEnrichResult, ContextEnricherFn, ContextEnricherSlot, JarvisArtifactFn,
     JarvisArtifactRequest, JarvisArtifactResult, JarvisArtifactSlot, JarvisGroundingFn,
     JarvisGroundingRequest, JarvisGroundingResult, JarvisGroundingSlot, JarvisIntentAuthorConfig,
-    JarvisPlanAuthorConfig, PTYWebSocketServer, ProviderBoxHttpFn, ProviderBoxHttpRequest,
-    ProviderBoxHttpResponse, ProviderBoxHttpSlot, WSServerOptions,
+    JarvisKeyJudgmentAuthorConfig, JarvisPlanAuthorConfig, PTYWebSocketServer, ProviderBoxHttpFn,
+    ProviderBoxHttpRequest, ProviderBoxHttpResponse, ProviderBoxHttpSlot, WSServerOptions,
 };
 
 // Re-export Sync types

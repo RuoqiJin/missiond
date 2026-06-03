@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 pub const SCHEMA_VERSION: &str = "missiond.compiled-runtime-config.v1";
-pub const SOURCE_HASH: &str = "6fdc8876332e343c68facb52403be289";
+pub const SOURCE_HASH: &str = "40bafc0dbecc505399b5a0a643e626b8";
 pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -27,14 +27,14 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 7,
-      "source_hash": "7777af8593356d80196cf4f0aec1b75b"
+      "source_hash": "621f37560dfca165dbb9872503b06dc2"
     },
     {
       "file": ".missiond/v3/shards/workstation-runtime.lisp",
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 14,
-      "source_hash": "60287fa7ef6e464b51f10c5f9f31043a"
+      "source_hash": "6de1be30db2befa55ab87e791371d5ec"
     },
     {
       "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -48,7 +48,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 28,
-      "source_hash": "e407500cca7cd531140bf84424daf48c"
+      "source_hash": "d968e81b356be3aef47bde73851d5270"
     },
     {
       "file": ".missiond/v3/shards/agent-navigation.lisp",
@@ -193,14 +193,14 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     },
     {
       "id": "control-plane-runtime",
-      "source_hash": "fa9a02d789e2a715fc1e826c9b041bb2",
+      "source_hash": "bbb4eddb1f98c170d47a15177b980cde",
       "source_units": [
         {
           "file": ".missiond/v3/shards/request-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 7,
-          "source_hash": "7777af8593356d80196cf4f0aec1b75b"
+          "source_hash": "621f37560dfca165dbb9872503b06dc2"
         },
         {
           "file": ".missiond/v3/shards/control-plane-runtime.lisp",
@@ -213,27 +213,27 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
     },
     {
       "id": "workstation-runtime",
-      "source_hash": "9a3d5c754bebcf83278ed5f6ad376f22",
+      "source_hash": "9b684dcf646bc8a70cdb339884d01435",
       "source_units": [
         {
           "file": ".missiond/v3/shards/workstation-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 14,
-          "source_hash": "60287fa7ef6e464b51f10c5f9f31043a"
+          "source_hash": "6de1be30db2befa55ab87e791371d5ec"
         }
       ]
     },
     {
       "id": "memory-knowledge-runtime",
-      "source_hash": "a960f82d899adb6e021d83fa4d845a4e",
+      "source_hash": "3d8e61029eba338c15577133d182eec4",
       "source_units": [
         {
           "file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 28,
-          "source_hash": "e407500cca7cd531140bf84424daf48c"
+          "source_hash": "d968e81b356be3aef47bde73851d5270"
         }
       ]
     },
@@ -421,7 +421,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -446,7 +446,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -468,7 +468,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -487,7 +487,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -508,7 +508,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -551,7 +551,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -573,7 +573,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -593,7 +593,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -620,7 +620,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 292,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -657,7 +657,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 359,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     },
     {
@@ -701,7 +701,7 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 315,
         "source_column": 3,
-        "source_hash": "6fdc8876332e343c68facb52403be289"
+        "source_hash": "40bafc0dbecc505399b5a0a643e626b8"
       }
     }
   ],
@@ -976,6 +976,35 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "tool_policy_path": null
       },
       {
+        "id": "agy-gemini-communicator",
+        "engine": "agy",
+        "role": "communicator",
+        "slot_id": "slot-agy-gemini-communicator",
+        "task_type": "jarvis_communicator",
+        "model_profile": null,
+        "model": "gemini-3.1-pro-preview",
+        "task_classes": [
+          "user-communication",
+          "result-summary",
+          "plan-status"
+        ],
+        "capabilities": [
+          "read-only",
+          "user-facing-summary",
+          "evidence-bound-summary"
+        ],
+        "max_concurrency": 1,
+        "timeout_secs": 120,
+        "default_use": "jarvis-communication-officer",
+        "accepts_boardtask": false,
+        "write_allowed": false,
+        "reasoning_effort": null,
+        "search_enabled": false,
+        "sandbox": null,
+        "approval_policy": null,
+        "tool_policy_path": null
+      },
+      {
         "id": "codex-code-worker",
         "engine": "codex",
         "role": "coder",
@@ -1057,6 +1086,35 @@ pub const DEFAULT_RUNTIME_CONFIG_JSON: &str = r#"{
         "max_concurrency": 1,
         "timeout_secs": 180,
         "default_use": "jarvis-intent-authoring",
+        "accepts_boardtask": false,
+        "write_allowed": false,
+        "reasoning_effort": "xhigh",
+        "search_enabled": true,
+        "sandbox": "read-only",
+        "approval_policy": "never",
+        "tool_policy_path": null
+      },
+      {
+        "id": "codex-key-judgment-author",
+        "engine": "codex",
+        "role": "key-judgment-author",
+        "slot_id": "slot-codex-key-judgment-author",
+        "task_type": "codex_key_judgment_author",
+        "model_profile": "codex-master-gpt-5-5-xhigh",
+        "model": null,
+        "task_classes": [
+          "key-judgment-authoring",
+          "planning-premise"
+        ],
+        "capabilities": [
+          "judgment",
+          "evidence-review",
+          "code-read",
+          "search"
+        ],
+        "max_concurrency": 1,
+        "timeout_secs": 180,
+        "default_use": "jarvis-key-judgment-authoring",
         "accepts_boardtask": false,
         "write_allowed": false,
         "reasoning_effort": "xhigh",

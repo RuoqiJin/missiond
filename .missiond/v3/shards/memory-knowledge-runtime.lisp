@@ -627,13 +627,14 @@
        :interaction-id-path "raw_data.interaction_id"
        :future-normalized-tables [interaction_runs interaction_events])
 
-    :events [received authenticated permission_resolved grounding intent_draft plan_draft confirm_required board_task_created worker_dispatched worker_status dispatch_accepted result_pending result_artifact diagnostic final]
+    :events [received authenticated permission_resolved grounding intent_draft intent_archived key_judgment_draft plan_draft plan_archived confirm_required communicator_status communicator_final board_task_created worker_dispatched worker_status dispatch_accepted result_pending result_artifact diagnostic final]
 
     :invariants
       ["Every Jarvis/Web/iOS/WeChat interaction milestone visible to a client MUST be persisted into interaction-ledger with the same interaction_id."
        "GET /interactions/v1/{interaction_id}/events MUST replay durable conversation_events rows and MUST NOT return a static placeholder."
        "Final means terminal task-result-artifact or terminal typed diagnostic; non-terminal dispatch/result_pending events MUST NOT be projected as final."
-       "confirm_required and confirmation progress events MUST be ledgered so clients can resume after network loss."
+       "Jarvis default iOS/openai flow MUST ledger intent_archived and plan_archived for replay without emitting user-blocking confirmation cards; confirm_required remains ledgered only for explicit manual-review/legacy confirmation mode so clients can resume after network loss."
+       "communicator_status and communicator_final events MUST be ledgered for any AGY/Gemini communication-officer user-facing status or final result summary."
        "BoardTask runtime_metadata and interaction raw_data MUST preserve grounding_context_id, intent_artifact_id, plan_artifact_id, worker_conversation_id, and task_result_artifact_hash when available."
        "Topic labels MUST be derived from the user request/topic, not from conservative confirmation text."
        "PTY output, provider screen state, and Board notes are evidence/projection only and are never the interaction completion authority."

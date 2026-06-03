@@ -20,7 +20,7 @@ use crate::pty::{PTYManager, PTYSpawnOptions, SessionEvent, SessionState, Slot a
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -278,6 +278,31 @@ impl Default for JarvisPlanAuthorConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct JarvisKeyJudgmentAuthorConfig {
+    pub slot_id: String,
+    pub model: String,
+    pub reasoning_effort: String,
+    pub search_enabled: bool,
+    pub sandbox: String,
+    pub approval_policy: String,
+    pub timeout_secs: u64,
+}
+
+impl Default for JarvisKeyJudgmentAuthorConfig {
+    fn default() -> Self {
+        Self {
+            slot_id: "slot-codex-key-judgment-author".to_string(),
+            model: "gpt-5.5".to_string(),
+            reasoning_effort: "xhigh".to_string(),
+            search_enabled: true,
+            sandbox: "read-only".to_string(),
+            approval_policy: "never".to_string(),
+            timeout_secs: 180,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct JarvisCodexIntentResponse {
     recognized_objective: String,
@@ -295,12 +320,30 @@ struct JarvisCodexIntentResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct JarvisCodexKeyJudgmentResponse {
+    judgment: String,
+    review_text: String,
+    #[serde(default)]
+    confidence: Option<String>,
+    #[serde(default)]
+    rejected_hypotheses: Vec<String>,
+    #[serde(default)]
+    evidence_refs: Vec<String>,
+    #[serde(default)]
+    planning_implications: Vec<String>,
+    #[serde(default)]
+    acceptance_focus: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct JarvisCodexPlanResponse {
     objective: String,
     review_text: String,
     execution_mode: String,
     requires_board_task: bool,
     steps: Vec<String>,
+    #[serde(default)]
+    key_judgment: Option<String>,
     #[serde(default)]
     answer_policy: Option<String>,
     #[serde(default)]
@@ -315,6 +358,18 @@ struct JarvisCodexPlanResponse {
     acceptance_signals: Vec<String>,
     #[serde(default)]
     confidence: Option<String>,
+    #[serde(default)]
+    workstreams: Vec<serde_json::Value>,
+    #[serde(default)]
+    atom_tasks: Vec<serde_json::Value>,
+    #[serde(default)]
+    dependency_edges: Vec<serde_json::Value>,
+    #[serde(default)]
+    serial_groups: Vec<serde_json::Value>,
+    #[serde(default)]
+    parallel_groups: Vec<serde_json::Value>,
+    #[serde(default)]
+    assignment_policy: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +383,32 @@ struct JarvisAuthoredIntentDraft {
     non_goals: Vec<String>,
     acceptance_signals: Vec<String>,
     confidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct JarvisKeyJudgmentArtifactRef {
+    artifact_id: String,
+    artifact_hash: Option<String>,
+    artifact_path: Option<String>,
+    judgment: String,
+    review_text: Option<String>,
+    confidence: Option<String>,
+    rejected_hypotheses: Vec<String>,
+    evidence_refs: Vec<String>,
+    planning_implications: Vec<String>,
+    acceptance_focus: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct JarvisAuthoredKeyJudgmentDraft {
+    judgment: String,
+    review_text: String,
+    artifact_body: String,
+    confidence: Option<String>,
+    rejected_hypotheses: Vec<String>,
+    evidence_refs: Vec<String>,
+    planning_implications: Vec<String>,
+    acceptance_focus: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +426,48 @@ struct JarvisAuthoredPlanDraft {
     non_goals: Vec<String>,
     acceptance_signals: Vec<String>,
     confidence: Option<String>,
+    key_judgment: Option<String>,
+    atomization_graph: serde_json::Value,
+    workstreams: Vec<serde_json::Value>,
+    atom_tasks: Vec<serde_json::Value>,
+    dependency_edges: Vec<serde_json::Value>,
+    serial_groups: Vec<serde_json::Value>,
+    parallel_groups: Vec<serde_json::Value>,
+    assignment_policy: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+struct JarvisPlanAtomTask {
+    atom_task_id: String,
+    workstream_id: Option<String>,
+    objective: String,
+    category: String,
+    assignee_engine: String,
+    execution_order: String,
+    depends_on: Vec<String>,
+    parallel_group: Option<String>,
+    read_scope: Vec<String>,
+    write_scope: Vec<String>,
+    acceptance: Vec<String>,
+    raw: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+struct JarvisCreatedAtomBoardTask {
+    atom_task_id: String,
+    task: crate::types::BoardTask,
+    category: String,
+    assignee_engine: String,
+    depends_on_atoms: Vec<String>,
+    parallel_group: Option<String>,
+    synthetic: bool,
+}
+
+#[derive(Debug, Clone)]
+struct JarvisCreatedBoardTasks {
+    parent_task: crate::types::BoardTask,
+    atom_tasks: Vec<JarvisCreatedAtomBoardTask>,
+    final_task_id: String,
 }
 
 #[derive(Clone, Default)]
@@ -385,6 +508,8 @@ pub struct WSServerOptions {
     pub default_chat_slot: String,
     /// V3-projected Codex CLI authoring lane for intent.lisp.
     pub jarvis_intent_author: JarvisIntentAuthorConfig,
+    /// V3-projected Codex CLI authoring lane for interaction-key-judgment.
+    pub jarvis_key_judgment_author: JarvisKeyJudgmentAuthorConfig,
     /// V3-projected Codex CLI authoring lane for plan.lisp.
     pub jarvis_plan_author: JarvisPlanAuthorConfig,
 }
@@ -408,6 +533,7 @@ pub struct PTYWebSocketServer {
     tool_count: usize,
     default_chat_slot: String,
     jarvis_intent_author: JarvisIntentAuthorConfig,
+    jarvis_key_judgment_author: JarvisKeyJudgmentAuthorConfig,
     jarvis_plan_author: JarvisPlanAuthorConfig,
 }
 
@@ -563,6 +689,28 @@ fn jarvis_slot_auto_heal_timeout_secs() -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
         .clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS)
+}
+
+fn missiond_env_flag_enabled(key: &str, default_value: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|value| {
+            let value = value.trim();
+            matches!(value, "1" | "true" | "TRUE" | "yes" | "on")
+                || (!matches!(value, "0" | "false" | "FALSE" | "no" | "off") && default_value)
+        })
+        .unwrap_or(default_value)
+}
+
+fn jarvis_intent_plan_confirmation_required() -> bool {
+    if std::env::var("MISSIOND_JARVIS_REQUIRE_CONFIRMATION").is_ok() {
+        return missiond_env_flag_enabled("MISSIOND_JARVIS_REQUIRE_CONFIRMATION", false);
+    }
+    missiond_env_flag_enabled("MISSIOND_JARVIS_INTENT_PLAN_CONFIRMATION", false)
+}
+
+fn jarvis_artifact_projection_openai_delta_enabled() -> bool {
+    missiond_env_flag_enabled("MISSIOND_JARVIS_ARTIFACT_PROJECTION_OPENAI_DELTA", false)
 }
 
 #[allow(dead_code)]
@@ -1719,6 +1867,7 @@ impl PTYWebSocketServer {
             tool_count: options.tool_count,
             default_chat_slot: options.default_chat_slot,
             jarvis_intent_author: options.jarvis_intent_author,
+            jarvis_key_judgment_author: options.jarvis_key_judgment_author,
             jarvis_plan_author: options.jarvis_plan_author,
         }
     }
@@ -1801,6 +1950,7 @@ impl PTYWebSocketServer {
         let tool_count = self.tool_count;
         let default_chat_slot = self.default_chat_slot.clone();
         let jarvis_intent_author = self.jarvis_intent_author.clone();
+        let jarvis_key_judgment_author = self.jarvis_key_judgment_author.clone();
         let jarvis_plan_author = self.jarvis_plan_author.clone();
 
         tokio::spawn(async move {
@@ -1825,9 +1975,10 @@ impl PTYWebSocketServer {
                                 let tool_count = tool_count;
                                 let default_chat_slot = default_chat_slot.clone();
                                 let jarvis_intent_author = jarvis_intent_author.clone();
+                                let jarvis_key_judgment_author = jarvis_key_judgment_author.clone();
                                 let jarvis_plan_author = jarvis_plan_author.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, jarvis_grounding, jarvis_artifact_writer, provider_box_http, tool_count, default_chat_slot, jarvis_intent_author, jarvis_plan_author).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, jarvis_grounding, jarvis_artifact_writer, provider_box_http, tool_count, default_chat_slot, jarvis_intent_author, jarvis_key_judgment_author, jarvis_plan_author).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -2824,6 +2975,7 @@ impl PTYWebSocketServer {
         pty_manager: Option<Arc<PTYManager>>,
         jarvis_progress_bus: JarvisProgressBus,
         jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_key_judgment_author: JarvisKeyJudgmentAuthorConfig,
         jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
@@ -2857,6 +3009,7 @@ impl PTYWebSocketServer {
             pty_manager,
             jarvis_progress_bus,
             jarvis_intent_author,
+            jarvis_key_judgment_author,
             jarvis_plan_author,
             jarvis_grounding,
             jarvis_artifact_writer,
@@ -2873,6 +3026,7 @@ impl PTYWebSocketServer {
         default_chat_slot: String,
         jarvis_progress_bus: JarvisProgressBus,
         jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_key_judgment_author: JarvisKeyJudgmentAuthorConfig,
         jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
@@ -2916,6 +3070,7 @@ impl PTYWebSocketServer {
             pty_manager,
             jarvis_progress_bus,
             jarvis_intent_author,
+            jarvis_key_judgment_author,
             jarvis_plan_author,
             jarvis_grounding,
             jarvis_artifact_writer,
@@ -2933,6 +3088,7 @@ impl PTYWebSocketServer {
         _pty_manager: Option<Arc<PTYManager>>,
         jarvis_progress_bus: JarvisProgressBus,
         jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_key_judgment_author: JarvisKeyJudgmentAuthorConfig,
         jarvis_plan_author: JarvisPlanAuthorConfig,
         jarvis_grounding: JarvisGroundingSlot,
         jarvis_artifact_writer: JarvisArtifactSlot,
@@ -3062,8 +3218,11 @@ impl PTYWebSocketServer {
                 Self::stream_jarvis_task_until_terminal(
                     db,
                     &jarvis_artifact_writer,
+                    &provider_box_http,
+                    &jarvis_progress_bus,
                     &mut stream,
                     &chat_id,
+                    Some(&interaction_id),
                     &follow_task_id,
                     conversation_id.as_deref(),
                 )
@@ -3176,7 +3335,7 @@ impl PTYWebSocketServer {
 
         let intent_confirmed = interaction_metadata_bool(&envelope, "missiond_intent_confirmed");
         let plan_confirmed = interaction_metadata_bool(&envelope, "missiond_plan_confirmed");
-        let objective_text = if intent_confirmed || plan_confirmed {
+        let mut objective_text = if intent_confirmed || plan_confirmed {
             match interaction_metadata_string(&envelope, "missiond_objective") {
                 Some(value) => value,
                 None => {
@@ -3339,28 +3498,28 @@ impl PTYWebSocketServer {
         } else {
             Self::jarvis_pending_grounding_result(&conversation_scope)
         };
-        let grounding_context_id = grounding.grounding_context_id.clone();
-        let context_pack_path = grounding.context_pack_path.clone();
-        let context_pack_file = grounding.context_pack_file.clone();
-        let grounding_report_file = grounding.grounding_report_file.clone();
-        let grounding_report_artifact_path = grounding.grounding_report_artifact_path.clone();
-        let grounding_report_hash = grounding.grounding_report_hash.clone();
-        let grounding_worker_slot_id = grounding.grounding_worker_slot_id.clone();
-        let grounding_worker_turn_id = grounding.grounding_worker_turn_id.clone();
-        let context_sufficiency = grounding.context_sufficiency.clone();
-        let grounding_artifact_hash = grounding.artifact_hash.clone();
-        let context_capsule_hash = grounding.context_capsule_hash.clone();
-        let context_capsule_file = grounding.context_capsule_file.clone();
-        let resolved_topic_id = grounding
+        let mut grounding_context_id = grounding.grounding_context_id.clone();
+        let mut context_pack_path = grounding.context_pack_path.clone();
+        let mut context_pack_file = grounding.context_pack_file.clone();
+        let mut grounding_report_file = grounding.grounding_report_file.clone();
+        let mut grounding_report_artifact_path = grounding.grounding_report_artifact_path.clone();
+        let mut grounding_report_hash = grounding.grounding_report_hash.clone();
+        let mut grounding_worker_slot_id = grounding.grounding_worker_slot_id.clone();
+        let mut grounding_worker_turn_id = grounding.grounding_worker_turn_id.clone();
+        let mut context_sufficiency = grounding.context_sufficiency.clone();
+        let mut grounding_artifact_hash = grounding.artifact_hash.clone();
+        let mut context_capsule_hash = grounding.context_capsule_hash.clone();
+        let mut context_capsule_file = grounding.context_capsule_file.clone();
+        let mut resolved_topic_id = grounding
             .topic_id
             .clone()
             .or_else(|| conversation_scope.topic_id.clone());
-        let resolved_topic_label = grounding
+        let mut resolved_topic_label = grounding
             .topic_label
             .clone()
             .or_else(|| conversation_scope.topic_label.clone());
-        let sources_used = grounding.sources_used.clone();
-        let grounding_diagnostics = grounding.diagnostics.clone();
+        let mut sources_used = grounding.sources_used.clone();
+        let mut grounding_diagnostics = grounding.diagnostics.clone();
         if let (Some(ref db), Some(ref cid), Some(ref capsule_hash)) =
             (&db, &jarvis_conv_id, &context_capsule_hash)
         {
@@ -3447,18 +3606,19 @@ impl PTYWebSocketServer {
                     return Ok(());
                 }
             };
-            let objective_text = authored_intent.objective.clone();
+            objective_text = authored_intent.objective.clone();
+            let confirmation_required = jarvis_intent_plan_confirmation_required();
             let intent_payload = serde_json::json!({
                 "schema": "missiond.interaction-intent-artifact.v1",
                 "interaction_id": interaction_id,
                 "channel": &channel,
-                "phase": "intent_draft",
+                "phase": if confirmation_required { "intent_draft" } else { "intent_archived" },
                 "author": "codex-cli-gpt-5.5-xhigh",
                 "intent_author_slot_id": &jarvis_intent_author.slot_id,
                 "intent_kind": authored_intent.intent_kind,
                 "confidence": authored_intent.confidence,
                 "grounding_context_id": grounding_context_id,
-                "grounding_status": "pending_intent_confirmation",
+                "grounding_status": if confirmation_required { "pending_intent_confirmation" } else { "intent_archived_pending_grounding" },
                 "context_pack_path": context_pack_path,
                 "context_pack_file": context_pack_file,
                 "grounding_report_file": grounding_report_file,
@@ -3481,7 +3641,8 @@ impl PTYWebSocketServer {
                 "non_goals": authored_intent.non_goals,
                 "acceptance_signals": authored_intent.acceptance_signals,
                 "sources_used": sources_used,
-                "requires_confirmation": true
+                "requires_confirmation": confirmation_required,
+                "visibility": if confirmation_required { "review" } else { "archive_only" }
             });
             Self::write_jarvis_progress(
                 &mut stream,
@@ -3491,7 +3652,11 @@ impl PTYWebSocketServer {
                 "intent_artifact",
                 "shared_artifact_put",
                 "running",
-                "正在写入 intent.lisp artifact，写入完成后页面会显示可确认内容。",
+                if confirmation_required {
+                    "正在写入 intent.lisp artifact，写入完成后页面会显示可确认内容。"
+                } else {
+                    "正在归档 intent.lisp artifact；内容只用于存档和回放分析，不弹确认卡。"
+                },
                 None,
                 None,
                 None,
@@ -3540,7 +3705,11 @@ impl PTYWebSocketServer {
                 "intent_artifact",
                 "shared_artifact_put_completed",
                 "completed",
-                "intent.lisp artifact 已写入，正在发送草案卡片和确认请求。",
+                if confirmation_required {
+                    "intent.lisp artifact 已写入，正在发送草案卡片和确认请求。"
+                } else {
+                    "intent.lisp artifact 已归档，下一步收集 MissionD grounding context。"
+                },
                 None,
                 None,
                 None,
@@ -3561,61 +3730,211 @@ impl PTYWebSocketServer {
                     serde_json::Value::String(intent_artifact.path.clone()),
                 );
             }
-            Self::write_sse_event(&mut stream, "intent_draft", &intent).await?;
+            let intent_event_name = if confirmation_required {
+                "intent_draft"
+            } else {
+                "intent_archived"
+            };
+            Self::write_sse_event(&mut stream, intent_event_name, &intent).await?;
             Self::persist_interaction_event(
                 db.as_ref(),
                 jarvis_conv_id.as_deref(),
                 Some(&interaction_id),
-                "intent_draft",
+                intent_event_name,
                 &intent,
             )
             .await;
-            Self::write_sse_openai_missiond_projection(
-                &mut stream,
-                &chat_id,
-                "intent_draft",
-                &intent_artifact_id,
-                &intent_artifact.artifact_hash,
-                &intent_artifact.path,
-            )
-            .await?;
-            let confirm = serde_json::json!({
-                "interaction_id": interaction_id,
-                "phase": "awaiting_intent_confirmation",
-                "confirmation_type": "intent",
-                "confirm_payload": {
-                    "missiond_intent_confirmed": true,
-                    "missiond_objective": objective_text,
-                    "missiond_grounding_context_id": grounding_context_id,
-                    "missiond_intent_artifact_id": intent_artifact_id,
+            if confirmation_required {
+                Self::write_sse_openai_missiond_projection(
+                    &mut stream,
+                    &chat_id,
+                    "intent_draft",
+                    &intent_artifact_id,
+                    &intent_artifact.artifact_hash,
+                    &intent_artifact.path,
+                )
+                .await?;
+            }
+            if !confirmation_required {
+                Self::write_jarvis_progress(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &chat_id,
+                    Some(&interaction_id),
+                    "grounding",
+                    "context_gather_start",
+                    "running",
+                    "intent.lisp 已归档，正在调用挂载 MissionD MCP 的 ClaudeCode 工位收集上下游全链上下文。",
+                    None,
+                    None,
+                    Some("claude-code-mcp-grounding"),
+                )
+                .await?;
+                let result = match Self::gather_jarvis_grounding(
+                    &jarvis_grounding,
+                    JarvisGroundingRequest {
+                        query: objective_text.clone(),
+                        confirmed_intent_artifact_id: Some(intent_artifact_id.clone()),
+                        confirmed_intent_lisp: intent
+                            .get("artifact_body")
+                            .and_then(|value| value.as_str())
+                            .map(ToOwned::to_owned),
+                        conversation_id: jarvis_conv_id.clone(),
+                        chat_id: chat_id.clone(),
+                        user_id: conversation_scope.user_id.clone(),
+                        tenant_id: conversation_scope.tenant_id.clone(),
+                        application_id: conversation_scope.application_id.clone(),
+                        channel: Some(conversation_scope.channel.clone()),
+                        topic_id: conversation_scope.topic_id.clone(),
+                        topic_label: conversation_scope.topic_label.clone(),
+                        permission_context: permission_context.clone(),
+                        unknowns: vec![
+                            "Collect MissionD upstream/downstream facts that affect this archived intent.".to_string(),
+                            "Identify project registry, SSOT, runtime, skill, provider, infra, and permission evidence needed before plan.lisp.".to_string(),
+                            "Write the grounded evidence report for the plan author instead of creating BoardTask or implementing changes.".to_string(),
+                        ],
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        Self::fail_jarvis_gate_visible(
+                            &mut stream,
+                            &jarvis_progress_bus,
+                            &chat_id,
+                            Some(&interaction_id),
+                            error,
+                            "grounding",
+                            db.as_ref(),
+                            jarvis_conv_id.as_deref(),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+                Self::write_jarvis_progress(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &chat_id,
+                    Some(&interaction_id),
+                    "grounding",
+                    "context_gather_completed",
+                    "completed",
+                    &format!(
+                        "grounding 已完成，context={}，下一步进入关键判断和 plan authoring。",
+                        result.grounding_context_id
+                    ),
+                    None,
+                    result.grounding_worker_slot_id.as_deref(),
+                    Some("claude-code-mcp-grounding"),
+                )
+                .await?;
+                grounding_context_id = result.grounding_context_id.clone();
+                context_pack_path = result.context_pack_path.clone();
+                context_pack_file = result.context_pack_file.clone();
+                grounding_report_file = result.grounding_report_file.clone();
+                grounding_report_artifact_path = result.grounding_report_artifact_path.clone();
+                grounding_report_hash = result.grounding_report_hash.clone();
+                grounding_worker_slot_id = result.grounding_worker_slot_id.clone();
+                grounding_worker_turn_id = result.grounding_worker_turn_id.clone();
+                context_sufficiency = result.context_sufficiency.clone();
+                grounding_artifact_hash = result.artifact_hash.clone();
+                context_capsule_hash = result.context_capsule_hash.clone();
+                context_capsule_file = result.context_capsule_file.clone();
+                resolved_topic_id = result
+                    .topic_id
+                    .clone()
+                    .or_else(|| conversation_scope.topic_id.clone());
+                resolved_topic_label = result
+                    .topic_label
+                    .clone()
+                    .or_else(|| conversation_scope.topic_label.clone());
+                sources_used = result.sources_used.clone();
+                grounding_diagnostics = result.diagnostics.clone();
+                if let (Some(ref db), Some(ref cid), Some(ref capsule_hash)) =
+                    (&db, &jarvis_conv_id, &context_capsule_hash)
+                {
+                    let _ = db
+                        .bind_context_capsule(
+                            cid,
+                            capsule_hash,
+                            resolved_topic_id.as_deref(),
+                            resolved_topic_label.as_deref(),
+                        )
+                        .await;
                 }
-            });
-            Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
-            Self::persist_interaction_event(
-                db.as_ref(),
-                jarvis_conv_id.as_deref(),
-                Some(&interaction_id),
-                "confirm_required",
-                &confirm,
-            )
-            .await;
-            Self::persist_jarvis_pending_confirmation(
-                db.as_ref(),
-                jarvis_conv_id.as_deref(),
-                &confirm,
-            )
-            .await;
-            Self::write_sse_openai_text_and_persist(
-                &mut stream,
-                &chat_id,
-                "我已生成 intent.lisp 草案，等待你确认意图。",
-                Some("stop"),
-                db.as_ref(),
-                jarvis_conv_id.as_deref(),
-            )
-            .await?;
-            Self::finish_sse(&mut stream).await?;
-            return Ok(());
+                let grounding_ledger_event = serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "grounding",
+                    "grounding_context_id": grounding_context_id,
+                    "context_pack_path": context_pack_path,
+                    "context_pack_file": context_pack_file,
+                    "grounding_report_file": grounding_report_file,
+                    "grounding_report_artifact_path": grounding_report_artifact_path,
+                    "grounding_report_hash": grounding_report_hash,
+                    "grounding_worker_slot_id": grounding_worker_slot_id,
+                    "grounding_worker_turn_id": grounding_worker_turn_id,
+                    "context_sufficiency": context_sufficiency,
+                    "artifact_hash": grounding_artifact_hash,
+                    "context_capsule_hash": context_capsule_hash,
+                    "context_capsule_file": context_capsule_file,
+                    "topic_id": resolved_topic_id,
+                    "topic_label": resolved_topic_label,
+                    "sources_used": sources_used,
+                    "diagnostics": grounding_diagnostics,
+                });
+                Self::write_sse_event(&mut stream, "grounding", &grounding_ledger_event).await?;
+                Self::persist_interaction_event(
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                    Some(&interaction_id),
+                    "grounding",
+                    &grounding_ledger_event,
+                )
+                .await;
+            }
+            if !confirmation_required {
+                intent_artifact_id
+            } else {
+                let confirm = serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "awaiting_intent_confirmation",
+                    "confirmation_type": "intent",
+                    "confirm_payload": {
+                        "missiond_intent_confirmed": true,
+                        "missiond_objective": objective_text,
+                        "missiond_grounding_context_id": grounding_context_id,
+                        "missiond_intent_artifact_id": intent_artifact_id,
+                    }
+                });
+                Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+                Self::persist_interaction_event(
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                    Some(&interaction_id),
+                    "confirm_required",
+                    &confirm,
+                )
+                .await;
+                Self::persist_jarvis_pending_confirmation(
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                    &confirm,
+                )
+                .await;
+                Self::write_sse_openai_text_and_persist(
+                    &mut stream,
+                    &chat_id,
+                    "我已生成 intent.lisp 草案，等待你确认意图。",
+                    Some("stop"),
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                )
+                .await?;
+                Self::finish_sse(&mut stream).await?;
+                return Ok(());
+            }
         } else {
             confirmed_intent_artifact_id.clone().unwrap_or_default()
         };
@@ -3629,6 +3948,264 @@ impl PTYWebSocketServer {
             .await;
         }
 
+        let key_judgment_ref = if plan_confirmed {
+            match Self::jarvis_key_judgment_from_interaction_metadata(&envelope) {
+                Ok(result) => result,
+                Err(error) => {
+                    Self::fail_jarvis_gate_visible(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
+                        error,
+                        "confirmation_key_judgment",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            let authored_key_judgment = match Self::author_jarvis_key_judgment_draft_with_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                &provider_box_http,
+                &jarvis_key_judgment_author,
+                "missiond.interaction-key-judgment.v1",
+                &channel,
+                &objective_text,
+                &grounding_context_id,
+                &intent_artifact_id,
+                resolved_topic_id.as_deref(),
+                resolved_topic_label.as_deref(),
+                &sources_used,
+                Some(&permission_context),
+                context_pack_path.as_deref(),
+                context_pack_file.as_deref(),
+                grounding_report_file.as_deref(),
+                grounding_report_artifact_path.as_deref(),
+                grounding_report_hash.as_deref(),
+                context_sufficiency.as_deref(),
+            )
+            .await
+            {
+                Ok(draft) => draft,
+                Err(error) => {
+                    let diagnostic = serde_json::json!({
+                        "phase": "key_judgment_authoring_failed",
+                        "error": {
+                            "code": "JARVIS_KEY_JUDGMENT_AUTHOR_FAILED",
+                            "message": error.to_string()
+                        }
+                    });
+                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                    Self::write_sse_openai_text_and_persist(
+                        &mut stream,
+                        &chat_id,
+                        "关键判断需要 Codex CLI GPT-5.5 xhigh 工位基于 grounding report 生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替判断。",
+                        Some("stop"),
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    Self::finish_sse(&mut stream).await?;
+                    return Ok(());
+                }
+            };
+            let key_payload = serde_json::json!({
+                "schema": "missiond.interaction-key-judgment.v1",
+                "interaction_id": interaction_id,
+                "channel": &channel,
+                "phase": "key_judgment_draft",
+                "author": "codex-cli-gpt-5.5-xhigh",
+                "key_judgment_author_slot_id": &jarvis_key_judgment_author.slot_id,
+                "confidence": authored_key_judgment.confidence,
+                "grounding_context_id": grounding_context_id,
+                "context_pack_path": context_pack_path,
+                "context_pack_file": context_pack_file,
+                "grounding_report_file": grounding_report_file,
+                "grounding_report_artifact_path": grounding_report_artifact_path,
+                "grounding_report_hash": grounding_report_hash,
+                "grounding_worker_slot_id": grounding_worker_slot_id,
+                "grounding_worker_turn_id": grounding_worker_turn_id,
+                "context_sufficiency": context_sufficiency,
+                "topic_id": resolved_topic_id,
+                "topic_label": resolved_topic_label,
+                "intent_artifact_id": intent_artifact_id,
+                "objective": objective_text,
+                "judgment": authored_key_judgment.judgment,
+                "review_text": authored_key_judgment.review_text,
+                "rejected_hypotheses": authored_key_judgment.rejected_hypotheses,
+                "evidence_refs": authored_key_judgment.evidence_refs,
+                "planning_implications": authored_key_judgment.planning_implications,
+                "acceptance_focus": authored_key_judgment.acceptance_focus,
+                "artifact_language": "lisp",
+                "artifact_body": authored_key_judgment.artifact_body,
+                "sources_used": sources_used,
+                "requires_confirmation": false
+            });
+            Self::write_jarvis_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                "key_judgment_artifact",
+                "shared_artifact_put",
+                "running",
+                "正在写入 key judgment artifact，写入完成后交给 plan author。",
+                None,
+                None,
+                None,
+            )
+            .await?;
+            let key_artifact = match Self::put_jarvis_artifact(
+                &jarvis_artifact_writer,
+                JarvisArtifactRequest {
+                    kind: "interaction-key-judgment".to_string(),
+                    project_id: None,
+                    task_id: None,
+                    payload: key_payload.clone(),
+                    metadata: serde_json::json!({
+                        "schema": "missiond.interaction-key-judgment.v1",
+                        "interaction_id": interaction_id,
+                        "channel": &channel,
+                        "conversation_id": jarvis_conv_id,
+                        "grounding_context_id": grounding_context_id,
+                        "intent_artifact_id": intent_artifact_id,
+                    }),
+                },
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    Self::fail_jarvis_gate_visible(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        Some(&interaction_id),
+                        error,
+                        "key_judgment_artifact",
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            Self::write_jarvis_progress(
+                &mut stream,
+                &jarvis_progress_bus,
+                &chat_id,
+                Some(&interaction_id),
+                "key_judgment_artifact",
+                "shared_artifact_put_completed",
+                "completed",
+                "key judgment artifact 已写入，下一步进入 plan authoring。",
+                None,
+                None,
+                None,
+            )
+            .await?;
+            let mut key_event = key_payload;
+            if let Some(object) = key_event.as_object_mut() {
+                object.insert(
+                    "key_judgment_artifact_id".to_string(),
+                    serde_json::Value::String(key_artifact.artifact_id.clone()),
+                );
+                object.insert(
+                    "key_judgment_artifact_hash".to_string(),
+                    serde_json::Value::String(key_artifact.artifact_hash.clone()),
+                );
+                object.insert(
+                    "key_judgment_artifact_path".to_string(),
+                    serde_json::Value::String(key_artifact.path.clone()),
+                );
+            }
+            Self::write_sse_event(&mut stream, "key_judgment_draft", &key_event).await?;
+            Self::persist_interaction_event(
+                db.as_ref(),
+                jarvis_conv_id.as_deref(),
+                Some(&interaction_id),
+                "key_judgment_draft",
+                &key_event,
+            )
+            .await;
+            Self::write_sse_openai_missiond_projection(
+                &mut stream,
+                &chat_id,
+                "key_judgment_draft",
+                &key_artifact.artifact_id,
+                &key_artifact.artifact_hash,
+                &key_artifact.path,
+            )
+            .await?;
+            JarvisKeyJudgmentArtifactRef {
+                artifact_id: key_artifact.artifact_id,
+                artifact_hash: Some(key_artifact.artifact_hash),
+                artifact_path: Some(key_artifact.path),
+                judgment: key_event
+                    .get("judgment")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                review_text: key_event
+                    .get("review_text")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned),
+                confidence: key_event
+                    .get("confidence")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned),
+                rejected_hypotheses: key_event
+                    .get("rejected_hypotheses")
+                    .and_then(|value| value.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                evidence_refs: key_event
+                    .get("evidence_refs")
+                    .and_then(|value| value.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                planning_implications: key_event
+                    .get("planning_implications")
+                    .and_then(|value| value.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                acceptance_focus: key_event
+                    .get("acceptance_focus")
+                    .and_then(|value| value.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }
+        };
+
+        let mut generated_plan_atomization_graph: Option<serde_json::Value> = None;
+        let mut generated_execution_mode: Option<String> = None;
+        let mut generated_requires_board_task: Option<bool> = None;
         let plan_artifact_id = if !plan_confirmed {
             let authored_plan = match Self::author_jarvis_plan_draft_with_progress(
                 &mut stream,
@@ -3642,6 +4219,7 @@ impl PTYWebSocketServer {
                 &objective_text,
                 &grounding_context_id,
                 &intent_artifact_id,
+                &key_judgment_ref,
                 resolved_topic_id.as_deref(),
                 resolved_topic_label.as_deref(),
                 &sources_used,
@@ -3684,11 +4262,12 @@ impl PTYWebSocketServer {
             let plan_review_text = authored_plan.review_text.clone();
             let plan_artifact_body = authored_plan.artifact_body.clone();
             let plan_steps = authored_plan.steps.clone();
+            let confirmation_required = jarvis_intent_plan_confirmation_required();
             let plan_payload = serde_json::json!({
                 "schema": "missiond.interaction-plan-artifact.v1",
                 "interaction_id": interaction_id,
                 "channel": &channel,
-                "phase": "plan_draft",
+                "phase": if confirmation_required { "plan_draft" } else { "plan_archived" },
                 "author": "codex-cli-gpt-5.5-xhigh",
                 "plan_author_slot_id": &jarvis_plan_author.slot_id,
                 "confidence": authored_plan.confidence,
@@ -3707,21 +4286,40 @@ impl PTYWebSocketServer {
                 "topic_id": resolved_topic_id,
                 "topic_label": resolved_topic_label,
                 "intent_artifact_id": intent_artifact_id,
+                "key_judgment_artifact_id": key_judgment_ref.artifact_id,
+                "key_judgment_artifact_hash": key_judgment_ref.artifact_hash,
+                "key_judgment_artifact_path": key_judgment_ref.artifact_path,
+                "key_judgment": key_judgment_ref.judgment,
+                "key_judgment_review_text": key_judgment_ref.review_text,
+                "key_judgment_confidence": key_judgment_ref.confidence,
+                "key_judgment_rejected_hypotheses": key_judgment_ref.rejected_hypotheses,
+                "key_judgment_evidence_refs": key_judgment_ref.evidence_refs,
+                "key_judgment_planning_implications": key_judgment_ref.planning_implications,
+                "key_judgment_acceptance_focus": key_judgment_ref.acceptance_focus,
                 "objective": plan_objective_text,
                 "review_text": plan_review_text,
                 "execution_mode": authored_plan.execution_mode,
                 "requires_board_task": authored_plan.requires_board_task,
                 "answer_policy": authored_plan.answer_policy,
                 "provider_hint": authored_plan.provider_hint,
+                "plan_key_judgment": authored_plan.key_judgment,
                 "artifact_language": "lisp",
                 "artifact_body": plan_artifact_body,
                 "steps": plan_steps,
+                "workstreams": authored_plan.workstreams,
+                "atom_tasks": authored_plan.atom_tasks,
+                "dependency_edges": authored_plan.dependency_edges,
+                "serial_groups": authored_plan.serial_groups,
+                "parallel_groups": authored_plan.parallel_groups,
+                "assignment_policy": authored_plan.assignment_policy,
+                "atomization_graph": authored_plan.atomization_graph,
                 "boundary": authored_plan.boundary,
                 "assumptions": authored_plan.assumptions,
                 "non_goals": authored_plan.non_goals,
                 "acceptance_signals": authored_plan.acceptance_signals,
                 "sources_used": sources_used,
-                "requires_confirmation": true
+                "requires_confirmation": confirmation_required,
+                "visibility": if confirmation_required { "review" } else { "archive_only" }
             });
             Self::write_jarvis_progress(
                 &mut stream,
@@ -3731,7 +4329,11 @@ impl PTYWebSocketServer {
                 "plan_artifact",
                 "shared_artifact_put",
                 "running",
-                "正在写入 plan.lisp artifact，写入完成后页面会显示可确认计划。",
+                if confirmation_required {
+                    "正在写入 plan.lisp artifact，写入完成后页面会显示可确认计划。"
+                } else {
+                    "正在归档 plan.lisp artifact；内容只用于存档和回放分析，不弹确认卡。"
+                },
                 None,
                 None,
                 None,
@@ -3780,7 +4382,11 @@ impl PTYWebSocketServer {
                 "plan_artifact",
                 "shared_artifact_put_completed",
                 "completed",
-                "plan.lisp artifact 已写入，正在发送草案卡片和确认请求。",
+                if confirmation_required {
+                    "plan.lisp artifact 已写入，正在发送草案卡片和确认请求。"
+                } else {
+                    "plan.lisp artifact 已归档，下一步进入执行分工或直接回答。"
+                },
                 None,
                 None,
                 None,
@@ -3801,94 +4407,133 @@ impl PTYWebSocketServer {
                     serde_json::Value::String(plan_artifact.path.clone()),
                 );
             }
-            Self::write_sse_event(&mut stream, "plan_draft", &plan).await?;
+            generated_plan_atomization_graph = plan.get("atomization_graph").cloned();
+            generated_execution_mode = plan
+                .get("execution_mode")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
+            generated_requires_board_task = plan
+                .get("requires_board_task")
+                .and_then(|value| value.as_bool());
+            let plan_event_name = if confirmation_required {
+                "plan_draft"
+            } else {
+                "plan_archived"
+            };
+            Self::write_sse_event(&mut stream, plan_event_name, &plan).await?;
             Self::persist_interaction_event(
                 db.as_ref(),
                 jarvis_conv_id.as_deref(),
                 Some(&interaction_id),
-                "plan_draft",
+                plan_event_name,
                 &plan,
             )
             .await;
-            Self::write_sse_openai_missiond_projection(
-                &mut stream,
-                &chat_id,
-                "plan_draft",
-                &plan_artifact_id,
-                &plan_artifact.artifact_hash,
-                &plan_artifact.path,
-            )
-            .await?;
-            let confirm = serde_json::json!({
-                "interaction_id": interaction_id,
-                "phase": "awaiting_plan_confirmation",
-                "confirmation_type": "plan",
-                "confirm_payload": {
-                    "missiond_intent_confirmed": true,
-                    "missiond_plan_confirmed": true,
-                    "missiond_objective": plan_objective_text,
-                    "missiond_grounding_context_id": grounding_context_id,
-                    "missiond_context_pack_path": context_pack_path,
-                    "missiond_context_pack_file": context_pack_file,
-                    "missiond_grounding_report_file": grounding_report_file,
-                    "missiond_grounding_report_artifact_path": grounding_report_artifact_path,
-                    "missiond_grounding_report_hash": grounding_report_hash,
-                    "missiond_grounding_worker_slot_id": grounding_worker_slot_id,
-                    "missiond_grounding_worker_turn_id": grounding_worker_turn_id,
-                    "missiond_context_sufficiency": context_sufficiency,
-                    "missiond_grounding_artifact_hash": grounding_artifact_hash,
-                    "missiond_context_capsule_hash": context_capsule_hash,
-                    "missiond_context_capsule_file": context_capsule_file,
-                    "missiond_topic_id": resolved_topic_id,
-                    "missiond_topic_label": resolved_topic_label,
-                    "missiond_sources_used": sources_used,
-                    "missiond_intent_artifact_id": intent_artifact_id,
-                    "missiond_plan_artifact_id": plan_artifact_id,
-                    "missiond_execution_mode": plan
-                        .get("execution_mode")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("work_order"),
-                    "missiond_requires_board_task": plan
-                        .get("requires_board_task")
-                        .and_then(|value| value.as_bool())
-                        .unwrap_or(true),
-                }
-            });
-            Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
-            Self::persist_interaction_event(
-                db.as_ref(),
-                jarvis_conv_id.as_deref(),
-                Some(&interaction_id),
-                "confirm_required",
-                &confirm,
-            )
-            .await;
-            Self::persist_jarvis_pending_confirmation(
-                db.as_ref(),
-                jarvis_conv_id.as_deref(),
-                &confirm,
-            )
-            .await;
-            Self::write_sse_openai_text_and_persist(
-                &mut stream,
-                &chat_id,
-                "我已生成 plan.lisp 草案，等待你确认计划。",
-                Some("stop"),
-                db.as_ref(),
-                jarvis_conv_id.as_deref(),
-            )
-            .await?;
-            Self::finish_sse(&mut stream).await?;
-            return Ok(());
+            if confirmation_required {
+                Self::write_sse_openai_missiond_projection(
+                    &mut stream,
+                    &chat_id,
+                    "plan_draft",
+                    &plan_artifact_id,
+                    &plan_artifact.artifact_hash,
+                    &plan_artifact.path,
+                )
+                .await?;
+            }
+            if !confirmation_required {
+                plan_artifact_id
+            } else {
+                let confirm = serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "phase": "awaiting_plan_confirmation",
+                    "confirmation_type": "plan",
+                    "confirm_payload": {
+                        "missiond_intent_confirmed": true,
+                        "missiond_plan_confirmed": true,
+                        "missiond_objective": plan_objective_text,
+                        "missiond_grounding_context_id": grounding_context_id,
+                        "missiond_context_pack_path": context_pack_path,
+                        "missiond_context_pack_file": context_pack_file,
+                        "missiond_grounding_report_file": grounding_report_file,
+                        "missiond_grounding_report_artifact_path": grounding_report_artifact_path,
+                        "missiond_grounding_report_hash": grounding_report_hash,
+                        "missiond_grounding_worker_slot_id": grounding_worker_slot_id,
+                        "missiond_grounding_worker_turn_id": grounding_worker_turn_id,
+                        "missiond_context_sufficiency": context_sufficiency,
+                        "missiond_grounding_artifact_hash": grounding_artifact_hash,
+                        "missiond_context_capsule_hash": context_capsule_hash,
+                        "missiond_context_capsule_file": context_capsule_file,
+                        "missiond_topic_id": resolved_topic_id,
+                        "missiond_topic_label": resolved_topic_label,
+                        "missiond_sources_used": sources_used,
+                        "missiond_intent_artifact_id": intent_artifact_id,
+                        "missiond_key_judgment_artifact_id": key_judgment_ref.artifact_id,
+                        "missiond_key_judgment_artifact_hash": key_judgment_ref.artifact_hash,
+                        "missiond_key_judgment_artifact_path": key_judgment_ref.artifact_path,
+                        "missiond_key_judgment": key_judgment_ref.judgment,
+                        "missiond_key_judgment_review_text": key_judgment_ref.review_text,
+                        "missiond_key_judgment_confidence": key_judgment_ref.confidence,
+                        "missiond_key_judgment_rejected_hypotheses": key_judgment_ref.rejected_hypotheses,
+                        "missiond_key_judgment_evidence_refs": key_judgment_ref.evidence_refs,
+                        "missiond_key_judgment_planning_implications": key_judgment_ref.planning_implications,
+                        "missiond_key_judgment_acceptance_focus": key_judgment_ref.acceptance_focus,
+                        "missiond_plan_artifact_id": plan_artifact_id,
+                        "missiond_plan_atomization_graph_json": serde_json::to_string(
+                            plan.get("atomization_graph").unwrap_or(&serde_json::Value::Null)
+                        ).ok(),
+                        "missiond_execution_mode": plan
+                            .get("execution_mode")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("work_order"),
+                        "missiond_requires_board_task": plan
+                            .get("requires_board_task")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(true),
+                    }
+                });
+                Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+                Self::persist_interaction_event(
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                    Some(&interaction_id),
+                    "confirm_required",
+                    &confirm,
+                )
+                .await;
+                Self::persist_jarvis_pending_confirmation(
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                    &confirm,
+                )
+                .await;
+                Self::write_sse_openai_text_and_persist(
+                    &mut stream,
+                    &chat_id,
+                    "我已生成 plan.lisp 草案，等待你确认计划。",
+                    Some("stop"),
+                    db.as_ref(),
+                    jarvis_conv_id.as_deref(),
+                )
+                .await?;
+                Self::finish_sse(&mut stream).await?;
+                return Ok(());
+            }
         } else {
             confirmed_plan_artifact_id.clone().unwrap_or_default()
         };
+        let plan_atomization_graph = generated_plan_atomization_graph.unwrap_or_else(|| {
+            Self::jarvis_plan_atomization_graph_from_interaction_metadata(&envelope)
+        });
 
-        let execution_mode = interaction_metadata_string(&envelope, "missiond_execution_mode")
+        let execution_mode = generated_execution_mode
+            .or_else(|| interaction_metadata_string(&envelope, "missiond_execution_mode"))
             .unwrap_or_else(|| "work_order".to_string())
             .to_ascii_lowercase();
         if execution_mode == "grounded_direct_answer" {
-            if interaction_metadata_bool(&envelope, "missiond_requires_board_task") {
+            let requires_board_task = generated_requires_board_task.unwrap_or_else(|| {
+                interaction_metadata_bool(&envelope, "missiond_requires_board_task")
+            });
+            if requires_board_task {
                 Self::fail_jarvis_gate_visible(
                     &mut stream,
                     &jarvis_progress_bus,
@@ -3923,6 +4568,7 @@ impl PTYWebSocketServer {
                 grounding_report_hash.as_deref(),
                 &intent_artifact_id,
                 &plan_artifact_id,
+                &key_judgment_ref,
                 &permission_context,
                 &sources_used,
                 &provider_box_http,
@@ -4002,6 +4648,8 @@ impl PTYWebSocketServer {
             grounding_report_hash.as_deref(),
             &intent_artifact_id,
             &plan_artifact_id,
+            &key_judgment_ref,
+            &plan_atomization_graph,
             &Self::jarvis_runtime_read_scope_root(),
         );
         let prompt_template = Self::build_jarvis_worker_prompt(&objective_text, &dispatch_metadata);
@@ -4025,6 +4673,10 @@ impl PTYWebSocketServer {
             "topic_label": resolved_topic_label,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
+            "key_judgment_artifact_id": key_judgment_ref.artifact_id,
+            "key_judgment_artifact_hash": key_judgment_ref.artifact_hash,
+            "key_judgment": key_judgment_ref.judgment,
+            "plan_atomization_graph": plan_atomization_graph,
             "dispatch_metadata": dispatch_metadata,
             "user_message": raw_user_text,
             "objective": objective_text,
@@ -4071,23 +4723,63 @@ impl PTYWebSocketServer {
             None,
         )
         .await?;
-        match db.create_board_task(&task_input).await {
-            Ok(task) => {
+        match Self::create_jarvis_atomized_board_tasks(
+            db,
+            task_input,
+            &objective_text,
+            &dispatch_metadata,
+            &plan_atomization_graph,
+        )
+        .await
+        {
+            Ok(created) => {
                 Self::persist_jarvis_confirmation_fulfilled(
                     Some(db),
                     jarvis_conv_id.as_deref(),
                     "plan",
                 )
                 .await;
+                let atom_task_ids = created
+                    .atom_tasks
+                    .iter()
+                    .map(|atom| atom.task.id.to_string())
+                    .collect::<Vec<_>>();
+                let planned_atom_task_ids = created
+                    .atom_tasks
+                    .iter()
+                    .filter(|atom| !atom.synthetic)
+                    .map(|atom| atom.task.id.to_string())
+                    .collect::<Vec<_>>();
+                let atom_task_contracts = created
+                    .atom_tasks
+                    .iter()
+                    .map(|atom| {
+                        serde_json::json!({
+                            "atom_task_id": atom.atom_task_id.clone(),
+                            "board_task_id": atom.task.id.to_string(),
+                            "category": atom.category.clone(),
+                            "assignee_engine": atom.assignee_engine.clone(),
+                            "depends_on_atoms": atom.depends_on_atoms.clone(),
+                            "parallel_group": atom.parallel_group.clone(),
+                            "synthetic": atom.synthetic
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 let follow_payload = serde_json::json!({
-                    "missiond_follow_task_id": task.id,
+                    "missiond_follow_task_id": created.final_task_id.clone(),
+                    "missiond_root_task_id": created.parent_task.id.to_string(),
+                    "missiond_atom_task_ids": atom_task_ids.clone(),
                     "interaction_id": interaction_id,
                     "stream": true
                 });
                 let board_task_created = serde_json::json!({
                     "interaction_id": interaction_id,
-                    "task_id": task.id,
-                    "title": task.title,
+                    "task_id": created.parent_task.id.to_string(),
+                    "root_task_id": created.parent_task.id.to_string(),
+                    "final_task_id": created.final_task_id.clone(),
+                    "atom_task_ids": planned_atom_task_ids.clone(),
+                    "atom_task_contracts": atom_task_contracts,
+                    "title": created.parent_task.title.clone(),
                     "grounding_context_id": grounding_context_id,
                     "intent_artifact_id": intent_artifact_id,
                     "plan_artifact_id": plan_artifact_id,
@@ -4105,13 +4797,15 @@ impl PTYWebSocketServer {
                 let worker_dispatched = serde_json::json!({
                     "interaction_id": interaction_id,
                     "phase": "workers_running",
-                    "task_id": task.id,
+                    "task_id": created.final_task_id.clone(),
+                    "root_task_id": created.parent_task.id.to_string(),
+                    "atom_task_ids": atom_task_ids.clone(),
                     "slot_id": serde_json::Value::Null,
                     "dispatch_state": "pending_autopilot_claim",
-                    "status": task.status.as_str(),
+                    "status": created.parent_task.status.as_str(),
                     "terminal_task_result": false,
                     "follow_payload": follow_payload.clone(),
-                    "message": "BoardTask is queued for Autopilot/provider claim; concrete slot attribution will arrive through follow-up supervision."
+                    "message": "Atom-level BoardTasks are queued for Autopilot/provider claim; final acceptance task is the follow target."
                 });
                 Self::write_sse_event(&mut stream, "worker_dispatched", &worker_dispatched).await?;
                 Self::persist_interaction_event(
@@ -4125,8 +4819,10 @@ impl PTYWebSocketServer {
                 let worker_status = serde_json::json!({
                     "interaction_id": interaction_id,
                     "phase": "workers_running",
-                    "task_id": task.id,
-                    "status": task.status.as_str(),
+                    "task_id": created.final_task_id.clone(),
+                    "root_task_id": created.parent_task.id.to_string(),
+                    "atom_task_ids": atom_task_ids.clone(),
+                    "status": created.parent_task.status.as_str(),
                     "terminal_task_result": false,
                 });
                 Self::write_sse_event(&mut stream, "worker_status", &worker_status).await?;
@@ -4141,10 +4837,12 @@ impl PTYWebSocketServer {
                 let dispatch_accepted = serde_json::json!({
                     "interaction_id": interaction_id,
                     "phase": "board_tasks_created",
-                    "task_id": task.id,
+                    "task_id": created.final_task_id.clone(),
+                    "root_task_id": created.parent_task.id.to_string(),
+                    "atom_task_ids": atom_task_ids.clone(),
                     "terminal_task_result": false,
                     "follow_payload": follow_payload.clone(),
-                    "message": "BoardTask was created and accepted for asynchronous worker dispatch; this is not a terminal task result."
+                    "message": "Atom-level BoardTasks were created and accepted for asynchronous worker dispatch; this is not a terminal task result."
                 });
                 Self::write_sse_event(&mut stream, "dispatch_accepted", &dispatch_accepted).await?;
                 Self::persist_interaction_event(
@@ -4158,7 +4856,9 @@ impl PTYWebSocketServer {
                 let result_pending = serde_json::json!({
                     "interaction_id": interaction_id,
                     "phase": "result_pending",
-                    "task_id": task.id,
+                    "task_id": created.final_task_id.clone(),
+                    "root_task_id": created.parent_task.id.to_string(),
+                    "atom_task_ids": atom_task_ids,
                     "terminal_task_result": false,
                     "follow_payload": follow_payload,
                 });
@@ -4171,10 +4871,52 @@ impl PTYWebSocketServer {
                     &result_pending,
                 )
                 .await;
-                let accepted_text = format!(
-                    "计划已确认，BoardTask 已创建。后续用 missiond_follow_task_id={} 读取 task-result-artifact。",
-                    task.id
+                let accepted_fallback = format!(
+                    "plan.lisp 已归档，已创建 Jarvis 原子化 BoardTask 组；后续用 missiond_follow_task_id={} 读取最终验收 task-result-artifact。",
+                    created.final_task_id
                 );
+                let accepted_text = match Self::materialize_jarvis_communication(
+                    &mut stream,
+                    &jarvis_progress_bus,
+                    &jarvis_artifact_writer,
+                    &chat_id,
+                    Some(&interaction_id),
+                    "plan_dispatched",
+                    &objective_text,
+                    serde_json::json!({
+                        "execution_mode": execution_mode,
+                        "terminal_task_result": false,
+                        "intent_artifact_id": intent_artifact_id,
+                        "plan_artifact_id": plan_artifact_id,
+                        "key_judgment_artifact_id": key_judgment_ref.artifact_id,
+                        "key_judgment": key_judgment_ref.judgment,
+                        "root_task_id": created.parent_task.id.to_string(),
+                        "final_task_id": created.final_task_id.clone(),
+                        "atom_task_ids": atom_task_ids,
+                        "planned_atom_task_ids": planned_atom_task_ids,
+                        "follow_payload": result_pending.get("follow_payload").cloned(),
+                        "dispatch_accepted": dispatch_accepted,
+                    }),
+                    &provider_box_http,
+                    Some(db),
+                    jarvis_conv_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(text) => text,
+                    Err(error) => {
+                        let diagnostic = serde_json::json!({
+                            "interaction_id": interaction_id,
+                            "phase": "communicator",
+                            "error": {
+                                "code": "JARVIS_COMMUNICATOR_FAILED",
+                                "message": error.to_string()
+                            }
+                        });
+                        Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                        accepted_fallback
+                    }
+                };
                 Self::write_sse_openai_text_and_persist(
                     &mut stream,
                     &chat_id,
@@ -5212,6 +5954,10 @@ impl PTYWebSocketServer {
         Self::clamp_jarvis_author_timeout_secs(value)
     }
 
+    fn clamp_jarvis_key_judgment_author_timeout_secs(value: Option<u64>) -> u64 {
+        Self::clamp_jarvis_author_timeout_secs(value)
+    }
+
     fn jarvis_intent_author_timeout_secs(config: &JarvisIntentAuthorConfig) -> u64 {
         Self::clamp_jarvis_intent_author_timeout_secs(
             std::env::var("MISSIOND_JARVIS_INTENT_AUTHOR_TIMEOUT_SECS")
@@ -5224,6 +5970,15 @@ impl PTYWebSocketServer {
     fn jarvis_plan_author_timeout_secs(config: &JarvisPlanAuthorConfig) -> u64 {
         Self::clamp_jarvis_plan_author_timeout_secs(
             std::env::var("MISSIOND_JARVIS_PLAN_AUTHOR_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .or(Some(config.timeout_secs)),
+        )
+    }
+
+    fn jarvis_key_judgment_author_timeout_secs(config: &JarvisKeyJudgmentAuthorConfig) -> u64 {
+        Self::clamp_jarvis_key_judgment_author_timeout_secs(
+            std::env::var("MISSIOND_JARVIS_KEY_JUDGMENT_AUTHOR_TIMEOUT_SECS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .or(Some(config.timeout_secs)),
@@ -5359,6 +6114,75 @@ JSON 字段必须是：\n\
         )
     }
 
+    fn jarvis_codex_key_judgment_prompt(
+        config: &JarvisKeyJudgmentAuthorConfig,
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        intent_artifact_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        permission_context: Option<&serde_json::Value>,
+        context_pack_path: Option<&str>,
+        context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
+        grounding_report_artifact_path: Option<&str>,
+        grounding_report_hash: Option<&str>,
+        context_sufficiency: Option<&str>,
+        grounding_report_preview: Option<&str>,
+    ) -> String {
+        let provider = Self::jarvis_author_text_provider();
+        let engine = Self::provider_box_engine_for_provider(provider.as_str()).unwrap_or("codex");
+        let slot_id = Self::jarvis_author_text_slot_id(provider.as_str(), &config.slot_id);
+        let model = Self::jarvis_author_text_model(provider.as_str(), &config.model);
+        let input = serde_json::json!({
+            "schema": schema,
+            "channel": channel,
+            "confirmed_intent_objective": objective,
+            "grounding_context_id": grounding_context_id,
+            "intent_artifact_id": intent_artifact_id,
+            "topic_id": topic_id,
+            "topic_label": topic_label,
+            "sources_used": sources_used,
+            "permission_context": permission_context.cloned().unwrap_or(serde_json::Value::Null),
+            "context_pack_path": context_pack_path,
+            "context_pack_file": context_pack_file,
+            "grounding_report_file": grounding_report_file,
+            "grounding_report_artifact_path": grounding_report_artifact_path,
+            "grounding_report_hash": grounding_report_hash,
+            "context_sufficiency": context_sufficiency,
+            "grounding_report_preview": grounding_report_preview,
+            "authoring_lane": {
+                "provider": provider,
+                "engine": engine,
+                "slot_id": slot_id,
+                "model": model,
+                "reasoning_effort": config.reasoning_effort,
+                "sandbox": config.sandbox,
+                "approval_policy": config.approval_policy
+            }
+        });
+        format!(
+            "你是 MissionD 的 Jarvis 关键判断作者，运行在 provider_box 管理的纯文本语义作者工位。\n\
+任务：基于已确认 intent.lisp 目标和 ClaudeCode + MissionD MCP grounding report，给出一个【关键判断】，供下一步 plan.lisp 使用。不要创建 plan，不要创建 BoardTask，不要改文件，不要部署。\n\
+关键判断必须是能改变后续计划路线的一句话，例如“不是算力差异，是用量差异”。你需要同时指出被排除的假设、证据引用、对计划拆分的影响和后续验收重点。\n\
+只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
+JSON 字段必须是：\n\
+  judgment: string，一句话关键判断，中文，必须具体，不能是泛泛的“需要进一步调查”。\n\
+  review_text: string，给用户看的审阅摘要，说明这是 plan 前的关键判断，不是执行结果。\n\
+  confidence: string，low/medium/high。\n\
+  rejected_hypotheses: string[]，被 grounding 证据排除或降级的假设。\n\
+  evidence_refs: string[]，引用 grounding report/context 中的证据短标签或文件/段落描述。\n\
+  planning_implications: string[]，这条判断如何影响 plan 的任务拆分、串并行和工位分配。\n\
+  acceptance_focus: string[]，后续 Codex 验收需要重点判断什么。\n\
+\n\
+输入 JSON：\n{}\n",
+            serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string())
+        )
+    }
+
     fn jarvis_codex_plan_prompt(
         config: &JarvisPlanAuthorConfig,
         schema: &str,
@@ -5366,6 +6190,7 @@ JSON 字段必须是：\n\
         objective: &str,
         grounding_context_id: &str,
         intent_artifact_id: &str,
+        key_judgment: &JarvisKeyJudgmentArtifactRef,
         topic_id: Option<&str>,
         topic_label: Option<&str>,
         sources_used: &[String],
@@ -5390,6 +6215,16 @@ JSON 字段必须是：\n\
             "confirmed_intent_objective": objective,
             "grounding_context_id": grounding_context_id,
             "intent_artifact_id": intent_artifact_id,
+            "key_judgment_artifact_id": key_judgment.artifact_id,
+            "key_judgment_artifact_hash": key_judgment.artifact_hash,
+            "key_judgment_artifact_path": key_judgment.artifact_path,
+            "key_judgment": key_judgment.judgment,
+            "key_judgment_review_text": key_judgment.review_text,
+            "key_judgment_confidence": key_judgment.confidence,
+            "rejected_hypotheses": key_judgment.rejected_hypotheses,
+            "key_judgment_evidence_refs": key_judgment.evidence_refs,
+            "planning_implications": key_judgment.planning_implications,
+            "acceptance_focus": key_judgment.acceptance_focus,
             "topic_id": topic_id,
             "topic_label": topic_label,
             "sources_used": sources_used,
@@ -5415,15 +6250,16 @@ JSON 字段必须是：\n\
         });
         format!(
             "你是 MissionD 的 Jarvis plan.lisp 语义作者，运行在 provider_box 管理的纯文本语义作者工位。\n\
-任务：基于已确认的 intent.lisp 目标，以及 ClaudeCode + MissionD MCP grounding worker 写入的 Markdown 报告，生成可供用户确认的 plan draft。不要创建 BoardTask、不要派工位、不要执行实现、不要改文件。\n\
-计划必须声明用户确认 plan 后的 execution_mode。现阶段即使是聊天/问答也必须先经过 intent.lisp、grounding report 和 plan.lisp；如果 grounding_report_preview 已足够直接回复用户，应选择 grounded_direct_answer，不创建 BoardTask。\n\
-如果 grounding report 证据不足，或者需要改代码/部署/长任务/进一步工位执行，选择 work_order 或 investigation_only，并说明缺口和边界。\n\
+任务：基于已确认的 intent.lisp 目标、ClaudeCode + MissionD MCP grounding worker 写入的 Markdown 报告，以及 Codex key judgment artifact，生成可供用户确认的 plan draft。不要创建 BoardTask、不要派工位、不要执行实现、不要改文件。\n\
+计划必须引用 key_judgment_artifact_id，并把 planning_implications 转化为可执行拆分。现阶段即使是聊天/问答也必须先经过 intent.lisp、grounding report、key judgment 和 plan.lisp；如果 grounding_report_preview + key_judgment 已足够直接回复用户，应选择 grounded_direct_answer，不创建 BoardTask。\n\
+如果 grounding report 或 key judgment 证据不足，或者需要改代码/部署/长任务/进一步工位执行，选择 work_order 或 investigation_only，并说明缺口和边界。\n\
 只返回一个严格 JSON object，不要 Markdown，不要代码围栏，不要额外解释。JSON key 必须使用双引号。\n\
 JSON 字段必须是：\n\
   objective: string，必须等同或更保守地表达已确认意图，不要扩大范围。\n\
   review_text: string，给用户看的审阅摘要，必须说明边界：确认 plan 后才会进入 execution_mode 指定路径，结果以 artifact 为准。\n\
   execution_mode: string，只能是 grounded_direct_answer、work_order、investigation_only 三者之一。普通问答/解释/身份确认/状态说明选 grounded_direct_answer；需要改代码、部署、长期运行或多工位任务选 work_order；只读调查但需要工位证据选 investigation_only。\n\
   requires_board_task: boolean。grounded_direct_answer 必须是 false；work_order 和 investigation_only 必须是 true。\n\
+  key_judgment: string，必须复述输入里的关键判断。\n\
   steps: string[]，2 到 6 个中文步骤，每步是可审阅的计划动作，不是执行结果。\n\
   answer_policy: string，说明直接回答或工位结果如何使用 grounding sources；grounded_direct_answer 时必须说明使用 provider_box grounded-direct-answer 且不创建 BoardTask。\n\
   provider_hint: string，例如 provider-box-codex、codex-review-worker、claude-code-default。\n\
@@ -5432,6 +6268,12 @@ JSON 字段必须是：\n\
   non_goals: string[]，明确不做什么。\n\
   acceptance_signals: string[]，用户确认 plan 时实际接受的内容。\n\
   confidence: string，low/medium/high。\n\
+  workstreams: object[]。grounded_direct_answer 可为空；work_order/investigation_only 必须最多 10 个 workstream，每个 workstream 包含 id/title/objective/execution_order/depends_on/parallel_group/atoms。\n\
+  atom_tasks: object[]。grounded_direct_answer 可为空；work_order/investigation_only 必须列出所有 atom，字段包含 atom_task_id/workstream_id/objective/category/assignee_engine/execution_order/depends_on/parallel_group/read_scope/write_scope/acceptance。category 只能是 query/code_change/deploy_ops/judgment/acceptance；query/code_change/deploy_ops 必须 assignee_engine=claude_code；judgment/acceptance 必须 assignee_engine=codex。\n\
+  dependency_edges: object[]，串行依赖边。\n\
+  serial_groups: object[]，串行组。\n\
+  parallel_groups: object[]，可并行组。\n\
+  assignment_policy: object，必须声明 query/code_change/deploy_ops -> claude_code，judgment/acceptance -> codex。\n\
 \n\
 输入 JSON：\n{}\n",
             serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string())
@@ -5594,6 +6436,28 @@ JSON 字段必须是：\n\
         .await
     }
 
+    async fn run_jarvis_codex_key_judgment_turn(
+        provider_box_http: &ProviderBoxHttpSlot,
+        config: &JarvisKeyJudgmentAuthorConfig,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        Self::run_jarvis_codex_author_turn(
+            provider_box_http,
+            &config.slot_id,
+            &config.model,
+            &config.reasoning_effort,
+            config.search_enabled,
+            &config.sandbox,
+            &config.approval_policy,
+            Self::jarvis_key_judgment_author_timeout_secs(config),
+            "key-judgment",
+            "MISSIOND_JARVIS_KEY_JUDGMENT_AUTHOR",
+            "JARVIS_KEY_JUDGMENT_AUTHOR",
+            prompt,
+        )
+        .await
+    }
+
     async fn run_jarvis_codex_plan_turn(
         provider_box_http: &ProviderBoxHttpSlot,
         config: &JarvisPlanAuthorConfig,
@@ -5670,6 +6534,291 @@ JSON 字段必须是：\n\
         Ok(parsed)
     }
 
+    fn parse_codex_key_judgment_response(
+        text: &str,
+    ) -> anyhow::Result<JarvisCodexKeyJudgmentResponse> {
+        let json_text = Self::extract_json_object(text).ok_or_else(|| {
+            anyhow::anyhow!("Codex key judgment author did not return a JSON object")
+        })?;
+        let mut parsed: JarvisCodexKeyJudgmentResponse = serde_json::from_str(json_text)?;
+        parsed.judgment = parsed.judgment.trim().to_string();
+        parsed.review_text = parsed.review_text.trim().to_string();
+        parsed.rejected_hypotheses = parsed
+            .rejected_hypotheses
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        parsed.evidence_refs = parsed
+            .evidence_refs
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        parsed.planning_implications = parsed
+            .planning_implications
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        parsed.acceptance_focus = parsed
+            .acceptance_focus
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        if parsed.judgment.is_empty()
+            || parsed.review_text.is_empty()
+            || parsed.planning_implications.is_empty()
+            || parsed.acceptance_focus.is_empty()
+        {
+            anyhow::bail!("Codex key judgment author returned an incomplete key judgment draft");
+        }
+        Ok(parsed)
+    }
+
+    fn jarvis_assignment_policy_default() -> serde_json::Value {
+        serde_json::json!({
+            "query": "claude_code",
+            "code_change": "claude_code",
+            "deploy_ops": "claude_code",
+            "judgment": "codex",
+            "acceptance": "codex"
+        })
+    }
+
+    fn normalize_jarvis_plan_assignee(value: &str) -> String {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "claude" | "claudecode" | "claude_code" => "claude_code".to_string(),
+            "codex_cli" | "codex" => "codex".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    fn jarvis_plan_atom_values(parsed: &JarvisCodexPlanResponse) -> Vec<&serde_json::Value> {
+        if !parsed.atom_tasks.is_empty() {
+            return parsed.atom_tasks.iter().collect::<Vec<_>>();
+        }
+        parsed
+            .workstreams
+            .iter()
+            .flat_map(|workstream| {
+                workstream
+                    .get("atoms")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+            })
+            .collect()
+    }
+
+    fn jarvis_json_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+        match value {
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned)
+                .collect(),
+            Some(serde_json::Value::String(text)) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    Vec::new()
+                } else if trimmed.contains(',') {
+                    trimmed
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect()
+                } else {
+                    vec![trimmed.to_string()]
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn jarvis_atom_depends_on(atom: &serde_json::Value) -> Vec<String> {
+        Self::jarvis_json_string_list(atom.get("depends_on").or_else(|| atom.get("dependsOn")))
+    }
+
+    fn jarvis_atom_id(atom: &serde_json::Value) -> Option<String> {
+        json_string_field(atom, &["atom_task_id", "atomTaskId", "id"])
+    }
+
+    fn jarvis_plan_atom_specs(
+        plan_atomization_graph: &serde_json::Value,
+    ) -> anyhow::Result<Vec<JarvisPlanAtomTask>> {
+        let atom_values: Vec<&serde_json::Value> = plan_atomization_graph
+            .get("atom_tasks")
+            .and_then(|value| value.as_array())
+            .filter(|items| !items.is_empty())
+            .map(|items| items.iter().collect())
+            .unwrap_or_else(|| {
+                plan_atomization_graph
+                    .get("workstreams")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|workstream| {
+                        workstream
+                            .get("atoms")
+                            .and_then(|value| value.as_array())
+                            .into_iter()
+                            .flatten()
+                    })
+                    .collect()
+            });
+        let mut seen = HashSet::new();
+        let mut specs = Vec::with_capacity(atom_values.len());
+        for atom in atom_values {
+            let atom_task_id = Self::jarvis_atom_id(atom)
+                .ok_or_else(|| anyhow::anyhow!("plan atom missing atom_task_id"))?;
+            if !seen.insert(atom_task_id.clone()) {
+                anyhow::bail!("plan atom id {atom_task_id} is duplicated");
+            }
+            let category = json_string_field(atom, &["category"])
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("plan atom {atom_task_id} missing category"))?;
+            let assignee_engine =
+                json_string_field(atom, &["assignee_engine", "assigneeEngine", "assignee"])
+                    .map(|value| Self::normalize_jarvis_plan_assignee(&value))
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("plan atom {atom_task_id} missing assignee_engine")
+                    })?;
+            let execution_order = json_string_field(atom, &["execution_order", "executionOrder"])
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("plan atom {atom_task_id} missing execution_order")
+                })?;
+            let objective = json_string_field(atom, &["objective", "title", "description"])
+                .unwrap_or_else(|| atom_task_id.clone());
+            let depends_on = Self::jarvis_atom_depends_on(atom);
+            specs.push(JarvisPlanAtomTask {
+                atom_task_id,
+                workstream_id: json_string_field(atom, &["workstream_id", "workstreamId"]),
+                objective,
+                category,
+                assignee_engine,
+                execution_order,
+                depends_on,
+                parallel_group: json_string_field(atom, &["parallel_group", "parallelGroup"]),
+                read_scope: Self::jarvis_json_string_list(
+                    atom.get("read_scope").or_else(|| atom.get("readScope")),
+                ),
+                write_scope: Self::jarvis_json_string_list(
+                    atom.get("write_scope").or_else(|| atom.get("writeScope")),
+                ),
+                acceptance: Self::jarvis_json_string_list(atom.get("acceptance")),
+                raw: atom.clone(),
+            });
+        }
+        let valid_ids = specs
+            .iter()
+            .map(|spec| spec.atom_task_id.as_str())
+            .collect::<HashSet<_>>();
+        for spec in &specs {
+            for dep in &spec.depends_on {
+                if !valid_ids.contains(dep.as_str()) {
+                    anyhow::bail!(
+                        "plan atom {} depends_on unknown atom {}",
+                        spec.atom_task_id,
+                        dep
+                    );
+                }
+            }
+        }
+        Ok(specs)
+    }
+
+    fn validate_jarvis_plan_atomization(parsed: &JarvisCodexPlanResponse) -> anyhow::Result<()> {
+        if parsed.execution_mode == "grounded_direct_answer" {
+            return Ok(());
+        }
+        if parsed.workstreams.len() > 10 {
+            anyhow::bail!(
+                "{} plan has {} workstreams; maximum is 10",
+                parsed.execution_mode,
+                parsed.workstreams.len()
+            );
+        }
+        for workstream in &parsed.workstreams {
+            if let Some(items) = workstream.get("atoms").and_then(|value| value.as_array()) {
+                if items.len() > 10 {
+                    let id = json_string_field(workstream, &["id"])
+                        .unwrap_or_else(|| "<missing-workstream-id>".to_string());
+                    anyhow::bail!("workstream {id} has {} atoms; maximum is 10", items.len());
+                }
+            }
+        }
+        let atoms = Self::jarvis_plan_atom_values(parsed);
+        if parsed.workstreams.is_empty() || atoms.is_empty() {
+            anyhow::bail!(
+                "{} plan must include workstreams and atom_tasks for MissionD atomized dispatch",
+                parsed.execution_mode
+            );
+        }
+        let mut atom_ids = HashSet::new();
+        for atom in atoms {
+            let id = Self::jarvis_atom_id(atom).unwrap_or_else(|| "<missing-atom-id>".to_string());
+            if !atom_ids.insert(id.to_string()) {
+                anyhow::bail!("plan atom id {id} is duplicated");
+            }
+            let category = atom
+                .get("category")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("plan atom {id} missing category"))?;
+            let expected = match category.as_str() {
+                "query" | "code_change" | "deploy_ops" => "claude_code",
+                "judgment" | "acceptance" => "codex",
+                other => {
+                    anyhow::bail!(
+                        "plan atom {id} has unsupported category {other}; expected query/code_change/deploy_ops/judgment/acceptance"
+                    );
+                }
+            };
+            let assignee = atom
+                .get("assignee_engine")
+                .or_else(|| atom.get("assignee"))
+                .and_then(|value| value.as_str())
+                .map(Self::normalize_jarvis_plan_assignee)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("plan atom {id} missing assignee_engine"))?;
+            if assignee != expected {
+                anyhow::bail!(
+                    "plan atom {id} category {category} must assign to {expected}, got {assignee}"
+                );
+            }
+            let execution_order = atom
+                .get("execution_order")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("plan atom {id} missing execution_order"))?;
+            if !matches!(execution_order.as_str(), "serial" | "parallel") {
+                anyhow::bail!(
+                    "plan atom {id} execution_order must be serial or parallel, got {execution_order}"
+                );
+            }
+        }
+        for atom in Self::jarvis_plan_atom_values(parsed) {
+            let id = Self::jarvis_atom_id(atom).unwrap_or_else(|| "<missing-atom-id>".to_string());
+            for dep in Self::jarvis_atom_depends_on(atom) {
+                if !atom_ids.contains(&dep) {
+                    anyhow::bail!("plan atom {id} depends_on unknown atom {dep}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn parse_codex_plan_response(text: &str) -> anyhow::Result<JarvisCodexPlanResponse> {
         let json_text = Self::extract_json_object(text)
             .ok_or_else(|| anyhow::anyhow!("Codex plan author did not return a JSON object"))?;
@@ -5709,6 +6858,10 @@ JSON 字段必须是：\n\
                 );
             }
         }
+        if parsed.assignment_policy.is_null() {
+            parsed.assignment_policy = Self::jarvis_assignment_policy_default();
+        }
+        Self::validate_jarvis_plan_atomization(&parsed)?;
         Ok(parsed)
     }
 
@@ -5962,6 +7115,92 @@ JSON 字段必须是：\n\
         format!("[{}]", joined)
     }
 
+    fn jarvis_lisp_json(value: &serde_json::Value) -> String {
+        Self::jarvis_lisp_string(
+            &serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+        )
+    }
+
+    fn jarvis_authored_key_judgment_lisp_body(
+        schema: &str,
+        config: &JarvisKeyJudgmentAuthorConfig,
+        channel: &str,
+        objective: &str,
+        draft: &JarvisCodexKeyJudgmentResponse,
+        grounding_context_id: &str,
+        intent_artifact_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        grounding_report_file: Option<&str>,
+        grounding_report_hash: Option<&str>,
+    ) -> String {
+        let provider = Self::jarvis_author_text_provider();
+        let engine = Self::provider_box_engine_for_provider(provider.as_str()).unwrap_or("codex");
+        let slot_id = Self::jarvis_author_text_slot_id(provider.as_str(), &config.slot_id);
+        let model = Self::jarvis_author_text_model(provider.as_str(), &config.model);
+        let authority = Self::jarvis_author_text_authority(
+            provider.as_str(),
+            model.as_deref(),
+            &config.reasoning_effort,
+        );
+        format!(
+            "(key-judgment-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :grounding-report-file {}\n  :grounding-report-hash {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :judgment {}\n  :rejected-hypotheses {}\n  :evidence-refs {}\n  :planning-implications {}\n  :acceptance-focus {}\n  :next-step \"feed key judgment into plan.lisp atomization\")",
+            Self::jarvis_lisp_string(schema),
+            Self::jarvis_lisp_string(&authority),
+            Self::jarvis_lisp_string(&provider),
+            Self::jarvis_lisp_string(engine),
+            Self::jarvis_lisp_string(&slot_id),
+            Self::jarvis_lisp_optional(model.as_deref()),
+            Self::jarvis_lisp_string(&config.reasoning_effort),
+            Self::jarvis_lisp_string(&config.sandbox),
+            Self::jarvis_lisp_string(&config.approval_policy),
+            Self::jarvis_lisp_string(channel),
+            Self::jarvis_lisp_string(objective),
+            Self::jarvis_lisp_optional(draft.confidence.as_deref()),
+            Self::jarvis_lisp_string(grounding_context_id),
+            Self::jarvis_lisp_string(intent_artifact_id),
+            Self::jarvis_lisp_optional(grounding_report_file),
+            Self::jarvis_lisp_optional(grounding_report_hash),
+            Self::jarvis_lisp_optional(topic_id),
+            Self::jarvis_lisp_optional(topic_label),
+            Self::jarvis_lisp_string_list(sources_used),
+            Self::jarvis_lisp_string(draft.judgment.trim()),
+            Self::jarvis_lisp_string_list(&draft.rejected_hypotheses),
+            Self::jarvis_lisp_string_list(&draft.evidence_refs),
+            Self::jarvis_lisp_string_list(&draft.planning_implications),
+            Self::jarvis_lisp_string_list(&draft.acceptance_focus),
+        )
+    }
+
+    fn jarvis_plan_atomization_graph(
+        draft: &JarvisCodexPlanResponse,
+        grounding_context_id: &str,
+        intent_artifact_id: &str,
+        key_judgment: &JarvisKeyJudgmentArtifactRef,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "missiond.plan-atomization-graph.v1",
+            "grounding_context_id": grounding_context_id,
+            "intent_artifact_id": intent_artifact_id,
+            "key_judgment_artifact_id": key_judgment.artifact_id,
+            "key_judgment_artifact_hash": key_judgment.artifact_hash,
+            "key_judgment": key_judgment.judgment,
+            "execution_mode": draft.execution_mode,
+            "requires_board_task": draft.requires_board_task,
+            "workstreams": draft.workstreams,
+            "atom_tasks": draft.atom_tasks,
+            "dependency_edges": draft.dependency_edges,
+            "serial_groups": draft.serial_groups,
+            "parallel_groups": draft.parallel_groups,
+            "assignment_policy": if draft.assignment_policy.is_null() {
+                Self::jarvis_assignment_policy_default()
+            } else {
+                draft.assignment_policy.clone()
+            }
+        })
+    }
+
     fn jarvis_authored_plan_lisp_body(
         schema: &str,
         config: &JarvisPlanAuthorConfig,
@@ -5969,6 +7208,8 @@ JSON 字段必须是：\n\
         draft: &JarvisCodexPlanResponse,
         grounding_context_id: &str,
         intent_artifact_id: &str,
+        key_judgment: &JarvisKeyJudgmentArtifactRef,
+        atomization_graph: &serde_json::Value,
         topic_id: Option<&str>,
         topic_label: Option<&str>,
         sources_used: &[String],
@@ -5996,7 +7237,7 @@ JSON 字段必须是：\n\
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "(plan-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:mode {}\n     :requires-board-task {}\n     :answer-policy {}\n     :provider-hint {}\n     :direct-answer-provider provider-box\n     :completion-authority {})\n  :steps [\n{}\n  ]\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
+            "(plan-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :objective {}\n  :confidence {}\n  :grounding-context-id {}\n  :intent-artifact-id {}\n  :key-judgment-artifact-id {}\n  :key-judgment-artifact-hash {}\n  :key-judgment {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :execution\n    (:mode {}\n     :requires-board-task {}\n     :answer-policy {}\n     :provider-hint {}\n     :direct-answer-provider provider-box\n     :completion-authority {})\n  :steps [\n{}\n  ]\n  :atomization-json {}\n  :assignment-policy {}\n  :boundary {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-plan-confirmation :required true))",
             Self::jarvis_lisp_string(schema),
             Self::jarvis_lisp_string(&authority),
             Self::jarvis_lisp_string(&provider),
@@ -6011,6 +7252,9 @@ JSON 字段必须是：\n\
             Self::jarvis_lisp_optional(draft.confidence.as_deref()),
             Self::jarvis_lisp_string(grounding_context_id),
             Self::jarvis_lisp_string(intent_artifact_id),
+            Self::jarvis_lisp_string(&key_judgment.artifact_id),
+            Self::jarvis_lisp_optional(key_judgment.artifact_hash.as_deref()),
+            Self::jarvis_lisp_string(&key_judgment.judgment),
             Self::jarvis_lisp_optional(topic_id),
             Self::jarvis_lisp_optional(topic_label),
             Self::jarvis_lisp_string_list(sources_used),
@@ -6028,11 +7272,213 @@ JSON 字段必须是：\n\
                 "interaction-result-artifact"
             },
             rendered_steps,
+            Self::jarvis_lisp_json(atomization_graph),
+            Self::jarvis_lisp_json(&draft.assignment_policy),
             Self::jarvis_lisp_optional(draft.boundary.as_deref()),
             Self::jarvis_lisp_string_list(&draft.assumptions),
             Self::jarvis_lisp_string_list(&draft.non_goals),
             Self::jarvis_lisp_string_list(&draft.acceptance_signals),
         )
+    }
+
+    async fn author_jarvis_key_judgment_draft(
+        provider_box_http: &ProviderBoxHttpSlot,
+        config: &JarvisKeyJudgmentAuthorConfig,
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        intent_artifact_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        permission_context: Option<&serde_json::Value>,
+        context_pack_path: Option<&str>,
+        context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
+        grounding_report_artifact_path: Option<&str>,
+        grounding_report_hash: Option<&str>,
+        context_sufficiency: Option<&str>,
+    ) -> anyhow::Result<JarvisAuthoredKeyJudgmentDraft> {
+        let grounding_report_preview =
+            Self::read_jarvis_grounding_report_preview(grounding_report_file).await;
+        let prompt = Self::jarvis_codex_key_judgment_prompt(
+            config,
+            schema,
+            channel,
+            objective,
+            grounding_context_id,
+            intent_artifact_id,
+            topic_id,
+            topic_label,
+            sources_used,
+            permission_context,
+            context_pack_path,
+            context_pack_file,
+            grounding_report_file,
+            grounding_report_artifact_path,
+            grounding_report_hash,
+            context_sufficiency,
+            grounding_report_preview.as_deref(),
+        );
+        let response =
+            Self::run_jarvis_codex_key_judgment_turn(provider_box_http, config, &prompt).await?;
+        let parsed = Self::parse_codex_key_judgment_response(&response)?;
+        let artifact_body = Self::jarvis_authored_key_judgment_lisp_body(
+            schema,
+            config,
+            channel,
+            objective,
+            &parsed,
+            grounding_context_id,
+            intent_artifact_id,
+            topic_id,
+            topic_label,
+            sources_used,
+            grounding_report_file,
+            grounding_report_hash,
+        );
+        Ok(JarvisAuthoredKeyJudgmentDraft {
+            judgment: parsed.judgment.trim().to_string(),
+            review_text: parsed.review_text.trim().to_string(),
+            artifact_body,
+            confidence: parsed.confidence,
+            rejected_hypotheses: parsed.rejected_hypotheses,
+            evidence_refs: parsed.evidence_refs,
+            planning_implications: parsed.planning_implications,
+            acceptance_focus: parsed.acceptance_focus,
+        })
+    }
+
+    async fn author_jarvis_key_judgment_draft_with_progress(
+        stream: &mut TcpStream,
+        progress_bus: &JarvisProgressBus,
+        chat_id: &str,
+        interaction_id: Option<&str>,
+        provider_box_http: &ProviderBoxHttpSlot,
+        config: &JarvisKeyJudgmentAuthorConfig,
+        schema: &str,
+        channel: &str,
+        objective: &str,
+        grounding_context_id: &str,
+        intent_artifact_id: &str,
+        topic_id: Option<&str>,
+        topic_label: Option<&str>,
+        sources_used: &[String],
+        permission_context: Option<&serde_json::Value>,
+        context_pack_path: Option<&str>,
+        context_pack_file: Option<&str>,
+        grounding_report_file: Option<&str>,
+        grounding_report_artifact_path: Option<&str>,
+        grounding_report_hash: Option<&str>,
+        context_sufficiency: Option<&str>,
+    ) -> anyhow::Result<JarvisAuthoredKeyJudgmentDraft> {
+        const HEARTBEAT_SECS: u64 = 8;
+        let (provider, slot_id, author) = Self::jarvis_author_progress_identity(
+            &config.slot_id,
+            &config.model,
+            &config.reasoning_effort,
+        );
+        Self::write_jarvis_progress(
+            stream,
+            progress_bus,
+            chat_id,
+            interaction_id,
+            "key_judgment_authoring",
+            "provider_box_semantic_authoring_start",
+            "running",
+            &format!("正在调用 {provider} 文本作者工位生成关键判断。"),
+            None,
+            Some(&slot_id),
+            Some(author.as_str()),
+        )
+        .await?;
+        let started = tokio::time::Instant::now();
+        let mut authoring = Box::pin(Self::author_jarvis_key_judgment_draft(
+            provider_box_http,
+            config,
+            schema,
+            channel,
+            objective,
+            grounding_context_id,
+            intent_artifact_id,
+            topic_id,
+            topic_label,
+            sources_used,
+            permission_context,
+            context_pack_path,
+            context_pack_file,
+            grounding_report_file,
+            grounding_report_artifact_path,
+            grounding_report_hash,
+            context_sufficiency,
+        ));
+        let mut heartbeat = Box::pin(tokio::time::sleep(std::time::Duration::from_secs(
+            HEARTBEAT_SECS,
+        )));
+        loop {
+            tokio::select! {
+                result = &mut authoring => {
+                    return match result {
+                        Ok(draft) => {
+                            Self::write_jarvis_progress(
+                                stream,
+                                progress_bus,
+                                chat_id,
+                                interaction_id,
+                                "key_judgment_authoring",
+                                "provider_box_semantic_authoring_completed",
+                                "completed",
+                                &format!("关键判断已由 {provider} 生成并通过结构校验，正在写入 artifact。"),
+                                Some(started.elapsed().as_secs()),
+                                Some(&slot_id),
+                                Some(author.as_str()),
+                            )
+                            .await?;
+                            Ok(draft)
+                        }
+                        Err(error) => {
+                            let error_message = error.to_string();
+                            Self::write_jarvis_progress(
+                                stream,
+                                progress_bus,
+                                chat_id,
+                                interaction_id,
+                                "key_judgment_authoring_failed",
+                                "provider_box_semantic_authoring_failed",
+                                "failed",
+                                &format!("失败在关键判断生成：{error_message}"),
+                                Some(started.elapsed().as_secs()),
+                                Some(&slot_id),
+                                Some(author.as_str()),
+                            )
+                            .await?;
+                            Err(error)
+                        }
+                    };
+                }
+                _ = &mut heartbeat => {
+                    let elapsed = started.elapsed().as_secs();
+                    Self::write_jarvis_progress(
+                        stream,
+                        progress_bus,
+                        chat_id,
+                        interaction_id,
+                        "key_judgment_authoring",
+                        "provider_box_semantic_authoring_waiting",
+                        "running",
+                        &format!("{provider} key judgment author 仍在运行，已等待 {elapsed}s；当前步骤：生成并校验关键判断 artifact。"),
+                        Some(elapsed),
+                        Some(&slot_id),
+                        Some(author.as_str()),
+                    )
+                    .await?;
+                    heartbeat.as_mut().reset(
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(HEARTBEAT_SECS),
+                    );
+                }
+            }
+        }
     }
 
     async fn author_jarvis_plan_draft(
@@ -6043,6 +7489,7 @@ JSON 字段必须是：\n\
         objective: &str,
         grounding_context_id: &str,
         intent_artifact_id: &str,
+        key_judgment: &JarvisKeyJudgmentArtifactRef,
         topic_id: Option<&str>,
         topic_label: Option<&str>,
         sources_used: &[String],
@@ -6065,6 +7512,7 @@ JSON 字段必须是：\n\
             objective,
             grounding_context_id,
             intent_artifact_id,
+            key_judgment,
             topic_id,
             topic_label,
             sources_used,
@@ -6081,6 +7529,12 @@ JSON 字段必须是：\n\
         );
         let response = Self::run_jarvis_codex_plan_turn(provider_box_http, config, &prompt).await?;
         let parsed = Self::parse_codex_plan_response(&response)?;
+        let atomization_graph = Self::jarvis_plan_atomization_graph(
+            &parsed,
+            grounding_context_id,
+            intent_artifact_id,
+            key_judgment,
+        );
         let artifact_body = Self::jarvis_authored_plan_lisp_body(
             schema,
             config,
@@ -6088,6 +7542,8 @@ JSON 字段必须是：\n\
             &parsed,
             grounding_context_id,
             intent_artifact_id,
+            key_judgment,
+            &atomization_graph,
             topic_id,
             topic_label,
             sources_used,
@@ -6106,6 +7562,14 @@ JSON 字段必须是：\n\
             non_goals: parsed.non_goals,
             acceptance_signals: parsed.acceptance_signals,
             confidence: parsed.confidence,
+            key_judgment: parsed.key_judgment,
+            atomization_graph,
+            workstreams: parsed.workstreams,
+            atom_tasks: parsed.atom_tasks,
+            dependency_edges: parsed.dependency_edges,
+            serial_groups: parsed.serial_groups,
+            parallel_groups: parsed.parallel_groups,
+            assignment_policy: parsed.assignment_policy,
         })
     }
 
@@ -6121,6 +7585,7 @@ JSON 字段必须是：\n\
         objective: &str,
         grounding_context_id: &str,
         intent_artifact_id: &str,
+        key_judgment: &JarvisKeyJudgmentArtifactRef,
         topic_id: Option<&str>,
         topic_label: Option<&str>,
         sources_used: &[String],
@@ -6163,6 +7628,7 @@ JSON 字段必须是：\n\
             objective,
             grounding_context_id,
             intent_artifact_id,
+            key_judgment,
             topic_id,
             topic_label,
             sources_used,
@@ -6263,6 +7729,9 @@ JSON 字段必须是：\n\
         artifact_hash: &str,
         artifact_path: &str,
     ) -> anyhow::Result<()> {
+        if !jarvis_artifact_projection_openai_delta_enabled() {
+            return Ok(());
+        }
         let content =
             Self::jarvis_artifact_projection_text(event, artifact_id, artifact_hash, artifact_path);
         let chunk = serde_json::json!({
@@ -6668,6 +8137,108 @@ JSON 字段必须是：\n\
         })
     }
 
+    fn jarvis_key_judgment_from_interaction_metadata(
+        envelope: &InteractionEnvelope,
+    ) -> Result<JarvisKeyJudgmentArtifactRef, String> {
+        let artifact_id = interaction_metadata_string(envelope, "missiond_key_judgment_artifact_id")
+            .ok_or_else(|| {
+                "Jarvis plan confirmation requires missiond_key_judgment_artifact_id from the previous plan payload.".to_string()
+            })?;
+        let judgment = interaction_metadata_string(envelope, "missiond_key_judgment")
+            .ok_or_else(|| {
+                "Jarvis plan confirmation requires missiond_key_judgment from the previous plan payload.".to_string()
+            })?;
+        Ok(JarvisKeyJudgmentArtifactRef {
+            artifact_id,
+            artifact_hash: interaction_metadata_string(
+                envelope,
+                "missiond_key_judgment_artifact_hash",
+            ),
+            artifact_path: interaction_metadata_string(
+                envelope,
+                "missiond_key_judgment_artifact_path",
+            ),
+            judgment,
+            review_text: interaction_metadata_string(envelope, "missiond_key_judgment_review_text"),
+            confidence: interaction_metadata_string(envelope, "missiond_key_judgment_confidence"),
+            rejected_hypotheses: interaction_metadata_string_vec(
+                envelope,
+                "missiond_key_judgment_rejected_hypotheses",
+            ),
+            evidence_refs: interaction_metadata_string_vec(
+                envelope,
+                "missiond_key_judgment_evidence_refs",
+            ),
+            planning_implications: interaction_metadata_string_vec(
+                envelope,
+                "missiond_key_judgment_planning_implications",
+            ),
+            acceptance_focus: interaction_metadata_string_vec(
+                envelope,
+                "missiond_key_judgment_acceptance_focus",
+            ),
+        })
+    }
+
+    fn jarvis_key_judgment_from_confirm_value(
+        req: &serde_json::Value,
+    ) -> Result<JarvisKeyJudgmentArtifactRef, String> {
+        let artifact_id = jarvis_confirm_string(req, "missiond_key_judgment_artifact_id")
+            .ok_or_else(|| {
+                "Jarvis plan confirmation requires missiond_key_judgment_artifact_id from the previous plan payload.".to_string()
+            })?;
+        let judgment = jarvis_confirm_string(req, "missiond_key_judgment").ok_or_else(|| {
+            "Jarvis plan confirmation requires missiond_key_judgment from the previous plan payload.".to_string()
+        })?;
+        Ok(JarvisKeyJudgmentArtifactRef {
+            artifact_id,
+            artifact_hash: jarvis_confirm_string(req, "missiond_key_judgment_artifact_hash"),
+            artifact_path: jarvis_confirm_string(req, "missiond_key_judgment_artifact_path"),
+            judgment,
+            review_text: jarvis_confirm_string(req, "missiond_key_judgment_review_text"),
+            confidence: jarvis_confirm_string(req, "missiond_key_judgment_confidence"),
+            rejected_hypotheses: jarvis_confirm_string_vec(
+                req,
+                "missiond_key_judgment_rejected_hypotheses",
+            ),
+            evidence_refs: jarvis_confirm_string_vec(req, "missiond_key_judgment_evidence_refs"),
+            planning_implications: jarvis_confirm_string_vec(
+                req,
+                "missiond_key_judgment_planning_implications",
+            ),
+            acceptance_focus: jarvis_confirm_string_vec(
+                req,
+                "missiond_key_judgment_acceptance_focus",
+            ),
+        })
+    }
+
+    fn jarvis_plan_atomization_graph_from_interaction_metadata(
+        envelope: &InteractionEnvelope,
+    ) -> serde_json::Value {
+        interaction_metadata_string(envelope, "missiond_plan_atomization_graph_json")
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "schema": "missiond.plan-atomization-graph.v1",
+                    "status": "missing_from_confirmation_payload"
+                })
+            })
+    }
+
+    fn jarvis_plan_atomization_graph_from_confirm_value(
+        req: &serde_json::Value,
+    ) -> serde_json::Value {
+        jarvis_confirm_string(req, "missiond_plan_atomization_graph_json")
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "schema": "missiond.plan-atomization-graph.v1",
+                    "status": "missing_from_confirmation_payload"
+                })
+            })
+    }
+
     async fn gather_jarvis_grounding(
         slot: &JarvisGroundingSlot,
         req: JarvisGroundingRequest,
@@ -6711,7 +8282,7 @@ JSON 字段必须是：\n\
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "codex_cli".to_string())
+            .unwrap_or_else(|| Self::jarvis_communicator_provider())
     }
 
     fn provider_box_engine_for_provider(provider: &str) -> anyhow::Result<&'static str> {
@@ -6726,11 +8297,45 @@ JSON 字段必须是：\n\
         }
     }
 
+    fn jarvis_communicator_provider() -> String {
+        std::env::var("MISSIOND_JARVIS_COMMUNICATOR_PROVIDER")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "agy".to_string())
+    }
+
+    fn jarvis_communicator_slot_id(provider: &str) -> String {
+        Self::jarvis_text_only_slot_id(
+            provider,
+            std::env::var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID")
+                .ok()
+                .as_deref(),
+            "slot-agy-gemini-communicator",
+        )
+    }
+
+    fn jarvis_communicator_model() -> Option<String> {
+        std::env::var("MISSIOND_JARVIS_COMMUNICATOR_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| Some("gemini-3.1-pro-preview".to_string()))
+    }
+
+    fn jarvis_communicator_timeout_secs() -> u64 {
+        std::env::var("MISSIOND_JARVIS_COMMUNICATOR_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(120)
+            .clamp(10, 600)
+    }
+
     fn jarvis_direct_answer_timeout_secs() -> u64 {
         std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_TIMEOUT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(120)
+            .unwrap_or_else(Self::jarvis_communicator_timeout_secs)
             .clamp(10, 600)
     }
 
@@ -6765,10 +8370,11 @@ JSON 字段必须是：\n\
         context_preview: Option<&str>,
         intent_artifact_id: &str,
         plan_artifact_id: &str,
+        key_judgment: &JarvisKeyJudgmentArtifactRef,
         permission_context: &serde_json::Value,
         sources_used: &[String],
     ) -> (String, String) {
-        let system_prompt = "你是 MissionD Jarvis 的 grounded direct-answer materializer。你只能基于随请求提供的 grounding report、grounding context、PermissionContext、sources_used、intent/plan artifact 生成自然语言回答。不要调用工具，不要读取文件，不要声称已创建 BoardTask，不要编造没有证据的事实。若证据不足，直接说明证据不足并列出还缺什么。".to_string();
+        let system_prompt = "你是 MissionD Jarvis 的 grounded direct-answer materializer。你只能基于随请求提供的 grounding report、key judgment、grounding context、PermissionContext、sources_used、intent/plan artifact 生成自然语言回答。不要调用工具，不要读取文件，不要声称已创建 BoardTask，不要编造没有证据的事实。若证据不足，直接说明证据不足并列出还缺什么。".to_string();
         let payload = serde_json::json!({
             "schema": "missiond.jarvis-grounded-direct-answer-input.v1",
             "objective": objective,
@@ -6782,6 +8388,12 @@ JSON 字段必须是：\n\
             "context_preview": context_preview,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
+            "key_judgment_artifact_id": key_judgment.artifact_id,
+            "key_judgment_artifact_hash": key_judgment.artifact_hash,
+            "key_judgment": key_judgment.judgment,
+            "key_judgment_evidence_refs": key_judgment.evidence_refs,
+            "planning_implications": key_judgment.planning_implications,
+            "acceptance_focus": key_judgment.acceptance_focus,
             "permission_context": permission_context,
             "sources_used": sources_used,
             "answer_contract": {
@@ -6796,6 +8408,174 @@ JSON 字段必须是：\n\
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
         );
         (system_prompt, prompt)
+    }
+
+    fn build_jarvis_communicator_prompt(
+        phase: &str,
+        objective: &str,
+        context: &serde_json::Value,
+    ) -> String {
+        let payload = serde_json::json!({
+            "schema": "missiond.jarvis-communication-officer-input.v1",
+            "phase": phase,
+            "objective": objective,
+            "context": context,
+            "output_contract": {
+                "language": "zh-CN",
+                "style": "concise",
+                "must_be_evidence_bound": true,
+                "must_not_show_lisp_body": true,
+                "must_not_ask_user_to_confirm_intent_or_plan": true,
+                "must_not_claim_terminal_result_unless_context_has_terminal_task_result": true,
+                "must_say_current_step_before_user_message": true
+            }
+        });
+        format!(
+            "你是 MissionD Jarvis 的沟通官，由 AGY Gemini 3.1 Pro 工位承担。\
+             你只负责把当前计划、派工状态或执行结果用中文告诉用户。\
+             你不能修改 intent.lisp、key judgment、plan.lisp、BoardTask，也不能声称没有证据的执行结果。\
+             不要展示 Lisp 正文，不要让用户点击确认 intent/plan。\
+             回复必须先用一到三行说明当前执行到哪一步，然后给出对用户可读的简短说明。\n\n{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+        )
+    }
+
+    async fn materialize_jarvis_communication(
+        stream: &mut TcpStream,
+        progress_bus: &JarvisProgressBus,
+        artifact_writer: &JarvisArtifactSlot,
+        chat_id: &str,
+        interaction_id: Option<&str>,
+        phase: &str,
+        objective: &str,
+        context: serde_json::Value,
+        provider_box_http: &ProviderBoxHttpSlot,
+        db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
+        conversation_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let provider = Self::jarvis_communicator_provider();
+        let engine = Self::provider_box_engine_for_provider(provider.as_str())?;
+        let timeout_secs = Self::jarvis_communicator_timeout_secs();
+        let slot_id = Self::jarvis_communicator_slot_id(provider.as_str());
+        Self::write_jarvis_progress(
+            stream,
+            progress_bus,
+            chat_id,
+            interaction_id,
+            "communicator",
+            "communication_officer_start",
+            "running",
+            "正在让 AGY Gemini 3.1 Pro 沟通官整理当前步骤和用户可见说明。",
+            None,
+            Some(&slot_id),
+            Some("jarvis-communication-officer"),
+        )
+        .await?;
+
+        let prompt = Self::build_jarvis_communicator_prompt(phase, objective, &context);
+        let correlation_id = format!("jarvis-communicator-{}", uuid::Uuid::new_v4().simple());
+        let body = serde_json::json!({
+            "schema": "missiond.provider-interaction-request.v1",
+            "command": "pure-text-single-turn",
+            "provider": &provider,
+            "engine": engine,
+            "prompt": prompt,
+            "model": Self::jarvis_communicator_model(),
+            "timeout_secs": timeout_secs,
+            "correlation_id": correlation_id,
+            "slot_id": slot_id,
+            "provider_box_lane": "jarvis-communication-officer",
+            "xjp_request_stage": phase,
+            "no_tools": true,
+            "no_mcp": true,
+            "no_shell": true,
+            "no_file_access": true,
+            "output_contract": {
+                "media_type": "text/plain",
+                "single_turn": true
+            },
+            "tool_policy": {
+                "sandbox": "read-only",
+                "approval_policy": "never"
+            }
+        });
+        let text = Self::call_provider_box_turn(
+            provider_box_http,
+            body,
+            timeout_secs,
+            "JARVIS_COMMUNICATOR",
+        )
+        .await?;
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            anyhow::bail!("JARVIS_COMMUNICATOR_EMPTY: provider-box returned no visible answer");
+        }
+
+        let event_name = if phase.contains("final") || phase.contains("result") {
+            "communicator_final"
+        } else {
+            "communicator_status"
+        };
+        let event = serde_json::json!({
+            "phase": phase,
+            "interaction_id": interaction_id,
+            "provider": provider,
+            "engine": engine,
+            "slot_id": Self::jarvis_communicator_slot_id(Self::jarvis_communicator_provider().as_str()),
+            "model": Self::jarvis_communicator_model(),
+            "content": text,
+        });
+        Self::write_sse_event(stream, event_name, &event).await?;
+        Self::persist_interaction_event(db, conversation_id, interaction_id, event_name, &event)
+            .await;
+        let _ = Self::put_jarvis_artifact(
+            artifact_writer,
+            JarvisArtifactRequest {
+                kind: "interaction-communication".to_string(),
+                project_id: None,
+                task_id: context
+                    .get("task_id")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned),
+                payload: serde_json::json!({
+                    "schema": "missiond.interaction-communication.v1",
+                    "interaction_id": interaction_id,
+                    "phase": phase,
+                    "communicator_provider": event.get("provider").cloned(),
+                    "communicator_engine": engine,
+                    "communicator_slot_id": event.get("slot_id").cloned(),
+                    "communicator_model": event.get("model").cloned(),
+                    "objective": objective,
+                    "context": context,
+                    "content": event.get("content").cloned(),
+                }),
+                metadata: serde_json::json!({
+                    "schema": "missiond.interaction-communication.v1",
+                    "interaction_id": interaction_id,
+                    "phase": phase,
+                }),
+            },
+        )
+        .await;
+        Self::write_jarvis_progress(
+            stream,
+            progress_bus,
+            chat_id,
+            interaction_id,
+            "communicator",
+            "communication_officer_completed",
+            "completed",
+            "沟通官已生成用户可见说明，准备发送给用户。",
+            None,
+            event.get("slot_id").and_then(|value| value.as_str()),
+            Some("jarvis-communication-officer"),
+        )
+        .await?;
+        Ok(event
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string())
     }
 
     async fn stream_jarvis_grounded_direct_answer(
@@ -6813,6 +8593,7 @@ JSON 字段必须是：\n\
         grounding_report_hash: Option<&str>,
         intent_artifact_id: &str,
         plan_artifact_id: &str,
+        key_judgment: &JarvisKeyJudgmentArtifactRef,
         permission_context: &serde_json::Value,
         sources_used: &[String],
         provider_box_http: &ProviderBoxHttpSlot,
@@ -6852,6 +8633,7 @@ JSON 字段必须是：\n\
             context_preview.as_deref(),
             intent_artifact_id,
             plan_artifact_id,
+            key_judgment,
             permission_context,
             sources_used,
         );
@@ -6867,8 +8649,9 @@ JSON 字段必须是：\n\
             provider.as_str(),
             std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
                 .ok()
+                .or_else(|| std::env::var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID").ok())
                 .as_deref(),
-            "slot-codex-review-worker",
+            "slot-agy-gemini-communicator",
         );
         let body = serde_json::json!({
             "schema": "missiond.provider-interaction-request.v1",
@@ -6876,7 +8659,9 @@ JSON 字段必须是：\n\
             "provider": &provider,
             "engine": engine,
             "prompt": prompt,
-            "model": std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_MODEL").ok(),
+            "model": std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_MODEL")
+                .ok()
+                .or_else(Self::jarvis_communicator_model),
             "timeout_secs": timeout_secs,
             "correlation_id": correlation_id,
             "slot_id": slot_id,
@@ -6940,6 +8725,9 @@ JSON 字段必须是：\n\
             "grounding_report_hash": grounding_report_hash,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
+            "key_judgment_artifact_id": key_judgment.artifact_id,
+            "key_judgment_artifact_hash": key_judgment.artifact_hash,
+            "key_judgment": key_judgment.judgment,
             "provider": &provider,
             "answer_text": answer,
             "sources_used": sources_used,
@@ -6962,6 +8750,8 @@ JSON 字段必须是：\n\
                     "grounding_report_hash": grounding_report_hash,
                     "intent_artifact_id": intent_artifact_id,
                     "plan_artifact_id": plan_artifact_id,
+                    "key_judgment_artifact_id": key_judgment.artifact_id,
+                    "key_judgment_artifact_hash": key_judgment.artifact_hash,
                     "execution_mode": "grounded_direct_answer",
                 }),
             },
@@ -7032,9 +8822,12 @@ JSON 字段必须是：\n\
 
     async fn stream_jarvis_task_until_terminal(
         db: &Arc<dyn crate::db::traits::MissionStore>,
-        _jarvis_artifact_writer: &JarvisArtifactSlot,
+        jarvis_artifact_writer: &JarvisArtifactSlot,
+        provider_box_http: &ProviderBoxHttpSlot,
+        progress_bus: &JarvisProgressBus,
         stream: &mut TcpStream,
         chat_id: &str,
+        interaction_id: Option<&str>,
         task_id: &str,
         conversation_id: Option<&str>,
     ) -> anyhow::Result<()> {
@@ -7349,6 +9142,41 @@ JSON 字段必须是：\n\
                         "任务已完成，但没有找到 summary note；请检查 task-result-artifact。"
                             .to_string()
                     });
+                    let user_text = match Self::materialize_jarvis_communication(
+                        stream,
+                        progress_bus,
+                        jarvis_artifact_writer,
+                        chat_id,
+                        interaction_id,
+                        "result_final",
+                        task_id,
+                        serde_json::json!({
+                            "task_id": task_id,
+                            "status": "done",
+                            "terminal_task_result": true,
+                            "task_result_artifact_hash": latest_artifact_hash,
+                            "raw_summary": final_text,
+                        }),
+                        provider_box_http,
+                        Some(db),
+                        conversation_id,
+                    )
+                    .await
+                    {
+                        Ok(text) => text,
+                        Err(error) => {
+                            let diagnostic = serde_json::json!({
+                                "phase": "communicator",
+                                "task_id": task_id,
+                                "error": {
+                                    "code": "JARVIS_COMMUNICATOR_FAILED",
+                                    "message": error.to_string()
+                                }
+                            });
+                            Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                            final_text
+                        }
+                    };
                     let final_event = serde_json::json!({
                         "phase": "done",
                         "task_id": task_id,
@@ -7358,7 +9186,7 @@ JSON 字段必须是：\n\
                     Self::write_sse_openai_text_and_persist(
                         stream,
                         chat_id,
-                        &final_text,
+                        &user_text,
                         Some("stop"),
                         Some(db),
                         conversation_id,
@@ -7375,17 +9203,52 @@ JSON 字段必须是：\n\
                             task.status.as_str()
                         )
                     });
+                    let user_text = match Self::materialize_jarvis_communication(
+                        stream,
+                        progress_bus,
+                        jarvis_artifact_writer,
+                        chat_id,
+                        interaction_id,
+                        "result_terminal_diagnostic",
+                        task_id,
+                        serde_json::json!({
+                            "task_id": task_id,
+                            "status": task.status.as_str(),
+                            "terminal_task_result": false,
+                            "task_result_artifact_hash": latest_artifact_hash,
+                            "raw_summary": final_text,
+                        }),
+                        provider_box_http,
+                        Some(db),
+                        conversation_id,
+                    )
+                    .await
+                    {
+                        Ok(text) => text,
+                        Err(error) => {
+                            let diagnostic = serde_json::json!({
+                                "phase": "communicator",
+                                "task_id": task_id,
+                                "error": {
+                                    "code": "JARVIS_COMMUNICATOR_FAILED",
+                                    "message": error.to_string()
+                                }
+                            });
+                            Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
+                            final_text
+                        }
+                    };
                     let diagnostic = serde_json::json!({
                         "phase": task.status.as_str(),
                         "task_id": task_id,
                         "artifact_hash": latest_artifact_hash,
-                        "message": final_text,
+                        "message": user_text,
                     });
                     Self::write_sse_event(stream, "diagnostic", &diagnostic).await?;
                     Self::write_sse_openai_text_and_persist(
                         stream,
                         chat_id,
-                        &final_text,
+                        &user_text,
                         Some("stop"),
                         Some(db),
                         conversation_id,
@@ -7570,6 +9433,8 @@ JSON 字段必须是：\n\
         grounding_report_hash: Option<&str>,
         intent_artifact_id: &str,
         plan_artifact_id: &str,
+        key_judgment: &JarvisKeyJudgmentArtifactRef,
+        plan_atomization_graph: &serde_json::Value,
         read_scope_root: &str,
     ) -> serde_json::Value {
         let lower = raw_user_text.to_ascii_lowercase();
@@ -7674,6 +9539,17 @@ JSON 字段必须是：\n\
             "grounding_report_hash": grounding_report_hash,
             "intent_artifact_id": intent_artifact_id,
             "plan_artifact_id": plan_artifact_id,
+            "key_judgment_artifact_id": key_judgment.artifact_id,
+            "key_judgment_artifact_hash": key_judgment.artifact_hash,
+            "key_judgment": key_judgment.judgment,
+            "key_judgment_evidence_refs": key_judgment.evidence_refs,
+            "planning_implications": key_judgment.planning_implications,
+            "acceptance_focus": key_judgment.acceptance_focus,
+            "plan_atomization_graph": plan_atomization_graph,
+            "assignment_policy": plan_atomization_graph
+                .get("assignment_policy")
+                .cloned()
+                .unwrap_or_else(Self::jarvis_assignment_policy_default),
             "worker_may_delegate": false
         })
     }
@@ -7736,6 +9612,564 @@ JSON 字段必须是：\n\
             .unwrap_or_else(|| ".".to_string())
     }
 
+    fn jarvis_compact_board_title(prefix: &str, text: &str, max_chars: usize) -> String {
+        let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let base = if compact.is_empty() {
+            "Jarvis atom task".to_string()
+        } else {
+            compact
+        };
+        let remaining = max_chars.saturating_sub(prefix.chars().count());
+        let title = if base.chars().count() > remaining {
+            format!(
+                "{}...",
+                base.chars()
+                    .take(remaining.saturating_sub(3))
+                    .collect::<String>()
+            )
+        } else {
+            base
+        };
+        format!("{prefix}{title}")
+    }
+
+    fn jarvis_dispatch_string_array(
+        dispatch_metadata: &serde_json::Value,
+        key: &str,
+    ) -> Vec<String> {
+        dispatch_metadata
+            .get(key)
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn jarvis_atom_dispatch_defaults(
+        atom: &JarvisPlanAtomTask,
+    ) -> (String, String, String, String, String) {
+        let values = match atom.category.as_str() {
+            "query" => (
+                "review",
+                "jarvis-atom-query",
+                "claude_code",
+                "claude-code-default",
+                "read-only",
+            ),
+            "code_change" => (
+                "code",
+                "jarvis-atom-code-change",
+                "claude_code",
+                "claude-code-default",
+                "scoped",
+            ),
+            "deploy_ops" => (
+                "deploy-ops",
+                "jarvis-atom-deploy-ops",
+                "claude_code",
+                "claude-code-deploy-ops",
+                "read-only",
+            ),
+            "judgment" => (
+                "review",
+                "jarvis-atom-judgment",
+                "codex",
+                "codex-review-worker",
+                "read-only",
+            ),
+            "acceptance" => (
+                "review",
+                "jarvis-atom-acceptance",
+                "codex",
+                "codex-review-worker",
+                "read-only",
+            ),
+            _ => (
+                "review",
+                "jarvis-atom-review",
+                atom.assignee_engine.as_str(),
+                "codex-review-worker",
+                "read-only",
+            ),
+        };
+        (
+            values.0.to_string(),
+            values.1.to_string(),
+            values.2.to_string(),
+            values.3.to_string(),
+            values.4.to_string(),
+        )
+    }
+
+    fn jarvis_plan_atom_scope_json(values: &[String], fallback: Vec<String>) -> serde_json::Value {
+        if values.is_empty() {
+            serde_json::json!(fallback)
+        } else {
+            serde_json::json!(values)
+        }
+    }
+
+    fn jarvis_atom_dispatch_metadata(
+        atom: &JarvisPlanAtomTask,
+        base_dispatch_metadata: &serde_json::Value,
+        plan_atomization_graph: &serde_json::Value,
+        parent_task_id: &str,
+        depends_on_task_ids: &[String],
+        synthetic: bool,
+    ) -> serde_json::Value {
+        let (task_class, task_kind, engine_hint, pool_hint, write_policy) =
+            Self::jarvis_atom_dispatch_defaults(atom);
+        let base_read_scope =
+            Self::jarvis_dispatch_string_array(base_dispatch_metadata, "read_scope");
+        let base_write_scope =
+            Self::jarvis_dispatch_string_array(base_dispatch_metadata, "write_scope");
+        let write_scope = if write_policy == "read-only" {
+            serde_json::json!([])
+        } else {
+            Self::jarvis_plan_atom_scope_json(&atom.write_scope, base_write_scope)
+        };
+        let read_scope = Self::jarvis_plan_atom_scope_json(&atom.read_scope, base_read_scope);
+        let must_not_touch = if write_policy == "read-only" {
+            serde_json::json!([
+                "Do not modify files",
+                "Do not stage",
+                "Do not commit",
+                "Do not spawn sub-workers from inside the worker"
+            ])
+        } else {
+            serde_json::json!(["Do not spawn sub-workers from inside the worker"])
+        };
+        let mut dispatch = if base_dispatch_metadata.is_object() {
+            base_dispatch_metadata.clone()
+        } else {
+            serde_json::json!({})
+        };
+        if let Some(fields) = dispatch.as_object_mut() {
+            fields.insert("task_class".to_string(), serde_json::json!(task_class));
+            fields.insert("task_kind".to_string(), serde_json::json!(task_kind));
+            fields.insert("engine_hint".to_string(), serde_json::json!(engine_hint));
+            fields.insert("pool_hint".to_string(), serde_json::json!(pool_hint));
+            fields.insert("write_policy".to_string(), serde_json::json!(write_policy));
+            fields.insert("read_scope".to_string(), read_scope);
+            fields.insert("write_scope".to_string(), write_scope);
+            fields.insert("must_not_touch".to_string(), must_not_touch);
+            fields.insert(
+                "parent_board_task_id".to_string(),
+                serde_json::json!(parent_task_id),
+            );
+            fields.insert(
+                "atom_task_id".to_string(),
+                serde_json::json!(atom.atom_task_id),
+            );
+            fields.insert(
+                "workstream_id".to_string(),
+                serde_json::json!(atom.workstream_id),
+            );
+            fields.insert(
+                "atom_category".to_string(),
+                serde_json::json!(atom.category),
+            );
+            fields.insert(
+                "assignee_engine".to_string(),
+                serde_json::json!(atom.assignee_engine),
+            );
+            fields.insert(
+                "execution_order".to_string(),
+                serde_json::json!(atom.execution_order),
+            );
+            fields.insert(
+                "depends_on_atoms".to_string(),
+                serde_json::json!(atom.depends_on),
+            );
+            fields.insert(
+                "depends_on_task_ids".to_string(),
+                serde_json::json!(depends_on_task_ids),
+            );
+            fields.insert(
+                "parallel_group".to_string(),
+                serde_json::json!(atom.parallel_group),
+            );
+            fields.insert(
+                "accepted_atom_objective".to_string(),
+                serde_json::json!(atom.objective),
+            );
+            fields.insert("accepted_plan_atom".to_string(), atom.raw.clone());
+            fields.insert(
+                "synthetic_acceptance".to_string(),
+                serde_json::json!(synthetic),
+            );
+            fields.insert(
+                "plan_atomization_graph".to_string(),
+                plan_atomization_graph.clone(),
+            );
+            fields.insert("worker_may_delegate".to_string(), serde_json::json!(false));
+            fields.insert(
+                "completion_materialization_policy".to_string(),
+                serde_json::json!("worker_artifact_required"),
+            );
+            if !atom.acceptance.is_empty() {
+                fields.insert("acceptance".to_string(), serde_json::json!(atom.acceptance));
+            }
+        }
+        dispatch
+    }
+
+    fn jarvis_atom_runtime_metadata(
+        parent_runtime_metadata: Option<&serde_json::Value>,
+        parent_task_id: &str,
+        atom: &JarvisPlanAtomTask,
+        dispatch_metadata: serde_json::Value,
+        plan_atomization_graph: &serde_json::Value,
+        depends_on_task_ids: &[String],
+        synthetic: bool,
+    ) -> serde_json::Value {
+        let mut metadata = parent_runtime_metadata
+            .cloned()
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let read_scope = dispatch_metadata
+            .get("read_scope")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let write_scope = dispatch_metadata
+            .get("write_scope")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let must_not_touch = dispatch_metadata
+            .get("must_not_touch")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        if let Some(fields) = metadata.as_object_mut() {
+            fields.insert(
+                "source".to_string(),
+                serde_json::json!("jarvis-atomized-dispatch"),
+            );
+            fields.insert("dispatch_mode".to_string(), serde_json::json!("atom_task"));
+            fields.insert(
+                "parent_board_task_id".to_string(),
+                serde_json::json!(parent_task_id),
+            );
+            fields.insert(
+                "atom_task_id".to_string(),
+                serde_json::json!(atom.atom_task_id),
+            );
+            fields.insert(
+                "workstream_id".to_string(),
+                serde_json::json!(atom.workstream_id),
+            );
+            fields.insert(
+                "atom_category".to_string(),
+                serde_json::json!(atom.category),
+            );
+            fields.insert(
+                "assignee_engine".to_string(),
+                serde_json::json!(atom.assignee_engine),
+            );
+            fields.insert(
+                "execution_order".to_string(),
+                serde_json::json!(atom.execution_order),
+            );
+            fields.insert(
+                "depends_on_atoms".to_string(),
+                serde_json::json!(atom.depends_on),
+            );
+            fields.insert(
+                "depends_on_task_ids".to_string(),
+                serde_json::json!(depends_on_task_ids),
+            );
+            fields.insert(
+                "parallel_group".to_string(),
+                serde_json::json!(atom.parallel_group),
+            );
+            fields.insert("accepted_plan_atom".to_string(), atom.raw.clone());
+            fields.insert(
+                "synthetic_acceptance".to_string(),
+                serde_json::json!(synthetic),
+            );
+            fields.insert("read_scope".to_string(), read_scope);
+            fields.insert("write_scope".to_string(), write_scope);
+            fields.insert("must_not_touch".to_string(), must_not_touch);
+            fields.insert("dispatch_metadata".to_string(), dispatch_metadata);
+            fields.insert(
+                "plan_atomization_graph".to_string(),
+                plan_atomization_graph.clone(),
+            );
+        }
+        metadata
+    }
+
+    async fn create_jarvis_atom_board_task(
+        db: &Arc<dyn crate::db::traits::MissionStore>,
+        parent_task: &crate::types::BoardTask,
+        parent_input: &crate::types::CreateBoardTaskInput,
+        raw_user_text: &str,
+        base_dispatch_metadata: &serde_json::Value,
+        plan_atomization_graph: &serde_json::Value,
+        atom: &JarvisPlanAtomTask,
+        depends_on_task_ids: Vec<String>,
+        synthetic: bool,
+    ) -> anyhow::Result<JarvisCreatedAtomBoardTask> {
+        let dispatch_metadata = Self::jarvis_atom_dispatch_metadata(
+            atom,
+            base_dispatch_metadata,
+            plan_atomization_graph,
+            parent_task.id.as_str(),
+            &depends_on_task_ids,
+            synthetic,
+        );
+        let prompt_template = Self::build_jarvis_worker_prompt(raw_user_text, &dispatch_metadata);
+        let runtime_metadata = Self::jarvis_atom_runtime_metadata(
+            parent_input.runtime_metadata.as_ref(),
+            parent_task.id.as_str(),
+            atom,
+            dispatch_metadata,
+            plan_atomization_graph,
+            &depends_on_task_ids,
+            synthetic,
+        );
+        let (task_class, _, _, _, _) = Self::jarvis_atom_dispatch_defaults(atom);
+        let title_prefix = if synthetic {
+            "[Jarvis 验收] "
+        } else {
+            match atom.category.as_str() {
+                "query" => "[Jarvis 查询] ",
+                "code_change" => "[Jarvis 代码] ",
+                "deploy_ops" => "[Jarvis 部署] ",
+                "judgment" => "[Jarvis 判断] ",
+                "acceptance" => "[Jarvis 验收] ",
+                _ => "[Jarvis Atom] ",
+            }
+        };
+        let input = crate::types::CreateBoardTaskInput {
+            title: Self::jarvis_compact_board_title(title_prefix, &atom.objective, 120),
+            description: Some(format!(
+                "Jarvis atom task {} under parent {}. Category={}, assignee_engine={}, synthetic_acceptance={}.",
+                atom.atom_task_id, parent_task.id, atom.category, atom.assignee_engine, synthetic
+            )),
+            priority: parent_input.priority.clone(),
+            category: Some("jarvis_atom".to_string()),
+            project: parent_input.project.clone(),
+            server: parent_input.server.clone(),
+            due_date: parent_input.due_date.clone(),
+            parent_id: Some(parent_task.id.to_string()),
+            assignee: None,
+            auto_execute: Some(true),
+            prompt_template: Some(prompt_template),
+            hidden: Some(false),
+            flow_template: parent_input.flow_template.clone(),
+            depends_on: if depends_on_task_ids.is_empty() {
+                None
+            } else {
+                Some(depends_on_task_ids)
+            },
+            dedupe_key: None,
+            timeout_secs: parent_input.timeout_secs,
+            context_intent: Some(task_class.to_string()),
+            runtime_metadata: Some(runtime_metadata),
+        };
+        let task = db.create_board_task(&input).await.map_err(|error| {
+            anyhow::anyhow!(
+                "create Jarvis atom task {} failed: {}",
+                atom.atom_task_id,
+                error
+            )
+        })?;
+        Ok(JarvisCreatedAtomBoardTask {
+            atom_task_id: atom.atom_task_id.clone(),
+            task,
+            category: atom.category.clone(),
+            assignee_engine: atom.assignee_engine.clone(),
+            depends_on_atoms: atom.depends_on.clone(),
+            parallel_group: atom.parallel_group.clone(),
+            synthetic,
+        })
+    }
+
+    fn build_jarvis_parent_board_task_prompt(
+        raw_user_text: &str,
+        dispatch_metadata: &serde_json::Value,
+    ) -> String {
+        let plan_atomization_graph = dispatch_metadata
+            .get("plan_atomization_graph")
+            .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
+        format!(
+            "Jarvis parent BoardTask for an atomized plan.\n\n\
+             用户目标：\n{raw_user_text}\n\n\
+             This parent task is a tracking container. Do not implement, deploy, or create more BoardTasks from this task.\n\
+             MissionD has already expanded the confirmed plan into atom-level child BoardTasks with explicit dependencies and worker assignment.\n\n\
+             Plan atomization graph:\n{plan_atomization_graph}\n"
+        )
+    }
+
+    async fn create_jarvis_atomized_board_tasks(
+        db: &Arc<dyn crate::db::traits::MissionStore>,
+        mut parent_input: crate::types::CreateBoardTaskInput,
+        raw_user_text: &str,
+        base_dispatch_metadata: &serde_json::Value,
+        plan_atomization_graph: &serde_json::Value,
+    ) -> anyhow::Result<JarvisCreatedBoardTasks> {
+        let specs = Self::jarvis_plan_atom_specs(plan_atomization_graph)?;
+        if specs.is_empty() {
+            anyhow::bail!("confirmed plan has no atom_tasks for BoardTask fanout");
+        }
+        let atom_ids = specs
+            .iter()
+            .map(|spec| spec.atom_task_id.clone())
+            .collect::<Vec<_>>();
+        if let Some(metadata) = parent_input.runtime_metadata.as_mut() {
+            if let Some(fields) = metadata.as_object_mut() {
+                fields.insert(
+                    "dispatch_mode".to_string(),
+                    serde_json::json!("atomized_parent"),
+                );
+                fields.insert(
+                    "plan_atom_task_ids".to_string(),
+                    serde_json::json!(atom_ids),
+                );
+                fields.insert(
+                    "plan_atom_task_count".to_string(),
+                    serde_json::json!(specs.len()),
+                );
+            }
+        }
+        parent_input.auto_execute = Some(false);
+        parent_input.context_intent = Some("jarvis-plan".to_string());
+        parent_input.prompt_template = Some(Self::build_jarvis_parent_board_task_prompt(
+            raw_user_text,
+            base_dispatch_metadata,
+        ));
+        let parent_task = db
+            .create_board_task(&parent_input)
+            .await
+            .map_err(|error| anyhow::anyhow!("create Jarvis parent BoardTask failed: {}", error))?;
+
+        let mut pending = specs;
+        let mut created_by_atom_id: HashMap<String, crate::types::BoardTask> = HashMap::new();
+        let mut created_atoms = Vec::new();
+        while !pending.is_empty() {
+            let mut progressed = false;
+            let mut idx = 0;
+            while idx < pending.len() {
+                let ready = pending[idx]
+                    .depends_on
+                    .iter()
+                    .all(|dep| created_by_atom_id.contains_key(dep));
+                if !ready {
+                    idx += 1;
+                    continue;
+                }
+                let atom = pending.remove(idx);
+                let depends_on_task_ids = atom
+                    .depends_on
+                    .iter()
+                    .filter_map(|dep| created_by_atom_id.get(dep))
+                    .map(|task| task.id.to_string())
+                    .collect::<Vec<_>>();
+                let created = Self::create_jarvis_atom_board_task(
+                    db,
+                    &parent_task,
+                    &parent_input,
+                    raw_user_text,
+                    base_dispatch_metadata,
+                    plan_atomization_graph,
+                    &atom,
+                    depends_on_task_ids,
+                    false,
+                )
+                .await?;
+                created_by_atom_id.insert(atom.atom_task_id.clone(), created.task.clone());
+                created_atoms.push(created);
+                progressed = true;
+            }
+            if !progressed {
+                let blocked = pending
+                    .iter()
+                    .map(|atom| format!("{}<-{:?}", atom.atom_task_id, atom.depends_on))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!("plan atom dependency graph is cyclic or unresolved: {blocked}");
+            }
+        }
+
+        let depended_on = created_atoms
+            .iter()
+            .flat_map(|atom| atom.depends_on_atoms.iter().cloned())
+            .collect::<HashSet<_>>();
+        let leaves = created_atoms
+            .iter()
+            .filter(|atom| !depended_on.contains(&atom.atom_task_id))
+            .collect::<Vec<_>>();
+        let mut final_task_id = if leaves.len() == 1 && leaves[0].category == "acceptance" {
+            leaves[0].task.id.to_string()
+        } else {
+            String::new()
+        };
+        if final_task_id.is_empty() {
+            let leaf_atom_ids = leaves
+                .iter()
+                .map(|atom| atom.atom_task_id.clone())
+                .collect::<Vec<_>>();
+            let leaf_task_ids = leaves
+                .iter()
+                .map(|atom| atom.task.id.to_string())
+                .collect::<Vec<_>>();
+            let mut synthetic_id = "jarvis-acceptance-aggregate".to_string();
+            if created_by_atom_id.contains_key(&synthetic_id) {
+                synthetic_id = format!("{}-{}", synthetic_id, created_atoms.len() + 1);
+            }
+            let synthetic_atom = JarvisPlanAtomTask {
+                atom_task_id: synthetic_id,
+                workstream_id: Some("jarvis-acceptance".to_string()),
+                objective: "汇总并验收所有 Jarvis atom task 结果，输出最终 Findings / Evidence / Recommendations / Verification。".to_string(),
+                category: "acceptance".to_string(),
+                assignee_engine: "codex".to_string(),
+                execution_order: "serial".to_string(),
+                depends_on: leaf_atom_ids,
+                parallel_group: None,
+                read_scope: Vec::new(),
+                write_scope: Vec::new(),
+                acceptance: vec![
+                    "核对每个 atom task-result-artifact 是否满足 plan acceptance".to_string(),
+                    "给出最终验收判断和剩余风险".to_string(),
+                    "不得补做 ClaudeCode 查询、代码修改或部署工作".to_string(),
+                ],
+                raw: serde_json::json!({
+                    "synthetic": true,
+                    "category": "acceptance",
+                    "assignee_engine": "codex"
+                }),
+            };
+            let created = Self::create_jarvis_atom_board_task(
+                db,
+                &parent_task,
+                &parent_input,
+                raw_user_text,
+                base_dispatch_metadata,
+                plan_atomization_graph,
+                &synthetic_atom,
+                leaf_task_ids,
+                true,
+            )
+            .await?;
+            final_task_id = created.task.id.to_string();
+            created_atoms.push(created);
+        }
+
+        Ok(JarvisCreatedBoardTasks {
+            parent_task,
+            atom_tasks: created_atoms,
+            final_task_id,
+        })
+    }
+
     fn build_jarvis_worker_prompt(
         raw_user_text: &str,
         dispatch_metadata: &serde_json::Value,
@@ -7788,6 +10222,34 @@ JSON 字段必须是：\n\
             .get("plan_artifact_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let key_judgment_artifact_id = dispatch_metadata
+            .get("key_judgment_artifact_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let key_judgment = dispatch_metadata
+            .get("key_judgment")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let atom_task_id = dispatch_metadata
+            .get("atom_task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let accepted_atom_objective = dispatch_metadata
+            .get("accepted_atom_objective")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let accepted_plan_atom = dispatch_metadata
+            .get("accepted_plan_atom")
+            .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
+        let plan_atomization_graph = dispatch_metadata
+            .get("plan_atomization_graph")
+            .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
+        let assignment_policy = dispatch_metadata
+            .get("assignment_policy")
+            .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
         let read_scope = dispatch_metadata
             .get("read_scope")
             .and_then(|v| v.as_array())
@@ -7850,9 +10312,19 @@ JSON 字段必须是：\n\
              grounding_report_file: {grf}\n\
              grounding_report_hash: {grh}\n\
              intent_artifact_id: {iai}\n\
-             plan_artifact_id: {pai}\n\n\
+             plan_artifact_id: {pai}\n\
+             key_judgment_artifact_id: {kjai}\n\
+             key_judgment: {kj}\n\
+             atom_task_id: {ati}\n\
+             accepted_atom_objective: {aao}\n\n\
+             Accepted plan atom:\n{apa}\n\n\
+             Plan atomization graph:\n{pag}\n\n\
+             Fixed assignment policy:\n{ap}\n\n\
              已接受执行切片：\n\
              - 这个任务已经通过 Jarvis intent 确认和 plan 确认。\n\
+             - 关键判断是 plan 的前提；不要推翻它，除非你在证据中明确报告冲突并停止执行。\n\
+             - plan atomization graph 已经标记串行/并行和工位分配；你只执行属于当前 BoardTask/worker 的切片，不要重新一拆十或创建隐藏子任务。\n\
+             - query/code_change/deploy_ops 归 ClaudeCode 工位，judgment/acceptance 归 Codex CLI GPT-5.5 xhigh 工位；不要自行改派。\n\
              - 你不是主控；不要重新拆任务、不要创建 BoardTask、不要派子工位。\n\
              - 禁止调用 ClaudeCode 内部 Task/Explore/TaskCreate/TaskUpdate/TaskList/TaskOutput 类子代理工具；如果这些工具出现在可用工具列表中，也不要使用。\n\
              - 你只需要按 task_kind 和 acceptance 验证当前工位能力，并返回结构化结果。\n\
@@ -7886,6 +10358,13 @@ JSON 字段必须是：\n\
             grh = grounding_report_hash,
             iai = intent_artifact_id,
             pai = plan_artifact_id,
+            kjai = key_judgment_artifact_id,
+            kj = key_judgment,
+            ati = atom_task_id,
+            aao = accepted_atom_objective,
+            apa = accepted_plan_atom,
+            pag = plan_atomization_graph,
+            ap = assignment_policy,
             acc = acceptance,
             cph = context_pack_hash,
             wc = write_constraint,
@@ -8028,8 +10507,11 @@ JSON 字段必须是：\n\
                         Self::stream_jarvis_task_until_terminal(
                             db,
                             &jarvis_artifact_writer,
+                            &provider_box_http,
+                            &jarvis_progress_bus,
                             &mut stream,
                             &chat_id,
+                            None,
                             follow_task_id,
                             Some(id.as_str()),
                         )
@@ -8258,7 +10740,7 @@ JSON 字段必须是：\n\
 
             let intent_confirmed = jarvis_confirm_bool(&effective_req, "missiond_intent_confirmed");
             let plan_confirmed = jarvis_confirm_bool(&effective_req, "missiond_plan_confirmed");
-            let objective_text = if intent_confirmed || plan_confirmed {
+            let mut objective_text = if intent_confirmed || plan_confirmed {
                 match jarvis_confirm_string(&effective_req, "missiond_objective") {
                     Some(value) => value,
                     None => {
@@ -8355,28 +10837,29 @@ JSON 字段必须是：\n\
             } else {
                 Self::jarvis_pending_grounding_result(&conversation_scope)
             };
-            let grounding_context_id = grounding.grounding_context_id.clone();
-            let context_pack_path = grounding.context_pack_path.clone();
-            let context_pack_file = grounding.context_pack_file.clone();
-            let grounding_report_file = grounding.grounding_report_file.clone();
-            let grounding_report_artifact_path = grounding.grounding_report_artifact_path.clone();
-            let grounding_report_hash = grounding.grounding_report_hash.clone();
-            let grounding_worker_slot_id = grounding.grounding_worker_slot_id.clone();
-            let grounding_worker_turn_id = grounding.grounding_worker_turn_id.clone();
-            let context_sufficiency = grounding.context_sufficiency.clone();
-            let grounding_artifact_hash = grounding.artifact_hash.clone();
-            let context_capsule_hash = grounding.context_capsule_hash.clone();
-            let context_capsule_file = grounding.context_capsule_file.clone();
-            let resolved_topic_id = grounding
+            let mut grounding_context_id = grounding.grounding_context_id.clone();
+            let mut context_pack_path = grounding.context_pack_path.clone();
+            let mut context_pack_file = grounding.context_pack_file.clone();
+            let mut grounding_report_file = grounding.grounding_report_file.clone();
+            let mut grounding_report_artifact_path =
+                grounding.grounding_report_artifact_path.clone();
+            let mut grounding_report_hash = grounding.grounding_report_hash.clone();
+            let mut grounding_worker_slot_id = grounding.grounding_worker_slot_id.clone();
+            let mut grounding_worker_turn_id = grounding.grounding_worker_turn_id.clone();
+            let mut context_sufficiency = grounding.context_sufficiency.clone();
+            let mut grounding_artifact_hash = grounding.artifact_hash.clone();
+            let mut context_capsule_hash = grounding.context_capsule_hash.clone();
+            let mut context_capsule_file = grounding.context_capsule_file.clone();
+            let mut resolved_topic_id = grounding
                 .topic_id
                 .clone()
                 .or_else(|| conversation_scope.topic_id.clone());
-            let resolved_topic_label = grounding
+            let mut resolved_topic_label = grounding
                 .topic_label
                 .clone()
                 .or_else(|| conversation_scope.topic_label.clone());
-            let sources_used = grounding.sources_used.clone();
-            let grounding_diagnostics = grounding.diagnostics.clone();
+            let mut sources_used = grounding.sources_used.clone();
+            let mut grounding_diagnostics = grounding.diagnostics.clone();
             if let (Some(ref db), Some(ref cid), Some(ref capsule_hash)) =
                 (&db, &jarvis_conv_id, &context_capsule_hash)
             {
@@ -8455,10 +10938,11 @@ JSON 字段必须是：\n\
                         return Ok(());
                     }
                 };
-                let objective_text = authored_intent.objective.clone();
+                objective_text = authored_intent.objective.clone();
+                let confirmation_required = jarvis_intent_plan_confirmation_required();
                 let intent_payload = serde_json::json!({
                 "schema": "missiond.jarvis-intent-artifact.v1",
-                "phase": "intent_draft",
+                "phase": if confirmation_required { "intent_draft" } else { "intent_archived" },
                 "author": "codex-cli-gpt-5.5-xhigh",
                 "intent_author_slot_id": &jarvis_intent_author.slot_id,
                 "intent_kind": authored_intent.intent_kind,
@@ -8487,7 +10971,8 @@ JSON 字段必须是：\n\
                 "non_goals": authored_intent.non_goals,
                 "acceptance_signals": authored_intent.acceptance_signals,
                 "sources_used": sources_used,
-                "requires_confirmation": true
+                "requires_confirmation": confirmation_required,
+                "visibility": if confirmation_required { "review" } else { "archive_only" }
                 });
                 let intent_artifact = match Self::put_jarvis_artifact(
                     &jarvis_artifact_writer,
@@ -8530,44 +11015,163 @@ JSON 字段必须是：\n\
                         serde_json::Value::String(intent_artifact_path.clone()),
                     );
                 }
-                Self::write_sse_event(&mut stream, "intent_draft", &intent).await?;
-                Self::write_sse_openai_missiond_projection(
-                    &mut stream,
-                    &chat_id,
-                    "intent_draft",
-                    &intent_artifact_id,
-                    &intent_artifact_hash,
-                    &intent_artifact_path,
-                )
-                .await?;
-                let confirm = serde_json::json!({
-                    "phase": "awaiting_intent_confirmation",
-                    "message": "请确认：我的意图理解是否正确？确认后我会先收集 MissionD grounding，再生成 plan.lisp；plan 确认后可能直接回答或创建 BoardTask。",
-                    "confirm_payload": {
-                        "missiond_intent_confirmed": true,
-                        "missiond_objective": objective_text,
-                        "missiond_grounding_context_id": grounding_context_id,
-                        "missiond_intent_artifact_id": intent_artifact_id
-                    }
-                });
-                Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
-                Self::persist_jarvis_pending_confirmation(
-                    db.as_ref(),
-                    jarvis_conv_id.as_deref(),
-                    &confirm,
-                )
-                .await;
-                Self::write_sse_openai_text_and_persist(
-                    &mut stream,
-                    &chat_id,
-                    "我已生成 intent.lisp 草案，等待你确认意图。",
-                    Some("stop"),
-                    db.as_ref(),
-                    jarvis_conv_id.as_deref(),
-                )
-                .await?;
-                Self::finish_sse(&mut stream).await?;
-                return Ok(());
+                let intent_event_name = if confirmation_required {
+                    "intent_draft"
+                } else {
+                    "intent_archived"
+                };
+                Self::write_sse_event(&mut stream, intent_event_name, &intent).await?;
+                if confirmation_required {
+                    Self::write_sse_openai_missiond_projection(
+                        &mut stream,
+                        &chat_id,
+                        "intent_draft",
+                        &intent_artifact_id,
+                        &intent_artifact_hash,
+                        &intent_artifact_path,
+                    )
+                    .await?;
+                }
+                if !confirmation_required {
+                    Self::write_jarvis_progress(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        None,
+                        "grounding",
+                        "context_gather_start",
+                        "running",
+                        "intent.lisp 已归档，正在调用挂载 MissionD MCP 的 ClaudeCode 工位收集上下游全链上下文。",
+                        None,
+                        None,
+                        Some("claude-code-mcp-grounding"),
+                    )
+                    .await?;
+                    let result = match Self::gather_jarvis_grounding(
+                        &jarvis_grounding,
+                        JarvisGroundingRequest {
+                            query: objective_text.clone(),
+                            confirmed_intent_artifact_id: Some(intent_artifact_id.clone()),
+                            confirmed_intent_lisp: intent
+                                .get("artifact_body")
+                                .and_then(|value| value.as_str())
+                                .map(ToOwned::to_owned),
+                            conversation_id: jarvis_conv_id.clone(),
+                            chat_id: chat_id.clone(),
+                            user_id: conversation_scope.user_id.clone(),
+                            tenant_id: conversation_scope.tenant_id.clone(),
+                            application_id: conversation_scope.application_id.clone(),
+                            channel: Some(conversation_scope.channel.clone()),
+                            topic_id: conversation_scope.topic_id.clone(),
+                            topic_label: conversation_scope.topic_label.clone(),
+                            permission_context: permission_context.clone(),
+                            unknowns: vec![
+                                "Collect MissionD upstream/downstream facts that affect this archived intent.".to_string(),
+                                "Identify project registry, SSOT, runtime, skill, provider, infra, and permission evidence needed before plan.lisp.".to_string(),
+                                "Write the grounded evidence report for the plan author instead of creating BoardTask or implementing changes.".to_string(),
+                            ],
+                        },
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            Self::fail_jarvis_gate(&mut stream, error, "grounding").await?;
+                            return Ok(());
+                        }
+                    };
+                    Self::write_jarvis_progress(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        None,
+                        "grounding",
+                        "context_gather_completed",
+                        "completed",
+                        &format!(
+                            "grounding 已完成，context={}，下一步进入关键判断和 plan authoring。",
+                            result.grounding_context_id
+                        ),
+                        None,
+                        result.grounding_worker_slot_id.as_deref(),
+                        Some("claude-code-mcp-grounding"),
+                    )
+                    .await?;
+                    grounding_context_id = result.grounding_context_id.clone();
+                    context_pack_path = result.context_pack_path.clone();
+                    context_pack_file = result.context_pack_file.clone();
+                    grounding_report_file = result.grounding_report_file.clone();
+                    grounding_report_artifact_path = result.grounding_report_artifact_path.clone();
+                    grounding_report_hash = result.grounding_report_hash.clone();
+                    grounding_worker_slot_id = result.grounding_worker_slot_id.clone();
+                    grounding_worker_turn_id = result.grounding_worker_turn_id.clone();
+                    context_sufficiency = result.context_sufficiency.clone();
+                    grounding_artifact_hash = result.artifact_hash.clone();
+                    context_capsule_hash = result.context_capsule_hash.clone();
+                    context_capsule_file = result.context_capsule_file.clone();
+                    resolved_topic_id = result
+                        .topic_id
+                        .clone()
+                        .or_else(|| conversation_scope.topic_id.clone());
+                    resolved_topic_label = result
+                        .topic_label
+                        .clone()
+                        .or_else(|| conversation_scope.topic_label.clone());
+                    sources_used = result.sources_used.clone();
+                    grounding_diagnostics = result.diagnostics.clone();
+                    let grounding_event = serde_json::json!({
+                        "phase": "grounding",
+                        "grounding_context_id": grounding_context_id,
+                        "context_pack_path": context_pack_path,
+                        "context_pack_file": context_pack_file,
+                        "grounding_report_file": grounding_report_file,
+                        "grounding_report_artifact_path": grounding_report_artifact_path,
+                        "grounding_report_hash": grounding_report_hash,
+                        "grounding_worker_slot_id": grounding_worker_slot_id,
+                        "grounding_worker_turn_id": grounding_worker_turn_id,
+                        "context_sufficiency": context_sufficiency,
+                        "artifact_hash": grounding_artifact_hash,
+                        "context_capsule_hash": context_capsule_hash,
+                        "context_capsule_file": context_capsule_file,
+                        "topic_id": resolved_topic_id,
+                        "topic_label": resolved_topic_label,
+                        "sources_used": sources_used,
+                        "diagnostics": grounding_diagnostics,
+                    });
+                    Self::write_sse_event(&mut stream, "status", &grounding_event).await?;
+                }
+                if !confirmation_required {
+                    intent_artifact_id
+                } else {
+                    let confirm = serde_json::json!({
+                        "phase": "awaiting_intent_confirmation",
+                        "message": "请确认：我的意图理解是否正确？确认后我会先收集 MissionD grounding，再生成 plan.lisp；plan 确认后可能直接回答或创建 BoardTask。",
+                        "confirm_payload": {
+                            "missiond_intent_confirmed": true,
+                            "missiond_objective": objective_text,
+                            "missiond_grounding_context_id": grounding_context_id,
+                            "missiond_intent_artifact_id": intent_artifact_id
+                        }
+                    });
+                    Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+                    Self::persist_jarvis_pending_confirmation(
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                        &confirm,
+                    )
+                    .await;
+                    Self::write_sse_openai_text_and_persist(
+                        &mut stream,
+                        &chat_id,
+                        "我已生成 intent.lisp 草案，等待你确认意图。",
+                        Some("stop"),
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    Self::finish_sse(&mut stream).await?;
+                    return Ok(());
+                }
             } else {
                 confirmed_intent_artifact_id.clone().unwrap_or_default()
             };
@@ -8581,6 +11185,164 @@ JSON 字段必须是：\n\
                 .await;
             }
 
+            let key_judgment_ref = if plan_confirmed {
+                match Self::jarvis_key_judgment_from_confirm_value(&effective_req) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        Self::fail_jarvis_gate(&mut stream, error, "confirmation_key_judgment")
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                let jarvis_key_judgment_author = JarvisKeyJudgmentAuthorConfig::default();
+                let authored_key_judgment =
+                    match Self::author_jarvis_key_judgment_draft_with_progress(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &chat_id,
+                        None,
+                        &provider_box_http,
+                        &jarvis_key_judgment_author,
+                        "missiond.interaction-key-judgment.v1",
+                        "jarvis",
+                        &objective_text,
+                        &grounding_context_id,
+                        &intent_artifact_id,
+                        resolved_topic_id.as_deref(),
+                        resolved_topic_label.as_deref(),
+                        &sources_used,
+                        Some(&permission_context),
+                        context_pack_path.as_deref(),
+                        context_pack_file.as_deref(),
+                        grounding_report_file.as_deref(),
+                        grounding_report_artifact_path.as_deref(),
+                        grounding_report_hash.as_deref(),
+                        context_sufficiency.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(draft) => draft,
+                        Err(error) => {
+                            let diagnostic = serde_json::json!({
+                                "phase": "key_judgment_authoring_failed",
+                                "error": {
+                                    "code": "JARVIS_KEY_JUDGMENT_AUTHOR_FAILED",
+                                    "message": error.to_string()
+                                }
+                            });
+                            Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                            Self::write_sse_openai_text_and_persist(
+                                &mut stream,
+                                &chat_id,
+                                "关键判断需要 Codex CLI GPT-5.5 xhigh 工位基于 grounding report 生成；当前工位不可用或输出未通过校验，已停止。",
+                                Some("stop"),
+                                db.as_ref(),
+                                jarvis_conv_id.as_deref(),
+                            )
+                            .await?;
+                            Self::finish_sse(&mut stream).await?;
+                            return Ok(());
+                        }
+                    };
+                let key_judgment = authored_key_judgment.judgment.clone();
+                let key_review_text = authored_key_judgment.review_text.clone();
+                let key_confidence = authored_key_judgment.confidence.clone();
+                let key_rejected_hypotheses = authored_key_judgment.rejected_hypotheses.clone();
+                let key_evidence_refs = authored_key_judgment.evidence_refs.clone();
+                let key_planning_implications = authored_key_judgment.planning_implications.clone();
+                let key_acceptance_focus = authored_key_judgment.acceptance_focus.clone();
+                let key_payload = serde_json::json!({
+                    "schema": "missiond.interaction-key-judgment.v1",
+                    "phase": "key_judgment_draft",
+                    "author": "codex-cli-gpt-5.5-xhigh",
+                    "key_judgment_author_slot_id": &jarvis_key_judgment_author.slot_id,
+                    "confidence": key_confidence,
+                    "grounding_context_id": grounding_context_id,
+                    "context_pack_path": context_pack_path,
+                    "context_pack_file": context_pack_file,
+                    "grounding_report_file": grounding_report_file,
+                    "grounding_report_artifact_path": grounding_report_artifact_path,
+                    "grounding_report_hash": grounding_report_hash,
+                    "intent_artifact_id": intent_artifact_id,
+                    "objective": objective_text,
+                    "judgment": key_judgment,
+                    "review_text": key_review_text,
+                    "rejected_hypotheses": key_rejected_hypotheses,
+                    "evidence_refs": key_evidence_refs,
+                    "planning_implications": key_planning_implications,
+                    "acceptance_focus": key_acceptance_focus,
+                    "artifact_language": "lisp",
+                    "artifact_body": authored_key_judgment.artifact_body,
+                    "sources_used": sources_used,
+                    "requires_confirmation": false
+                });
+                let key_artifact = match Self::put_jarvis_artifact(
+                    &jarvis_artifact_writer,
+                    JarvisArtifactRequest {
+                        kind: "interaction-key-judgment".to_string(),
+                        project_id: None,
+                        task_id: None,
+                        payload: key_payload.clone(),
+                        metadata: serde_json::json!({
+                            "schema": "missiond.interaction-key-judgment.v1",
+                            "chat_id": chat_id.clone(),
+                            "conversation_id": jarvis_conv_id.clone(),
+                            "grounding_context_id": grounding_context_id,
+                            "intent_artifact_id": intent_artifact_id,
+                        }),
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        Self::fail_jarvis_gate(&mut stream, error, "key_judgment_artifact").await?;
+                        return Ok(());
+                    }
+                };
+                let mut key_event = key_payload;
+                if let Some(object) = key_event.as_object_mut() {
+                    object.insert(
+                        "key_judgment_artifact_id".to_string(),
+                        serde_json::Value::String(key_artifact.artifact_id.clone()),
+                    );
+                    object.insert(
+                        "key_judgment_artifact_hash".to_string(),
+                        serde_json::Value::String(key_artifact.artifact_hash.clone()),
+                    );
+                    object.insert(
+                        "key_judgment_artifact_path".to_string(),
+                        serde_json::Value::String(key_artifact.path.clone()),
+                    );
+                }
+                Self::write_sse_event(&mut stream, "key_judgment_draft", &key_event).await?;
+                Self::write_sse_openai_missiond_projection(
+                    &mut stream,
+                    &chat_id,
+                    "key_judgment_draft",
+                    &key_artifact.artifact_id,
+                    &key_artifact.artifact_hash,
+                    &key_artifact.path,
+                )
+                .await?;
+                JarvisKeyJudgmentArtifactRef {
+                    artifact_id: key_artifact.artifact_id,
+                    artifact_hash: Some(key_artifact.artifact_hash),
+                    artifact_path: Some(key_artifact.path),
+                    judgment: key_judgment,
+                    review_text: Some(key_review_text),
+                    confidence: key_confidence,
+                    rejected_hypotheses: key_rejected_hypotheses,
+                    evidence_refs: key_evidence_refs,
+                    planning_implications: key_planning_implications,
+                    acceptance_focus: key_acceptance_focus,
+                }
+            };
+
+            let mut generated_plan_atomization_graph: Option<serde_json::Value> = None;
+            let mut generated_execution_mode: Option<String> = None;
+            let mut generated_requires_board_task: Option<bool> = None;
             let plan_artifact_id = if !plan_confirmed {
                 let jarvis_plan_author = JarvisPlanAuthorConfig::default();
                 let authored_plan = match Self::author_jarvis_plan_draft_with_progress(
@@ -8595,6 +11357,7 @@ JSON 字段必须是：\n\
                     &objective_text,
                     &grounding_context_id,
                     &intent_artifact_id,
+                    &key_judgment_ref,
                     resolved_topic_id.as_deref(),
                     resolved_topic_label.as_deref(),
                     &sources_used,
@@ -8633,13 +11396,14 @@ JSON 字段必须是：\n\
                         return Ok(());
                     }
                 };
-                let objective_text = authored_plan.objective.clone();
+                objective_text = authored_plan.objective.clone();
                 let plan_review_text = authored_plan.review_text.clone();
                 let plan_artifact_body = authored_plan.artifact_body.clone();
                 let plan_steps = authored_plan.steps.clone();
+                let confirmation_required = jarvis_intent_plan_confirmation_required();
                 let plan_payload = serde_json::json!({
                 "schema": "missiond.jarvis-plan-artifact.v1",
-                "phase": "plan_draft",
+                "phase": if confirmation_required { "plan_draft" } else { "plan_archived" },
                 "author": "codex-cli-gpt-5.5-xhigh",
                 "plan_author_slot_id": &jarvis_plan_author.slot_id,
                 "confidence": authored_plan.confidence,
@@ -8658,21 +11422,40 @@ JSON 字段必须是：\n\
                 "topic_id": resolved_topic_id,
                 "topic_label": resolved_topic_label,
                 "intent_artifact_id": intent_artifact_id,
+                "key_judgment_artifact_id": key_judgment_ref.artifact_id,
+                "key_judgment_artifact_hash": key_judgment_ref.artifact_hash,
+                "key_judgment_artifact_path": key_judgment_ref.artifact_path,
+                "key_judgment": key_judgment_ref.judgment,
+                "key_judgment_review_text": key_judgment_ref.review_text,
+                "key_judgment_confidence": key_judgment_ref.confidence,
+                "key_judgment_rejected_hypotheses": key_judgment_ref.rejected_hypotheses,
+                "key_judgment_evidence_refs": key_judgment_ref.evidence_refs,
+                "key_judgment_planning_implications": key_judgment_ref.planning_implications,
+                "key_judgment_acceptance_focus": key_judgment_ref.acceptance_focus,
                 "objective": objective_text,
                 "review_text": plan_review_text,
                 "execution_mode": authored_plan.execution_mode,
                 "requires_board_task": authored_plan.requires_board_task,
                 "answer_policy": authored_plan.answer_policy,
                 "provider_hint": authored_plan.provider_hint,
+                "plan_key_judgment": authored_plan.key_judgment,
                 "artifact_language": "lisp",
                 "artifact_body": plan_artifact_body,
                 "steps": plan_steps,
+                "workstreams": authored_plan.workstreams,
+                "atom_tasks": authored_plan.atom_tasks,
+                "dependency_edges": authored_plan.dependency_edges,
+                "serial_groups": authored_plan.serial_groups,
+                "parallel_groups": authored_plan.parallel_groups,
+                "assignment_policy": authored_plan.assignment_policy,
+                "atomization_graph": authored_plan.atomization_graph,
                 "boundary": authored_plan.boundary,
                 "assumptions": authored_plan.assumptions,
                 "non_goals": authored_plan.non_goals,
                 "acceptance_signals": authored_plan.acceptance_signals,
                 "sources_used": sources_used,
-                "requires_confirmation": true
+                "requires_confirmation": confirmation_required,
+                "visibility": if confirmation_required { "review" } else { "archive_only" }
                 });
                 let plan_artifact = match Self::put_jarvis_artifact(
                     &jarvis_artifact_writer,
@@ -8716,86 +11499,125 @@ JSON 字段必须是：\n\
                         serde_json::Value::String(plan_artifact_path.clone()),
                     );
                 }
-                Self::write_sse_event(&mut stream, "plan_draft", &plan).await?;
-                Self::write_sse_openai_missiond_projection(
-                    &mut stream,
-                    &chat_id,
-                    "plan_draft",
-                    &plan_artifact_id,
-                    &plan_artifact_hash,
-                    &plan_artifact_path,
-                )
-                .await?;
-                let plan_confirm_message = if authored_plan
-                    .execution_mode
-                    .eq_ignore_ascii_case("grounded_direct_answer")
-                    && !authored_plan.requires_board_task
-                {
-                    "请确认 plan.lisp。确认后我会基于 grounding 和权限上下文生成直接回答，不创建 BoardTask。"
+                generated_plan_atomization_graph = plan.get("atomization_graph").cloned();
+                generated_execution_mode = plan
+                    .get("execution_mode")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned);
+                generated_requires_board_task = plan
+                    .get("requires_board_task")
+                    .and_then(|value| value.as_bool());
+                let plan_event_name = if confirmation_required {
+                    "plan_draft"
                 } else {
-                    "请确认 plan.lisp。确认后我会创建 BoardTask 并派工位，不会让主控直接做实现。"
+                    "plan_archived"
                 };
-                let confirm = serde_json::json!({
-                    "phase": "awaiting_plan_confirmation",
-                    "message": plan_confirm_message,
-                    "confirm_payload": {
-                        "missiond_intent_confirmed": true,
-                        "missiond_plan_confirmed": true,
-                        "missiond_objective": objective_text,
-                        "missiond_grounding_context_id": grounding_context_id,
-                        "missiond_context_pack_path": context_pack_path,
-                        "missiond_context_pack_file": context_pack_file,
-                        "missiond_grounding_report_file": grounding_report_file,
-                        "missiond_grounding_report_artifact_path": grounding_report_artifact_path,
-                        "missiond_grounding_report_hash": grounding_report_hash,
-                        "missiond_grounding_worker_slot_id": grounding_worker_slot_id,
-                        "missiond_grounding_worker_turn_id": grounding_worker_turn_id,
-                        "missiond_context_sufficiency": context_sufficiency,
-                        "missiond_grounding_artifact_hash": grounding_artifact_hash,
-                        "missiond_context_capsule_hash": context_capsule_hash,
-                        "missiond_context_capsule_file": context_capsule_file,
-                        "missiond_topic_id": resolved_topic_id,
-                        "missiond_topic_label": resolved_topic_label,
-                        "missiond_sources_used": sources_used,
-                        "missiond_intent_artifact_id": intent_artifact_id,
-                        "missiond_plan_artifact_id": plan_artifact_id,
-                        "missiond_execution_mode": plan
-                            .get("execution_mode")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("work_order"),
-                        "missiond_requires_board_task": plan
-                            .get("requires_board_task")
-                            .and_then(|value| value.as_bool())
-                            .unwrap_or(true)
-                    }
-                });
-                Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
-                Self::persist_jarvis_pending_confirmation(
-                    db.as_ref(),
-                    jarvis_conv_id.as_deref(),
-                    &confirm,
-                )
-                .await;
-                Self::write_sse_openai_text_and_persist(
-                    &mut stream,
-                    &chat_id,
-                    "我已生成 plan.lisp 草案，等待你确认计划。",
-                    Some("stop"),
-                    db.as_ref(),
-                    jarvis_conv_id.as_deref(),
-                )
-                .await?;
-                Self::finish_sse(&mut stream).await?;
-                return Ok(());
+                Self::write_sse_event(&mut stream, plan_event_name, &plan).await?;
+                if confirmation_required {
+                    Self::write_sse_openai_missiond_projection(
+                        &mut stream,
+                        &chat_id,
+                        "plan_draft",
+                        &plan_artifact_id,
+                        &plan_artifact_hash,
+                        &plan_artifact_path,
+                    )
+                    .await?;
+                }
+                if !confirmation_required {
+                    plan_artifact_id
+                } else {
+                    let plan_confirm_message = if authored_plan
+                        .execution_mode
+                        .eq_ignore_ascii_case("grounded_direct_answer")
+                        && !authored_plan.requires_board_task
+                    {
+                        "请确认 plan.lisp。确认后我会基于 grounding 和权限上下文生成直接回答，不创建 BoardTask。"
+                    } else {
+                        "请确认 plan.lisp。确认后我会创建 BoardTask 并派工位，不会让主控直接做实现。"
+                    };
+                    let confirm = serde_json::json!({
+                        "phase": "awaiting_plan_confirmation",
+                        "message": plan_confirm_message,
+                        "confirm_payload": {
+                            "missiond_intent_confirmed": true,
+                            "missiond_plan_confirmed": true,
+                            "missiond_objective": objective_text,
+                            "missiond_grounding_context_id": grounding_context_id,
+                            "missiond_context_pack_path": context_pack_path,
+                            "missiond_context_pack_file": context_pack_file,
+                            "missiond_grounding_report_file": grounding_report_file,
+                            "missiond_grounding_report_artifact_path": grounding_report_artifact_path,
+                            "missiond_grounding_report_hash": grounding_report_hash,
+                            "missiond_grounding_worker_slot_id": grounding_worker_slot_id,
+                            "missiond_grounding_worker_turn_id": grounding_worker_turn_id,
+                            "missiond_context_sufficiency": context_sufficiency,
+                            "missiond_grounding_artifact_hash": grounding_artifact_hash,
+                            "missiond_context_capsule_hash": context_capsule_hash,
+                            "missiond_context_capsule_file": context_capsule_file,
+                            "missiond_topic_id": resolved_topic_id,
+                            "missiond_topic_label": resolved_topic_label,
+                            "missiond_sources_used": sources_used,
+                            "missiond_intent_artifact_id": intent_artifact_id,
+                            "missiond_key_judgment_artifact_id": key_judgment_ref.artifact_id,
+                            "missiond_key_judgment_artifact_hash": key_judgment_ref.artifact_hash,
+                            "missiond_key_judgment_artifact_path": key_judgment_ref.artifact_path,
+                            "missiond_key_judgment": key_judgment_ref.judgment,
+                            "missiond_key_judgment_review_text": key_judgment_ref.review_text,
+                            "missiond_key_judgment_confidence": key_judgment_ref.confidence,
+                            "missiond_key_judgment_rejected_hypotheses": key_judgment_ref.rejected_hypotheses,
+                            "missiond_key_judgment_evidence_refs": key_judgment_ref.evidence_refs,
+                            "missiond_key_judgment_planning_implications": key_judgment_ref.planning_implications,
+                            "missiond_key_judgment_acceptance_focus": key_judgment_ref.acceptance_focus,
+                            "missiond_plan_artifact_id": plan_artifact_id,
+                            "missiond_plan_atomization_graph_json": serde_json::to_string(
+                                plan.get("atomization_graph").unwrap_or(&serde_json::Value::Null)
+                            ).ok(),
+                            "missiond_execution_mode": plan
+                                .get("execution_mode")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("work_order"),
+                            "missiond_requires_board_task": plan
+                                .get("requires_board_task")
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(true)
+                        }
+                    });
+                    Self::write_sse_event(&mut stream, "confirm_required", &confirm).await?;
+                    Self::persist_jarvis_pending_confirmation(
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                        &confirm,
+                    )
+                    .await;
+                    Self::write_sse_openai_text_and_persist(
+                        &mut stream,
+                        &chat_id,
+                        "我已生成 plan.lisp 草案，等待你确认计划。",
+                        Some("stop"),
+                        db.as_ref(),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await?;
+                    Self::finish_sse(&mut stream).await?;
+                    return Ok(());
+                }
             } else {
                 confirmed_plan_artifact_id.clone().unwrap_or_default()
             };
+            let plan_atomization_graph = generated_plan_atomization_graph.unwrap_or_else(|| {
+                Self::jarvis_plan_atomization_graph_from_confirm_value(&effective_req)
+            });
 
-            let execution_mode = jarvis_confirm_string(&effective_req, "missiond_execution_mode")
+            let execution_mode = generated_execution_mode
+                .or_else(|| jarvis_confirm_string(&effective_req, "missiond_execution_mode"))
                 .unwrap_or_else(|| "work_order".to_string())
                 .to_ascii_lowercase();
             if execution_mode == "grounded_direct_answer" {
-                if jarvis_confirm_bool(&effective_req, "missiond_requires_board_task") {
+                let requires_board_task = generated_requires_board_task.unwrap_or_else(|| {
+                    jarvis_confirm_bool(&effective_req, "missiond_requires_board_task")
+                });
+                if requires_board_task {
                     Self::fail_jarvis_gate(
                         &mut stream,
                         "plan.lisp declared grounded_direct_answer but missiond_requires_board_task=true; refusing ambiguous execution.",
@@ -8820,6 +11642,7 @@ JSON 字段必须是：\n\
                     grounding_report_hash.as_deref(),
                     &intent_artifact_id,
                     &plan_artifact_id,
+                    &key_judgment_ref,
                     &permission_context,
                     &sources_used,
                     &provider_box_http,
@@ -8875,6 +11698,8 @@ JSON 字段必须是：\n\
                 grounding_report_hash.as_deref(),
                 &intent_artifact_id,
                 &plan_artifact_id,
+                &key_judgment_ref,
+                &plan_atomization_graph,
                 &Self::jarvis_runtime_read_scope_root(),
             );
             let prompt_template =
@@ -8896,6 +11721,10 @@ JSON 字段必须是：\n\
                 "topic_label": resolved_topic_label,
                 "intent_artifact_id": intent_artifact_id,
                 "plan_artifact_id": plan_artifact_id,
+                "key_judgment_artifact_id": key_judgment_ref.artifact_id,
+                "key_judgment_artifact_hash": key_judgment_ref.artifact_hash,
+                "key_judgment": key_judgment_ref.judgment,
+                "plan_atomization_graph": plan_atomization_graph,
                 "dispatch_metadata": dispatch_metadata,
                 "user_message": raw_user_text,
                 "objective": objective_text,
@@ -8923,60 +11752,92 @@ JSON 字段必须是：\n\
                 context_intent: Some(context_intent),
                 runtime_metadata: Some(meta),
             };
-            match db.create_board_task(&task_input).await {
-                Ok(task) => {
+            match Self::create_jarvis_atomized_board_tasks(
+                db,
+                task_input,
+                &objective_text,
+                &dispatch_metadata,
+                &plan_atomization_graph,
+            )
+            .await
+            {
+                Ok(created) => {
                     Self::persist_jarvis_confirmation_fulfilled(
                         Some(db),
                         jarvis_conv_id.as_deref(),
                         "plan",
                     )
                     .await;
+                    let atom_task_ids = created
+                        .atom_tasks
+                        .iter()
+                        .map(|atom| atom.task.id.to_string())
+                        .collect::<Vec<_>>();
+                    let planned_atom_task_ids = created
+                        .atom_tasks
+                        .iter()
+                        .filter(|atom| !atom.synthetic)
+                        .map(|atom| atom.task.id.to_string())
+                        .collect::<Vec<_>>();
+                    let atom_task_contracts = created
+                        .atom_tasks
+                        .iter()
+                        .map(|atom| {
+                            serde_json::json!({
+                                "atom_task_id": atom.atom_task_id.clone(),
+                                "board_task_id": atom.task.id.to_string(),
+                                "category": atom.category.clone(),
+                                "assignee_engine": atom.assignee_engine.clone(),
+                                "depends_on_atoms": atom.depends_on_atoms.clone(),
+                                "parallel_group": atom.parallel_group.clone(),
+                                "synthetic": atom.synthetic
+                            })
+                        })
+                        .collect::<Vec<_>>();
                     let event = serde_json::json!({
-                        "task_id": task.id,
-                        "title": task.title,
+                        "task_id": created.parent_task.id.to_string(),
+                        "root_task_id": created.parent_task.id.to_string(),
+                        "final_task_id": created.final_task_id.clone(),
+                        "atom_task_ids": planned_atom_task_ids,
+                        "atom_task_contracts": atom_task_contracts,
+                        "title": created.parent_task.title.clone(),
                         "grounding_context_id": grounding_context_id,
                         "intent_artifact_id": intent_artifact_id,
                         "plan_artifact_id": plan_artifact_id,
                     });
                     Self::write_sse_event(&mut stream, "board_task_created", &event).await?;
+                    let follow_payload = serde_json::json!({
+                        "missiond_follow_task_id": created.final_task_id.clone(),
+                        "missiond_root_task_id": created.parent_task.id.to_string(),
+                        "missiond_atom_task_ids": atom_task_ids.clone(),
+                        "stream": true
+                    });
                     Self::write_sse_event(
                         &mut stream,
                         "worker_dispatched",
                         &serde_json::json!({
                             "phase": "workers_running",
-                            "task_id": task.id,
+                            "task_id": created.final_task_id.clone(),
+                            "root_task_id": created.parent_task.id.to_string(),
+                            "atom_task_ids": atom_task_ids.clone(),
                             "slot_id": serde_json::Value::Null,
                             "dispatch_state": "pending_autopilot_claim",
-                            "status": task.status.as_str(),
+                            "status": created.parent_task.status.as_str(),
                             "terminal_task_result": false,
-                            "follow_payload": {
-                                "missiond_follow_task_id": task.id,
-                                "stream": true
-                            },
-                            "message": "BoardTask is queued for Autopilot/provider claim; concrete slot attribution will arrive through follow-up supervision."
+                            "follow_payload": follow_payload.clone(),
+                            "message": "Atom-level BoardTasks are queued for Autopilot/provider claim; final acceptance task is the follow target."
                         }),
                     )
                     .await?;
-                    Self::write_sse_openai_text_and_persist(
-                        &mut stream,
-                        &chat_id,
-                        "计划已确认，我已创建 BoardTask；这次请求会返回 follow handle，不会等待长任务占住手机连接。",
-                        None,
-                        Some(db),
-                        jarvis_conv_id.as_deref(),
-                    )
-                    .await?;
-                    let follow_payload = serde_json::json!({
-                        "missiond_follow_task_id": task.id,
-                        "stream": true
-                    });
                     let worker_status = serde_json::json!({
                         "phase": "board_tasks_created",
-                        "task_id": task.id,
-                        "status": task.status.as_str(),
+                        "task_id": created.final_task_id.clone(),
+                        "root_task_id": created.parent_task.id.to_string(),
+                        "atom_task_ids": atom_task_ids.clone(),
+                        "status": created.parent_task.status.as_str(),
                         "terminal_task_result": false,
                         "follow_payload": follow_payload.clone(),
-                        "message": "BoardTask created; worker execution continues asynchronously and results must be read through follow-up supervision."
+                        "message": "Atom-level BoardTasks created; worker execution continues asynchronously and final result must be read through follow-up supervision."
                     });
                     Self::write_sse_event(&mut stream, "worker_status", &worker_status).await?;
                     Self::write_sse_event(
@@ -8984,26 +11845,69 @@ JSON 字段必须是：\n\
                         "dispatch_accepted",
                         &serde_json::json!({
                             "phase": "board_tasks_created",
-                            "task_id": task.id,
-                            "status": task.status.as_str(),
+                            "task_id": created.final_task_id.clone(),
+                            "root_task_id": created.parent_task.id.to_string(),
+                            "atom_task_ids": atom_task_ids.clone(),
+                            "status": created.parent_task.status.as_str(),
                             "terminal_task_result": false,
                             "follow_payload": follow_payload.clone(),
-                            "message": "BoardTask was created and accepted for asynchronous worker dispatch; this is not a terminal task result."
+                            "message": "Atom-level BoardTasks were created and accepted for asynchronous worker dispatch; this is not a terminal task result."
                         }),
                     )
                     .await?;
                     let pending_event = serde_json::json!({
                         "phase": "result_pending",
-                        "task_id": task.id,
+                        "task_id": created.final_task_id.clone(),
+                        "root_task_id": created.parent_task.id.to_string(),
+                        "atom_task_ids": atom_task_ids,
                         "status": "result_pending",
                         "terminal_task_result": false,
                         "follow_payload": follow_payload
                     });
                     Self::write_sse_event(&mut stream, "result_pending", &pending_event).await?;
-                    let pending_text = format!(
-                        "BoardTask 已创建。后续请求携带 missiond_follow_task_id={} 读取 task-result-artifact；初始手机请求不会等待长任务完成。",
-                        task.id
+                    let pending_fallback = format!(
+                        "plan.lisp 已归档，Jarvis 原子化 BoardTask 组已创建。后续请求携带 missiond_follow_task_id={} 读取最终验收 task-result-artifact；初始手机请求不会等待长任务完成。",
+                        created.final_task_id
                     );
+                    let pending_text = match Self::materialize_jarvis_communication(
+                        &mut stream,
+                        &jarvis_progress_bus,
+                        &jarvis_artifact_writer,
+                        &chat_id,
+                        None,
+                        "plan_dispatched",
+                        &objective_text,
+                        serde_json::json!({
+                            "execution_mode": execution_mode,
+                            "terminal_task_result": false,
+                            "intent_artifact_id": intent_artifact_id,
+                            "plan_artifact_id": plan_artifact_id,
+                            "key_judgment_artifact_id": key_judgment_ref.artifact_id,
+                            "key_judgment": key_judgment_ref.judgment,
+                            "root_task_id": created.parent_task.id.to_string(),
+                            "final_task_id": created.final_task_id.clone(),
+                            "atom_task_ids": pending_event.get("atom_task_ids").cloned(),
+                            "follow_payload": pending_event.get("follow_payload").cloned(),
+                        }),
+                        &provider_box_http,
+                        Some(db),
+                        jarvis_conv_id.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(text) => text,
+                        Err(error) => {
+                            let diagnostic = serde_json::json!({
+                                "phase": "communicator",
+                                "error": {
+                                    "code": "JARVIS_COMMUNICATOR_FAILED",
+                                    "message": error.to_string()
+                                }
+                            });
+                            Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
+                            pending_fallback
+                        }
+                    };
                     Self::write_sse_openai_text_and_persist(
                         &mut stream,
                         &chat_id,
@@ -10365,6 +13269,7 @@ JSON 字段必须是：\n\
         _tool_count: usize,
         default_chat_slot: String,
         jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_key_judgment_author: JarvisKeyJudgmentAuthorConfig,
         jarvis_plan_author: JarvisPlanAuthorConfig,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
@@ -10487,6 +13392,7 @@ JSON 字段必须是：\n\
                     pty_manager,
                     jarvis_progress_bus,
                     jarvis_intent_author.clone(),
+                    jarvis_key_judgment_author.clone(),
                     jarvis_plan_author.clone(),
                     jarvis_grounding,
                     jarvis_artifact_writer,
@@ -10526,6 +13432,7 @@ JSON 字段必须是：\n\
                     default_chat_slot.clone(),
                     jarvis_progress_bus,
                     jarvis_intent_author.clone(),
+                    jarvis_key_judgment_author.clone(),
                     jarvis_plan_author.clone(),
                     jarvis_grounding,
                     jarvis_artifact_writer,
@@ -11242,6 +14149,90 @@ JSON 字段必须是：\n\
 mod tests {
     use super::*;
 
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn jarvis_intent_plan_confirmation_is_opt_in() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        std::env::remove_var("MISSIOND_JARVIS_REQUIRE_CONFIRMATION");
+        std::env::remove_var("MISSIOND_JARVIS_INTENT_PLAN_CONFIRMATION");
+        assert!(!jarvis_intent_plan_confirmation_required());
+
+        std::env::set_var("MISSIOND_JARVIS_REQUIRE_CONFIRMATION", "1");
+        assert!(jarvis_intent_plan_confirmation_required());
+        std::env::remove_var("MISSIOND_JARVIS_REQUIRE_CONFIRMATION");
+    }
+
+    #[test]
+    fn jarvis_artifact_projection_delta_is_opt_in() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        std::env::remove_var("MISSIOND_JARVIS_ARTIFACT_PROJECTION_OPENAI_DELTA");
+        assert!(!jarvis_artifact_projection_openai_delta_enabled());
+
+        std::env::set_var("MISSIOND_JARVIS_ARTIFACT_PROJECTION_OPENAI_DELTA", "true");
+        assert!(jarvis_artifact_projection_openai_delta_enabled());
+        std::env::remove_var("MISSIOND_JARVIS_ARTIFACT_PROJECTION_OPENAI_DELTA");
+    }
+
+    fn test_key_judgment_ref() -> JarvisKeyJudgmentArtifactRef {
+        JarvisKeyJudgmentArtifactRef {
+            artifact_id: "key-judgment-test".to_string(),
+            artifact_hash: Some("hash-key-judgment-test".to_string()),
+            artifact_path: Some("shared-artifact://key-judgment-test".to_string()),
+            judgment: "不是算力差异，是用量差异".to_string(),
+            review_text: Some("关键判断用于 plan 拆分。".to_string()),
+            confidence: Some("high".to_string()),
+            rejected_hypotheses: vec!["算力不足是主因".to_string()],
+            evidence_refs: vec!["grounding-report#usage".to_string()],
+            planning_implications: vec!["先查用量与配额，再安排代码修改。".to_string()],
+            acceptance_focus: vec!["验收用量判断是否被证据支持。".to_string()],
+        }
+    }
+
+    fn test_plan_atomization_graph() -> serde_json::Value {
+        serde_json::json!({
+            "schema": "missiond.plan-atomization-graph.v1",
+            "assignment_policy": PTYWebSocketServer::jarvis_assignment_policy_default(),
+            "workstreams": [{
+                "id": "ws1",
+                "title": "调查",
+                "objective": "查询用量证据",
+                "execution_order": "serial",
+                "depends_on": [],
+                "parallel_group": null,
+                "atoms": [{
+                    "atom_task_id": "a1",
+                    "workstream_id": "ws1",
+                    "objective": "查询用量证据",
+                    "category": "query",
+                    "assignee_engine": "claude_code",
+                    "execution_order": "serial",
+                    "depends_on": [],
+                    "parallel_group": null,
+                    "read_scope": [],
+                    "write_scope": [],
+                    "acceptance": ["证据可追溯"]
+                }]
+            }],
+            "atom_tasks": [{
+                "atom_task_id": "a1",
+                "workstream_id": "ws1",
+                "objective": "查询用量证据",
+                "category": "query",
+                "assignee_engine": "claude_code",
+                "execution_order": "serial",
+                "depends_on": [],
+                "parallel_group": null,
+                "read_scope": [],
+                "write_scope": [],
+                "acceptance": ["证据可追溯"]
+            }],
+            "dependency_edges": [],
+            "serial_groups": [{"id": "sg1", "atoms": ["a1"]}],
+            "parallel_groups": []
+        })
+    }
+
     #[test]
     fn auth_event_webhook_accepts_default_auth_service_id() {
         let event = parse_external_service_webhook(
@@ -11470,9 +14461,22 @@ done"#;
     }
 
     #[test]
+    fn jarvis_codex_key_judgment_response_parses_from_wrapped_output() {
+        let output = r#"noise
+{"judgment":"不是算力差异，是用量差异","review_text":"关键判断用于 plan 前提。","confidence":"high","rejected_hypotheses":["算力不足是主因"],"evidence_refs":["grounding-report#usage"],"planning_implications":["查询任务先于代码修改"],"acceptance_focus":["验收用量证据是否支撑判断"]}
+done"#;
+        let parsed = PTYWebSocketServer::parse_codex_key_judgment_response(output).unwrap();
+        assert_eq!(parsed.judgment, "不是算力差异，是用量差异");
+        assert_eq!(parsed.planning_implications.len(), 1);
+
+        let incomplete = r#"{"judgment":"泛化判断","review_text":"缺少关键字段"}"#;
+        assert!(PTYWebSocketServer::parse_codex_key_judgment_response(incomplete).is_err());
+    }
+
+    #[test]
     fn jarvis_codex_plan_response_parses_from_wrapped_output() {
         let output = r#"noise
-{"objective":"修复 plan.lisp 作者链路","review_text":"目标: 修复 plan.lisp 作者链路\n边界: 确认 plan 后才创建 BoardTask。","execution_mode":"work_order","requires_board_task":true,"steps":["确认已批准 intent","生成 Codex-authored plan.lisp","等待用户确认 plan"],"answer_policy":"结果来自 task-result-artifact。","provider_hint":"codex-review-worker","boundary":"不创建 BoardTask，直到用户确认 plan。","assumptions":["intent 已确认"],"non_goals":["Rust deterministic plan"],"acceptance_signals":["plan 标出 Codex author"],"confidence":"high"}
+{"objective":"修复 plan.lisp 作者链路","review_text":"目标: 修复 plan.lisp 作者链路\n边界: 确认 plan 后才创建 BoardTask。","execution_mode":"work_order","requires_board_task":true,"key_judgment":"不是算力差异，是用量差异","steps":["确认已批准 intent","生成 Codex-authored plan.lisp","等待用户确认 plan"],"answer_policy":"结果来自 task-result-artifact。","provider_hint":"codex-review-worker","boundary":"不创建 BoardTask，直到用户确认 plan。","assumptions":["intent 已确认"],"non_goals":["Rust deterministic plan"],"acceptance_signals":["plan 标出 Codex author"],"confidence":"high","workstreams":[{"id":"ws1","title":"查询","objective":"查询用量证据","execution_order":"serial","depends_on":[],"parallel_group":null,"atoms":[{"atom_task_id":"a1","workstream_id":"ws1","objective":"查询用量证据","category":"query","assignee_engine":"claude_code","execution_order":"serial","depends_on":[],"parallel_group":null,"read_scope":[],"write_scope":[],"acceptance":["证据可追溯"]}]}],"atom_tasks":[{"atom_task_id":"a1","workstream_id":"ws1","objective":"查询用量证据","category":"query","assignee_engine":"claude_code","execution_order":"serial","depends_on":[],"parallel_group":null,"read_scope":[],"write_scope":[],"acceptance":["证据可追溯"]}],"dependency_edges":[],"serial_groups":[{"id":"sg1","atoms":["a1"]}],"parallel_groups":[],"assignment_policy":{"query":"claude_code","code_change":"claude_code","deploy_ops":"claude_code","judgment":"codex","acceptance":"codex"}}
 done"#;
         let parsed = PTYWebSocketServer::parse_codex_plan_response(output).unwrap();
         assert_eq!(parsed.objective, "修复 plan.lisp 作者链路");
@@ -11480,6 +14484,7 @@ done"#;
         assert!(parsed.requires_board_task);
         assert_eq!(parsed.steps.len(), 3);
         assert_eq!(parsed.non_goals, vec!["Rust deterministic plan"]);
+        assert_eq!(parsed.atom_tasks.len(), 1);
     }
 
     #[test]
@@ -11515,6 +14520,37 @@ done"#;
             "confidence":"high"
         }"#;
         assert!(PTYWebSocketServer::parse_codex_plan_response(work_order_without_task).is_err());
+    }
+
+    #[test]
+    fn jarvis_codex_plan_response_rejects_unknown_atom_dependency() {
+        let plan = r#"{
+            "objective":"拆分任务",
+            "review_text":"需要原子化派工",
+            "execution_mode":"work_order",
+            "requires_board_task":true,
+            "key_judgment":"不是算力差异，是用量差异",
+            "steps":["查询","修改","验收"],
+            "answer_policy":"task-result-artifact",
+            "provider_hint":"codex-review-worker",
+            "boundary":"只按 atom 图派工",
+            "assumptions":[],
+            "non_goals":[],
+            "acceptance_signals":["依赖有效"],
+            "confidence":"high",
+            "workstreams":[{"id":"ws1","title":"实现","objective":"实现","execution_order":"serial","depends_on":[],"parallel_group":null,"atoms":[]}],
+            "atom_tasks":[
+                {"atom_task_id":"a1","workstream_id":"ws1","objective":"查询","category":"query","assignee_engine":"claude_code","execution_order":"serial","depends_on":["missing"],"parallel_group":null,"read_scope":[],"write_scope":[],"acceptance":["证据可追溯"]}
+            ],
+            "dependency_edges":[],
+            "serial_groups":[],
+            "parallel_groups":[],
+            "assignment_policy":{"query":"claude_code","code_change":"claude_code","deploy_ops":"claude_code","judgment":"codex","acceptance":"codex"}
+        }"#;
+        let err = PTYWebSocketServer::parse_codex_plan_response(plan)
+            .expect_err("unknown atom dependency must be rejected")
+            .to_string();
+        assert!(err.contains("depends_on unknown atom missing"));
     }
 
     #[test]
@@ -11567,7 +14603,21 @@ done"#;
             non_goals: vec!["Rust 自行拼接 plan".to_string()],
             acceptance_signals: vec!["plan.lisp 标出 Codex author".to_string()],
             confidence: Some("high".to_string()),
+            key_judgment: Some("不是算力差异，是用量差异".to_string()),
+            workstreams: Vec::new(),
+            atom_tasks: Vec::new(),
+            dependency_edges: Vec::new(),
+            serial_groups: Vec::new(),
+            parallel_groups: Vec::new(),
+            assignment_policy: PTYWebSocketServer::jarvis_assignment_policy_default(),
         };
+        let key_judgment = test_key_judgment_ref();
+        let atomization_graph = PTYWebSocketServer::jarvis_plan_atomization_graph(
+            &draft,
+            "context-gather:test",
+            "interaction-intent-draft:test",
+            &key_judgment,
+        );
         let body = PTYWebSocketServer::jarvis_authored_plan_lisp_body(
             "missiond.interaction-plan-artifact.v1",
             &config,
@@ -11575,6 +14625,8 @@ done"#;
             &draft,
             "context-gather:test",
             "interaction-intent-draft:test",
+            &key_judgment,
+            &atomization_graph,
             Some("topic-1"),
             Some("Jarvis plan"),
             &["source-a".to_string()],
@@ -11585,6 +14637,8 @@ done"#;
         assert!(body.contains(":objective \"生成 Codex-authored plan\""));
         assert!(body.contains(":mode grounded-direct-answer"));
         assert!(body.contains(":requires-board-task false"));
+        assert!(body.contains(":key-judgment-artifact-id \"key-judgment-test\""));
+        assert!(body.contains(":atomization-json"));
         assert!(body.contains(":completion-authority interaction-result-artifact"));
         assert!(body.contains(":non-goals [\"Rust 自行拼接 plan\"]"));
     }
@@ -11931,6 +14985,8 @@ done"#;
             None,
             "intent-abc",
             "plan-abc",
+            &test_key_judgment_ref(),
+            &test_plan_atomization_graph(),
             "/repo",
         );
         let prompt =
@@ -11939,6 +14995,9 @@ done"#;
         assert!(prompt.contains("目标工位：engine_hint=agy pool_hint=agy-research"));
         assert!(prompt.contains("intent_artifact_id: intent-abc"));
         assert!(prompt.contains("plan_artifact_id: plan-abc"));
+        assert!(prompt.contains("key_judgment_artifact_id: key-judgment-test"));
+        assert!(prompt.contains("Plan atomization graph"));
+        assert!(prompt.contains("Fixed assignment policy"));
         assert!(prompt.contains("已接受执行切片"));
         assert!(prompt.contains("先读取 grounding_report_file"));
         assert!(prompt.contains("再读取 context_pack_file"));
@@ -11954,6 +15013,65 @@ done"#;
     }
 
     #[test]
+    fn jarvis_atom_worker_prompt_is_scoped_to_accepted_atom() {
+        let graph = serde_json::json!({
+            "schema": "missiond.plan-atomization-graph.v1",
+            "assignment_policy": PTYWebSocketServer::jarvis_assignment_policy_default(),
+            "workstreams": [{
+                "id": "ws1",
+                "title": "实现",
+                "objective": "实现修复",
+                "execution_order": "serial",
+                "depends_on": [],
+                "parallel_group": null,
+                "atoms": []
+            }],
+            "atom_tasks": [
+                {"atom_task_id":"a1","workstream_id":"ws1","objective":"查询证据","category":"query","assignee_engine":"claude_code","execution_order":"serial","depends_on":[],"parallel_group":null,"read_scope":[],"write_scope":[],"acceptance":["证据可追溯"]},
+                {"atom_task_id":"a2","workstream_id":"ws1","objective":"修改 Jarvis gate","category":"code_change","assignee_engine":"claude_code","execution_order":"serial","depends_on":["a1"],"parallel_group":null,"read_scope":["/repo/crates"],"write_scope":["/repo/crates/missiond-core"],"acceptance":["测试通过"]}
+            ],
+            "dependency_edges": [{"from":"a1","to":"a2"}],
+            "serial_groups": [{"id":"sg1","atoms":["a1","a2"]}],
+            "parallel_groups": []
+        });
+        let base = PTYWebSocketServer::derive_jarvis_dispatch_contract(
+            "立刻实施开发",
+            "context-gather:abc",
+            Some("shared-artifact://abc"),
+            Some("/tmp/missiond/context-gather/abc.json"),
+            Some("/tmp/missiond/context-gather/report.md"),
+            None,
+            Some("hash-report"),
+            "intent-abc",
+            "plan-abc",
+            &test_key_judgment_ref(),
+            &graph,
+            "/repo",
+        );
+        let specs = PTYWebSocketServer::jarvis_plan_atom_specs(&graph).unwrap();
+        let code_atom = specs
+            .iter()
+            .find(|atom| atom.atom_task_id == "a2")
+            .expect("a2 atom");
+        let child = PTYWebSocketServer::jarvis_atom_dispatch_metadata(
+            code_atom,
+            &base,
+            &graph,
+            "parent-task",
+            &["task-a1".to_string()],
+            false,
+        );
+        let prompt = PTYWebSocketServer::build_jarvis_worker_prompt("立刻实施开发", &child);
+        assert!(prompt.contains("目标工位：engine_hint=claude_code pool_hint=claude-code-default"));
+        assert!(prompt.contains("write_policy: scoped"));
+        assert!(prompt.contains("atom_task_id: a2"));
+        assert!(prompt.contains("accepted_atom_objective: 修改 Jarvis gate"));
+        assert!(prompt.contains("\"depends_on\": [\n    \"a1\""));
+        assert!(prompt.contains("Accepted plan atom"));
+        assert!(prompt.contains("你只执行属于当前 BoardTask/worker 的切片"));
+    }
+
+    #[test]
     fn jarvis_dispatch_context_pack_parent_enters_read_scope() {
         let metadata = PTYWebSocketServer::derive_jarvis_dispatch_contract(
             "请接入并验证 agy CLI",
@@ -11965,6 +15083,8 @@ done"#;
             None,
             "intent-abc",
             "plan-abc",
+            &test_key_judgment_ref(),
+            &test_plan_atomization_graph(),
             "/repo",
         );
         let read_scope = metadata["read_scope"].as_array().unwrap();
@@ -11984,6 +15104,8 @@ done"#;
             None,
             "intent-xyz",
             "plan-xyz",
+            &test_key_judgment_ref(),
+            &test_plan_atomization_graph(),
             "/repo",
         );
         assert_eq!(metadata["task_class"], "code");
@@ -12008,6 +15130,8 @@ done"#;
             None,
             "intent-codex",
             "plan-codex",
+            &test_key_judgment_ref(),
+            &test_plan_atomization_graph(),
             "/repo",
         );
         assert_eq!(metadata["task_class"], "code");
@@ -12030,6 +15154,8 @@ done"#;
             None,
             "intent-abc",
             "plan-abc",
+            &test_key_judgment_ref(),
+            &test_plan_atomization_graph(),
             "/repo",
         );
         assert_eq!(metadata["task_class"], "review");
@@ -12055,6 +15181,8 @@ done"#;
             None,
             "intent-survey",
             "plan-survey",
+            &test_key_judgment_ref(),
+            &test_plan_atomization_graph(),
             "/repo",
         );
         assert_eq!(metadata["task_class"], "review");
@@ -12077,6 +15205,8 @@ done"#;
             None,
             "intent-readonly",
             "plan-readonly",
+            &test_key_judgment_ref(),
+            &test_plan_atomization_graph(),
             "/repo",
         );
         assert_eq!(metadata["task_class"], "review");
@@ -12103,6 +15233,8 @@ done"#;
             None,
             "intent-code",
             "plan-code",
+            &test_key_judgment_ref(),
+            &test_plan_atomization_graph(),
             "/repo",
         );
         assert_eq!(metadata["task_class"], "code");
@@ -12127,6 +15259,8 @@ done"#;
             None,
             "i",
             "p",
+            &test_key_judgment_ref(),
+            &test_plan_atomization_graph(),
             "/repo",
         );
         let prompt =
