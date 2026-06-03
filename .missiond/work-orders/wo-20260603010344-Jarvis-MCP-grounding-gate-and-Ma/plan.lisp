@@ -12,7 +12,12 @@
                      "crates/missiond-core/src/lib.rs"
                      "crates/missiond-core/src/v3_contracts.rs"
                      "crates/missiond-core/src/ws/server.rs"
+                     "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
+                     "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"
                      "crates/missiond-daemon/src/main.rs"
                      "crates/missiond-daemon/src/provider_box/claude_code_driver.rs"
-                     "crates/missiond-daemon/src/provider_box/http_adapter.rs"]
+                     "crates/missiond-daemon/src/provider_box/http_adapter.rs"
+                     "scripts/generated/v3_contracts.d.ts"
+                     "scripts/generated/v3_contracts.mjs"
+                     "scripts/generated/v3_runtime_defaults.mjs"]
        :acceptance ["node scripts/check-v3-final-convergence.mjs --json --static-only"])))
