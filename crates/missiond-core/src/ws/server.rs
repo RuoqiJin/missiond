@@ -5621,11 +5621,57 @@ impl PTYWebSocketServer {
         event: &str,
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
-        stream
-            .write_all(format!("event: {event}\ndata: {payload}\n\n").as_bytes())
-            .await?;
-        stream.flush().await?;
+        Self::write_sse_bytes(
+            stream,
+            format!("event: {event}\ndata: {payload}\n\n").as_bytes(),
+            "event",
+            Some(event),
+        )
+        .await
+    }
+
+    async fn write_sse_bytes(
+        stream: &mut TcpStream,
+        bytes: &[u8],
+        kind: &str,
+        event: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if let Err(error) = stream.write_all(bytes).await {
+            return Self::handle_sse_write_error(error, kind, event);
+        }
+        if let Err(error) = stream.flush().await {
+            return Self::handle_sse_write_error(error, kind, event);
+        }
         Ok(())
+    }
+
+    fn handle_sse_write_error(
+        error: std::io::Error,
+        kind: &str,
+        event: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if Self::is_client_disconnect_error(&error) {
+            warn!(
+                kind,
+                event = event.unwrap_or(""),
+                error = %error,
+                "Jarvis SSE client disconnected; continuing durable interaction workflow"
+            );
+            Ok(())
+        } else {
+            Err(error.into())
+        }
+    }
+
+    fn is_client_disconnect_error(error: &std::io::Error) -> bool {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::UnexpectedEof
+        )
     }
 
     async fn persist_interaction_event(
@@ -5702,11 +5748,13 @@ impl PTYWebSocketServer {
                 "finish_reason": finish_reason_value
             }]
         });
-        stream
-            .write_all(format!("data: {chunk}\n\n").as_bytes())
-            .await?;
-        stream.flush().await?;
-        Ok(())
+        Self::write_sse_bytes(
+            stream,
+            format!("data: {chunk}\n\n").as_bytes(),
+            "openai_delta",
+            None,
+        )
+        .await
     }
 
     async fn write_jarvis_progress(
@@ -7949,9 +7997,10 @@ JSON 字段必须是：\n\
     }
 
     async fn finish_sse(stream: &mut TcpStream) -> anyhow::Result<()> {
-        stream.write_all(b"data: [DONE]\n\n").await?;
-        stream.flush().await?;
-        stream.shutdown().await?;
+        Self::write_sse_bytes(stream, b"data: [DONE]\n\n", "done", None).await?;
+        if let Err(error) = stream.shutdown().await {
+            return Self::handle_sse_write_error(error, "shutdown", None);
+        }
         Ok(())
     }
 
@@ -14949,6 +14998,22 @@ done"#;
             "/v1/chat/completions"
         );
         assert_eq!(normalize_public_jarvis_path("/api/slots"), "/api/slots");
+    }
+
+    #[test]
+    fn jarvis_sse_disconnect_errors_are_non_terminal() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            let error = std::io::Error::new(kind, "client went away");
+            assert!(PTYWebSocketServer::is_client_disconnect_error(&error));
+        }
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "bad fd");
+        assert!(!PTYWebSocketServer::is_client_disconnect_error(&error));
     }
 
     #[test]
