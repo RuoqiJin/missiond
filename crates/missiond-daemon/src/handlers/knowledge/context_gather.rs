@@ -1147,6 +1147,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 
     if selection.include_conversations {
+        let conversation_time_range = args
+            .conversation_time_range
+            .as_deref()
+            .unwrap_or("last_30d")
+            .to_string();
         insert_subcall(
             &mut sources,
             &mut diagnostics,
@@ -1163,15 +1168,21 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         "tenant_id": args.tenant_id.clone(),
                         "application_id": args.application_id.clone(),
                         "channel": args.channel.clone(),
-                        "time_range": args
-                            .conversation_time_range
-                        .as_deref()
-                        .unwrap_or("last_30d"),
+                        "time_range": conversation_time_range.clone(),
                     "query_mode": "hybrid"
                 }),
             )
             .await,
         );
+        if let Some(source) = sources.get_mut("conversation_logs") {
+            attach_conversation_search_context(
+                source,
+                effective_project_id.as_deref(),
+                &conversation_time_range,
+                "hybrid",
+                limit,
+            );
+        }
     }
 
     attach_infra_os_disabled_support_fallback(&mut sources);
@@ -1503,6 +1514,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 
     Ok(ToolResult::json_pretty(&payload))
+}
+
+fn attach_conversation_search_context(
+    source: &mut Value,
+    project_id: Option<&str>,
+    time_range: &str,
+    query_mode: &str,
+    limit: usize,
+) {
+    if let Some(object) = source.as_object_mut() {
+        object.insert(
+            "filter_context".to_string(),
+            json!({
+                "project_id": project_id,
+                "time_range": time_range,
+                "query_mode": query_mode,
+                "limit": limit,
+                "filter_before_injection": true
+            }),
+        );
+    }
 }
 
 fn authority_order() -> Value {
@@ -5006,6 +5038,25 @@ fn summarize_array_source(key: &str, value: &Value, limit: usize) -> Value {
 
 fn summarize_conversation_source(key: &str, value: &Value) -> Value {
     let mut map = summary_base(key);
+    for search_key in [
+        "query",
+        "mode",
+        "count",
+        "totalHits",
+        "total_hits",
+        "ftsHits",
+        "fts_hits",
+        "vecHits",
+        "vec_hits",
+        "filteredSemanticHits",
+        "filtered_semantic_hits",
+        "crossProjectDrops",
+        "cross_project_drops",
+    ] {
+        insert_field(&mut map, value, search_key);
+    }
+    insert_conversation_filter_context(&mut map, value, "filter_context");
+    insert_conversation_filter_context(&mut map, value, "filterContext");
     for item_key in ["results", "items", "data"] {
         if value.get(item_key).and_then(Value::as_array).is_some() {
             map.insert(
@@ -5041,6 +5092,35 @@ fn summarize_conversation_source(key: &str, value: &Value) -> Value {
         }
     }
     summarize_array_source(key, value, 5)
+}
+
+fn insert_conversation_filter_context(
+    map: &mut serde_json::Map<String, Value>,
+    value: &Value,
+    key: &str,
+) {
+    let Some(context) = value.get(key).and_then(Value::as_object) else {
+        return;
+    };
+    let mut compact_context = serde_json::Map::new();
+    for safe_key in [
+        "project_id",
+        "projectId",
+        "time_range",
+        "timeRange",
+        "query_mode",
+        "queryMode",
+        "limit",
+        "filter_before_injection",
+        "filterBeforeInjection",
+    ] {
+        if let Some(field) = context.get(safe_key) {
+            compact_context.insert(safe_key.to_string(), field.clone());
+        }
+    }
+    if !compact_context.is_empty() {
+        map.insert(key.to_string(), Value::Object(compact_context));
+    }
 }
 
 fn summarize_generic_item(item: &Value) -> Value {
@@ -5707,8 +5787,8 @@ mod tests {
     use crate::context::v3_blueprint_runtime::EvidenceLaneRuntimeConfig;
 
     use super::{
-        attach_infra_os_disabled_support_fallback, build_evidence_items,
-        build_evidence_items_with_options, build_evidence_lanes,
+        attach_conversation_search_context, attach_infra_os_disabled_support_fallback,
+        build_evidence_items, build_evidence_items_with_options, build_evidence_lanes,
         build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
         build_support_catalog, collect_evidence_refs_from_value, context_gather_next_action,
         context_gather_persist_artifact, context_gather_persist_read_model,
@@ -7932,6 +8012,73 @@ mod tests {
             .evidence_refs
             .to_string()
             .contains("raw message body"));
+    }
+
+    #[test]
+    fn conversation_summary_preserves_search_diagnostics_without_raw_content() {
+        let mut source = json!({
+            "results": [],
+            "count": 0,
+            "totalHits": 0,
+            "query": "payments deploy center relay",
+            "mode": "hybrid",
+            "ftsHits": 0,
+            "vecHits": 3,
+            "filteredSemanticHits": 3,
+            "content": "raw source content must not appear in compact conversation summary",
+            "rawContent": "raw provider envelope must not appear either"
+        });
+        attach_conversation_search_context(&mut source, Some("payments"), "last_30d", "hybrid", 8);
+        if let Some(context) = source
+            .get_mut("filter_context")
+            .and_then(Value::as_object_mut)
+        {
+            context.insert(
+                "content".to_string(),
+                json!("raw nested filter content must not appear"),
+            );
+            context.insert(
+                "rawContent".to_string(),
+                json!("raw nested filter envelope must not appear"),
+            );
+        }
+
+        let summary = summarize_source("conversation_logs", &source);
+
+        assert_eq!(summary.get("item_count").and_then(Value::as_u64), Some(0));
+        assert_eq!(
+            summary.get("query").and_then(Value::as_str),
+            Some("payments deploy center relay")
+        );
+        assert_eq!(summary.get("mode").and_then(Value::as_str), Some("hybrid"));
+        assert_eq!(
+            summary.get("filteredSemanticHits").and_then(Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            summary
+                .get("filter_context")
+                .and_then(|value| value.get("project_id"))
+                .and_then(Value::as_str),
+            Some("payments")
+        );
+        assert_eq!(
+            summary
+                .get("filter_context")
+                .and_then(|value| value.get("time_range"))
+                .and_then(Value::as_str),
+            Some("last_30d")
+        );
+        assert!(summary
+            .get("filter_context")
+            .and_then(|value| value.get("content"))
+            .is_none());
+        assert!(summary
+            .get("filter_context")
+            .and_then(|value| value.get("rawContent"))
+            .is_none());
+        assert!(summary.get("content").is_none());
+        assert!(summary.get("rawContent").is_none());
     }
 
     #[test]
