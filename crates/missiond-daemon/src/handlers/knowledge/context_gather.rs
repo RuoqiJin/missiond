@@ -4171,6 +4171,8 @@ fn evidence_summary(value: &Value) -> String {
         &[Some(value)],
         &[
             "summary",
+            "matchReason",
+            "match_reason",
             "description",
             "snippet",
             "content",
@@ -4938,10 +4940,19 @@ fn summarize_conversation_source(key: &str, value: &Value) -> Value {
                     insert_field(&mut item_map, item, "session_id");
                     insert_field(&mut item_map, item, "sessionId");
                     insert_field(&mut item_map, item, "project");
+                    insert_field(&mut item_map, item, "status");
                     insert_field(&mut item_map, item, "conversation_type");
+                    insert_field(&mut item_map, item, "conversationType");
+                    insert_field(&mut item_map, item, "message_count");
+                    insert_field(&mut item_map, item, "messageCount");
+                    insert_field(&mut item_map, item, "started_at");
+                    insert_field(&mut item_map, item, "startedAt");
                     insert_field(&mut item_map, item, "timestamp");
+                    insert_field(&mut item_map, item, "cosineSim");
+                    insert_compact_field(&mut item_map, item, "summary", 360);
+                    insert_compact_field(&mut item_map, item, "matchReason", 360);
+                    insert_compact_field(&mut item_map, item, "match_reason", 360);
                     insert_compact_field(&mut item_map, item, "snippet", 260);
-                    insert_compact_field(&mut item_map, item, "content", 260);
                     Value::Object(item_map)
                 }),
             );
@@ -7695,6 +7706,71 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(1)
         );
+    }
+
+    #[test]
+    fn conversation_summary_keeps_session_evidence_without_raw_content() {
+        let mut sources = serde_json::Map::new();
+        sources.insert(
+            "conversation_logs".to_string(),
+            json!({
+                "results": [{
+                    "sessionId": "conv-1",
+                    "project": "payments",
+                    "conversationType": "codex_chat",
+                    "status": "active",
+                    "summary": "Payment deploy discussion reached a relay diagnostics hypothesis.",
+                    "matchReason": "[assistant] Deploy Center relay emitted no durable deploy_events rows.",
+                    "content": "raw message body must stay out of compact context evidence",
+                    "rawContent": "raw provider envelope must stay out too",
+                    "messageCount": 42,
+                    "startedAt": "2026-06-03T04:00:00Z"
+                }]
+            }),
+        );
+
+        let summaries = build_source_summaries(&sources);
+        let conversation_item = summaries
+            .get("conversation_logs")
+            .and_then(|value| value.get("items"))
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .expect("summarized conversation item");
+
+        assert_eq!(
+            conversation_item.get("summary").and_then(Value::as_str),
+            Some("Payment deploy discussion reached a relay diagnostics hypothesis.")
+        );
+        assert_eq!(
+            conversation_item.get("matchReason").and_then(Value::as_str),
+            Some("[assistant] Deploy Center relay emitted no durable deploy_events rows.")
+        );
+        assert!(conversation_item.get("content").is_none());
+        assert!(conversation_item.get("rawContent").is_none());
+
+        let catalog = build_support_catalog(&sources);
+        let items = build_evidence_items(
+            &sources,
+            &summaries,
+            &catalog,
+            SourceProfile::ConversationAudit,
+            Some("payments"),
+            None,
+        );
+        let conversation_evidence = items
+            .iter()
+            .find(|item| item.lane_id == "conversation_audit")
+            .expect("conversation evidence item");
+
+        assert_eq!(conversation_evidence.source_id.as_deref(), Some("conv-1"));
+        assert_eq!(
+            conversation_evidence.summary,
+            "Payment deploy discussion reached a relay diagnostics hypothesis."
+        );
+        assert!(!conversation_evidence
+            .evidence_refs
+            .to_string()
+            .contains("raw message body"));
     }
 
     #[test]
