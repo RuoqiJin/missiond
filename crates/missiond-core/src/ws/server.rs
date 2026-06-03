@@ -4601,6 +4601,14 @@ impl PTYWebSocketServer {
             {
                 Ok(draft) => draft,
                 Err(error) => {
+                    let diagnostic = serde_json::json!({
+                        "phase": "plan_authoring_failed",
+                        "error": {
+                            "code": "JARVIS_PLAN_AUTHOR_FAILED",
+                            "message": error.to_string()
+                        }
+                    });
+                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
                     Self::fail_jarvis_gate_visible(
                         &mut stream,
                         &jarvis_progress_bus,
@@ -11930,6 +11938,14 @@ JSON 字段必须是：\n\
                 {
                     Ok(draft) => draft,
                     Err(error) => {
+                        let diagnostic = serde_json::json!({
+                            "phase": "plan_authoring_failed",
+                            "error": {
+                                "code": "JARVIS_PLAN_AUTHOR_FAILED",
+                                "message": error.to_string()
+                            }
+                        });
+                        Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
                         Self::fail_jarvis_gate_visible(
                             &mut stream,
                             &jarvis_progress_bus,
