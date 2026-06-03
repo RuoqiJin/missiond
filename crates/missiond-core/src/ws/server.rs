@@ -6433,13 +6433,32 @@ impl PTYWebSocketServer {
         default_slot: &str,
     ) -> String {
         if let Some(slot_id) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
-            return slot_id.to_string();
+            if Self::jarvis_slot_matches_provider(provider, slot_id) {
+                return slot_id.to_string();
+            }
+        }
+        let default_slot = default_slot.trim();
+        if !default_slot.is_empty() && Self::jarvis_slot_matches_provider(provider, default_slot) {
+            return default_slot.to_string();
         }
         match provider {
             "agy" | "agy_cli" | "agy-cli" => "slot-agy-gemini-31-pro-high".to_string(),
+            "codex" | "codex_cli" | "codex-cli" => "slot-codex-intent-author".to_string(),
             "claude_code" | "claude-code" | "claude" => "slot-claude-code-default".to_string(),
             "gemini" | "gemini_cli" | "gemini-cli" => "slot-gemini-fast-survey".to_string(),
             _ => default_slot.to_string(),
+        }
+    }
+
+    fn jarvis_slot_matches_provider(provider: &str, slot_id: &str) -> bool {
+        let provider = provider.trim().to_ascii_lowercase();
+        let slot_id = slot_id.trim().to_ascii_lowercase();
+        match provider.as_str() {
+            "agy" | "agy_cli" | "agy-cli" => slot_id.starts_with("slot-agy-"),
+            "codex" | "codex_cli" | "codex-cli" => slot_id.starts_with("slot-codex-"),
+            "claude_code" | "claude-code" | "claude" => slot_id.starts_with("slot-claude-"),
+            "gemini" | "gemini_cli" | "gemini-cli" => slot_id.starts_with("slot-gemini-"),
+            _ => true,
         }
     }
 
@@ -15345,6 +15364,42 @@ done"#;
         assert!(body.contains(":semantic-author"));
         assert!(body.contains(":objective \"识别真实意图\""));
         assert!(body.contains(":non-goals [\"Rust 自行猜测意图\"]"));
+    }
+
+    #[test]
+    fn jarvis_author_slot_ignores_stale_cross_provider_env_slot() {
+        assert_eq!(
+            PTYWebSocketServer::jarvis_text_only_slot_id(
+                "codex_cli",
+                Some("slot-agy-gemini-31-pro-high"),
+                "slot-codex-intent-author",
+            ),
+            "slot-codex-intent-author"
+        );
+        assert_eq!(
+            PTYWebSocketServer::jarvis_text_only_slot_id(
+                "codex_cli",
+                Some("slot-agy-gemini-31-pro-high"),
+                "slot-agy-gemini-31-pro-high",
+            ),
+            "slot-codex-intent-author"
+        );
+        assert_eq!(
+            PTYWebSocketServer::jarvis_text_only_slot_id(
+                "codex_cli",
+                Some("slot-codex-custom-author"),
+                "slot-codex-intent-author",
+            ),
+            "slot-codex-custom-author"
+        );
+        assert_eq!(
+            PTYWebSocketServer::jarvis_text_only_slot_id(
+                "agy",
+                Some("slot-agy-gemini-31-pro-high-jarvis-communicator-a"),
+                "slot-agy-gemini-31-pro-high",
+            ),
+            "slot-agy-gemini-31-pro-high-jarvis-communicator-a"
+        );
     }
 
     #[test]
