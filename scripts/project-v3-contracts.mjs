@@ -13,6 +13,7 @@ import {
 
 const BLUEPRINT = '.missiond/v3/missiond-blueprint.lisp';
 const RUST_OUTPUT = 'crates/missiond-daemon/src/context/v3_contracts/generated.rs';
+const CORE_RUST_OUTPUT = 'crates/missiond-core/src/v3_contracts.rs';
 const JS_OUTPUT = 'scripts/generated/v3_contracts.mjs';
 const DTS_OUTPUT = 'scripts/generated/v3_contracts.d.ts';
 const RUST_RUNTIME_DEFAULTS_OUTPUT = 'crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs';
@@ -25,7 +26,7 @@ function main() {
   const contract = loadContract({ repo, blueprint });
   const runtimeDefaults = loadRuntimeDefaults({ repo, blueprint });
   const projectUniverse = loadProjectUniverse({ repo, blueprint });
-  const generated = renderAll(contract, {
+  const labels = {
     blueprint,
     rustOutput: RUST_OUTPUT,
     jsOutput: JS_OUTPUT,
@@ -36,6 +37,11 @@ function main() {
     projectUniverseSourceHash: projectUniverse.sourceDomainHash,
     runtimeDomainFiles: runtimeDomainFiles(),
     runtimeDomainSourceHashes: runtimeDomainSourceHashes(runtimeDefaults.sourceDomainHash),
+  };
+  const generated = renderAll(contract, labels);
+  const generatedCoreRust = renderCoreRust(contract, {
+    ...labels,
+    rustOutput: opts.coreRustOutput,
   });
   const generatedRuntimeDefaults = renderRuntimeDefaults(runtimeDefaults, {
     blueprint,
@@ -44,6 +50,7 @@ function main() {
   });
   const outputs = [
     { id: 'rust', rel: opts.rustOutput, text: generated.rust },
+    { id: 'core-rust', rel: opts.coreRustOutput, text: generatedCoreRust },
     { id: 'js', rel: opts.jsOutput, text: generated.js },
     { id: 'dts', rel: opts.dtsOutput, text: generated.dts },
     { id: 'rust-runtime-defaults', rel: opts.rustRuntimeDefaultsOutput, text: generatedRuntimeDefaults.rust },
@@ -107,6 +114,7 @@ function parseArgs(argv) {
     repo: process.cwd(),
     blueprint: BLUEPRINT,
     rustOutput: RUST_OUTPUT,
+    coreRustOutput: CORE_RUST_OUTPUT,
     jsOutput: JS_OUTPUT,
     dtsOutput: DTS_OUTPUT,
     rustRuntimeDefaultsOutput: RUST_RUNTIME_DEFAULTS_OUTPUT,
@@ -126,6 +134,8 @@ function parseArgs(argv) {
     else if (arg.startsWith('--blueprint=')) opts.blueprint = arg.slice('--blueprint='.length);
     else if (arg === '--rust-output') opts.rustOutput = argv[++i] ?? fail('--rust-output requires a value');
     else if (arg.startsWith('--rust-output=')) opts.rustOutput = arg.slice('--rust-output='.length);
+    else if (arg === '--core-rust-output') opts.coreRustOutput = argv[++i] ?? fail('--core-rust-output requires a value');
+    else if (arg.startsWith('--core-rust-output=')) opts.coreRustOutput = arg.slice('--core-rust-output='.length);
     else if (arg === '--js-output') opts.jsOutput = argv[++i] ?? fail('--js-output requires a value');
     else if (arg.startsWith('--js-output=')) opts.jsOutput = arg.slice('--js-output='.length);
     else if (arg === '--dts-output') opts.dtsOutput = argv[++i] ?? fail('--dts-output requires a value');
@@ -311,6 +321,20 @@ pub fn is_surface_id(value: &str) -> bool {
 pub fn is_function_id(value: &str) -> bool {
     FUNCTION_IDS.contains(&value)
 }
+`;
+}
+
+function renderCoreRust(contract, labels) {
+  return `${header(labels.blueprint, labels.rustOutput, '//')}
+
+pub const SCHEMA_VERSION: &str = ${rustString(contract.schemaVersion)};
+pub const SOURCE_HASH: &str = ${rustString(contract.sourceHash)};
+pub const RUNTIME_CONFIG_SOURCE_HASH: &str = ${rustString(labels.runtimeConfigSourceHash)};
+pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = ${rustString(labels.projectUniverseSourceHash)};
+#[rustfmt::skip]
+pub const RUNTIME_DOMAIN_SOURCE_HASHES: &[(&str, &str)] = &[
+${Object.entries(labels.runtimeDomainSourceHashes).map(renderRustTuple2).join('\n')}
+];
 `;
 }
 
