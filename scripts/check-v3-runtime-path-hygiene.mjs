@@ -141,7 +141,7 @@ const REQUIRED = {
     'canonical_local_http',
     'http://127.0.0.1:9120/api/monitor/jarvis',
     'canonical_public_https',
-    'https://jarvis.xiaojinpro.top/api/monitor/jarvis',
+    'https://jarvis.xiaojins.com/api/monitor/jarvis',
     'Repo .missiond/v3/runtime/** is dev/cold evidence only',
     'MISSIOND_RUNTIME_DIR/context-gather-worker',
     'repo .missiond/v3/runtime/context-gather-worker',
@@ -388,7 +388,7 @@ monitor_endpoints
 canonical_local_http
 http://127.0.0.1:9120/api/monitor/jarvis
 canonical_public_https
-https://jarvis.xiaojinpro.top/api/monitor/jarvis
+https://jarvis.xiaojins.com/api/monitor/jarvis
 Repo .missiond/v3/runtime/** is dev/cold evidence only
 MISSIOND_RUNTIME_DIR/context-gather-worker
 repo .missiond/v3/runtime/context-gather-worker

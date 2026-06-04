@@ -516,10 +516,28 @@ function parseScannerProfile(root, file, node) {
 function scanRustFile({ observed, source, rel, projectId }) {
   const lines = source.split(/\r?\n/);
   const effectContexts = rustEffectContextMap(source);
-  let inCfgTest = false;
+  let cfgTestPending = false;
+  let cfgTestBraceDepth = 0;
   lines.forEach((line, idx) => {
-    if (/^\s*#\[cfg\(test\)\]/.test(line)) inCfgTest = true;
-    if (inCfgTest) return;
+    if (cfgTestBraceDepth > 0) {
+      cfgTestBraceDepth = Math.max(0, cfgTestBraceDepth + braceDelta(line));
+      return;
+    }
+    if (cfgTestPending) {
+      if (/^\s*$/.test(line) || /^\s*#/.test(line)) return;
+      const delta = braceDelta(line);
+      if (line.includes('{')) {
+        cfgTestBraceDepth = Math.max(0, delta);
+      } else {
+        cfgTestPending = false;
+      }
+      if (cfgTestBraceDepth === 0) cfgTestPending = false;
+      return;
+    }
+    if (/^\s*#\[cfg\(test\)\]/.test(line)) {
+      cfgTestPending = true;
+      return;
+    }
     if (/^\s*\/\//.test(line)) return;
     const lineNo = idx + 1;
     const context = nearby(lines, idx);
@@ -587,6 +605,16 @@ function scanRustFile({ observed, source, rel, projectId }) {
       });
     }
   });
+}
+
+function braceDelta(line) {
+  const withoutLineComment = line.replace(/\/\/.*$/, '');
+  let delta = 0;
+  for (const char of withoutLineComment) {
+    if (char === '{') delta += 1;
+    else if (char === '}') delta -= 1;
+  }
+  return delta;
 }
 
 function scanJsTsFile({ observed, source, rel, projectId }) {

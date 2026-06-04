@@ -4,7 +4,7 @@ const args = new Set(process.argv.slice(2));
 const json = args.has('--json');
 const allowPending = args.has('--allow-pending') || process.env.JARVIS_SMOKE_ALLOW_PENDING === '1';
 const baseUrl = stripTrailingSlash(
-  process.env.JARVIS_BASE_URL || 'https://jarvis.xiaojinpro.top',
+  process.env.JARVIS_BASE_URL || 'https://jarvis.xiaojins.com',
 );
 const smokeSecretRef =
   process.env.MISSIOND_JARVIS_SMOKE_SECRET_REF ||

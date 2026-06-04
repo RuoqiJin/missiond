@@ -595,7 +595,7 @@ function runSelfTest() {
     name: 'Good Things Daily',
     out: root,
     domain: 'goodnews.xiaojinpro.top',
-    'api-domain': 'goodnews-api.xiaojinpro.top',
+    'api-domain': 'goodnews-api.xiaojins.com',
     'backend-port': '4017',
   });
   const files = generate(c, false);

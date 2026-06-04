@@ -221,6 +221,40 @@
       :required-classes [database auth-client payment provider webhook object-storage service-token]
       :env [SECRET_STORE_URL SECRET_STORE_TOKEN SECRET_STORE_PROJECT_PREFIX])
 
+    (xjp-auth-token-governance
+      :schema "missiond.xjp-auth-token-governance.v1"
+      :authority auth
+      :secret-material-authority secret-store
+      :issuer "https://auth.xiaojinpro.com"
+      :jwks-url "https://auth.xiaojinpro.com/.well-known/jwks.json"
+      :token-endpoint "https://auth.xiaojinpro.com/oauth2/token"
+      :service-token-flow client_credentials
+      :required-audience true
+      :service-accounts [missiond jarvis router deploy-center xjp-image-service xjp-video-service xjp-code-center secret-store]
+      :scopes [service:missiond service:jarvis service:router service:deploy-center service:xjp-image-service service:xjp-video-service service:xjp-code-center secret:read secret:write media:import media:transcode router:invoke deploy:execute missiond:interact]
+      :secret-ref-policy
+        (:production strict
+         :compat-fallback "allowed only when explicitly not production and visible in monitor/checker"
+         :missing-ref "typed dependency error, not env guessing"
+         :break-glass "Secret Store local API key is disabled unless SECRET_STORE_BREAKGLASS_ENABLED=1 and audit is mandatory")
+      :runtime-projection
+        (:auth [issuer jwks_url token_endpoint allowed_audiences service_accounts scopes]
+         :secret-store [strict legacy_fallback_status break_glass_status auth_jwt_required]
+         :service-token [audience cache_until_expiry refresh_before_expiry_seconds]
+         :monitor [auth_issuer auth_jwks service_token_mode secret_store_strictness legacy_fallback_status media_upload_readiness])
+      :rules
+        ["Auth owns identity, service accounts, token issuance, scopes/capabilities, and audit."
+         "Secret Store stores encrypted secret material, versions, rotation metadata, and namespace ACLs; it must authorize normal production reads with Auth-issued JWT subjects and scopes."
+         "Production services must not rely on undeclared env fallbacks for provider keys, GitHub/Vercel/Object Storage/webhook/DNS credentials, media import tokens, Router provider keys, or MissionD interaction tokens."
+         "Migration fallback is allowed only when strict mode is disabled and monitor/checker reports the fallback state."
+         "Secret values never appear in Lisp, runtime artifacts, monitor diagnostics, SSE, Jarvis context, grounding reports, or artifact previews; only secret refs, credential type, target id, and redaction fingerprint may be shown."]
+      :interfaces
+        ((auth-token :method POST :path "/oauth2/token" :grant_type client_credentials :requires [client_id client_secret audience] :returns "short-lived bearer JWT")
+         (secret-store-auth :header "Authorization: Bearer <auth-jwt>" :scope [secret:read secret:write secret:*])
+         (media-import :header "Authorization: Bearer <auth-jwt>" :scope [media:import media:transcode])
+         (jarvis-monitor :path "/api/monitor/jarvis" :schema "missiond.jarvis-chain-monitor.v2" :adds [auth_secret_readiness jarvis_auth_secret_readiness]))
+      :env [AUTH_ISSUER AUTH_JWKS_URL AUTH_TOKEN_ENDPOINT SECRET_STORE_STRICT SECRET_STORE_ALLOW_ENV_FALLBACK SECRET_STORE_BREAKGLASS_ENABLED])
+
     (vercel-standard
       :schema "missiond.service-layer-vercel-standard.v1"
       :default-target vercel-frontend

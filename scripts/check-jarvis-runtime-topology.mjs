@@ -15,7 +15,7 @@ const expected = {
   service_id: 'missiond-jarvis-edge',
   schema: 'missiond.jarvis-runtime-topology.v1',
   edge_node: 'gcp-caddy-edge',
-  edge_domain: 'jarvis.xiaojinpro.top',
+  edge_domain: 'jarvis.xiaojins.com',
   edge_public_ip: '34.104.147.118',
   origin_node: 'bwg-tunnel',
   origin: '104.194.81.38:9876',
@@ -24,7 +24,7 @@ const expected = {
   target_service: 'missiond',
   expected_deploy_agent_version: '10.7.15',
   launchd_unit: 'com.xiaojinpro.jarvis-tunnel',
-  route_generation: 'jarvis-gcp-bwg-macmini-20260603',
+  route_generation: 'jarvis-gcp-bwg-macmini-20260604',
   proxy_no_buffer: true,
   proxy_flush_interval: '-1',
   proxy_read_timeout: '75s',
@@ -91,7 +91,7 @@ requireSource(':jarvis-runtime-topology (:schema "missiond.jarvis-runtime-topolo
 requireSource(':tunnel-server-url "ws://104.194.81.38:9876/tunnel/ws"', 'JARVIS_TUNNEL_SERVER_URL_MISSING');
 requireSource(':expected-deploy-agent-version "10.7.15"', 'JARVIS_DEPLOY_AGENT_VERSION_MISSING');
 requireSource(':launchd-unit "com.xiaojinpro.jarvis-tunnel"', 'JARVIS_LAUNCHD_UNIT_MISSING');
-requireSource(':route-generation "jarvis-gcp-bwg-macmini-20260603"', 'JARVIS_ROUTE_GENERATION_MISSING');
+requireSource(':route-generation "jarvis-gcp-bwg-macmini-20260604"', 'JARVIS_ROUTE_GENERATION_MISSING');
 requireSource(':proxy-no-buffer true', 'JARVIS_PROXY_NO_BUFFER_MISSING');
 requireSource(':proxy-flush-interval "-1"', 'JARVIS_PROXY_FLUSH_INTERVAL_MISSING');
 requireSource(':proxy-read-timeout "75s"', 'JARVIS_PROXY_READ_TIMEOUT_MISSING');

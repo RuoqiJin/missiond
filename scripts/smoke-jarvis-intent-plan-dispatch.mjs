@@ -5,7 +5,7 @@ const json = args.has('--json');
 const allowCreate = args.has('--allow-create') || process.env.JARVIS_DISPATCH_ALLOW_CREATE === '1';
 const followToFinal = args.has('--follow') || process.env.JARVIS_DISPATCH_FOLLOW === '1';
 const followTaskOnly = String(process.env.JARVIS_FOLLOW_TASK_ID || '').trim();
-const baseUrl = stripTrailingSlash(process.env.JARVIS_BASE_URL || 'https://jarvis.xiaojinpro.top');
+const baseUrl = stripTrailingSlash(process.env.JARVIS_BASE_URL || 'https://jarvis.xiaojins.com');
 const smokeSecretRef =
   process.env.MISSIOND_JARVIS_SMOKE_SECRET_REF ||
   'missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN';

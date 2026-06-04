@@ -356,6 +356,30 @@
       :checks ["bash .missiond/check.sh"]
       :missiond-role "registered XJP invoice service; owns domestic fapiao request ledger, manual issuing records, delivery links, red-letter audit, and delegates invoice.xiaojins.com DNS mutation to xjp-domain-service while keeping order eligibility and invoice locks in payments"
       :surface project-registry)
+    (project :id code-center
+      :aliases [xjp-code-center code-service "代码中心" "代码浏览"]
+      :kind rust-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/code-center"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/code-center-backend-blueprint.lisp"
+      :status contract-first-service
+      :checks ["cargo check -p xjp-code-center"]
+      :missiond-role "registered XJP code browsing and tagging service; code.xiaojins.com is the canonical GCP backend domain, /api/code/health remains a compatibility health path, and standard /health/live plus /health/ready are the deploy smoke paths"
+      :surface project-registry)
+    (project :id skill-store
+      :aliases [skill-store-gateway skills "技能商店" "skills.xiaojins.com"]
+      :kind rust-gateway-legacy-service
+      :management-domain xiaojinpro-core-backend
+      :runtime-layer support-backend
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/skill-store-gateway"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/skill-store-gateway-backend-blueprint.lisp"
+      :status gateway-governed-legacy
+      :checks ["cargo check -p skill-store-gateway"]
+      :missiond-role "registered governed gateway in front of the legacy skill-store container; skills.xiaojins.com terminates on skill-store-gateway, standard health is owned by the gateway, and legacy skill-store:8900 remains an upstream until it is migrated into a first-class Rust service"
+      :surface project-registry)
     (project :id xjp-video-transcode-runner
       :aliases [xjp-video-runner "视频转码runner" 12900kf-video-runner]
       :kind rust-daemon
@@ -369,7 +393,7 @@
       :missiond-role "registered 12900kf Rust video transcode runner; managed by xjp-deploy-agent HostedServiceManager and communicates with xjp-video-service through the self-built proxy deployment program"
       :surface project-registry)
     (project :id payments
-      :aliases ["XJP Payments" "xjp-payments" "pay.xiaojinpro.com" "微信支付" "统一收银台"]
+      :aliases ["XJP Payments" "xjp-payments" "pay.xiaojins.com" "pay.xiaojinpro.com" "微信支付" "统一收银台"]
       :kind rust-workspace-service
       :management-domain xiaojinpro-core-backend
       :runtime-layer support-backend
@@ -379,7 +403,7 @@
       :status v3-runtime-ssot
       :surface project-registry)
     (project :id asr
-      :aliases ["ASR" "XJP ASR" speech-recognition subtitle-service asr-web "语音转写" "speechscribe.top" "asr.xiaojinpro.top"]
+      :aliases ["ASR" "XJP ASR" speech-recognition subtitle-service asr-web "语音转写" "speechscribe.top" "asr.xiaojins.com" "asr.xiaojinpro.top"]
       :kind rust-nextjs-service
       :management-domain product-service-layer
       :runtime-layer product-fullstack
@@ -390,7 +414,7 @@
       :operations ".missiond/operations/asr-operations-blueprint.lisp"
       :status project-ssot-owned
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered XJP ASR / SpeechScribe product; independent Next.js global frontend at speechscribe.top with asr.xiaojinpro.top as compatibility alias, Rust ASR backend routed through auth.xiaojinpro.com/asr, XJP Auth + Stripe/Payments credits, and deploy-center/GCP runtime boundaries"
+      :missiond-role "registered XJP ASR / SpeechScribe product; independent Next.js global frontend at speechscribe.top with asr.xiaojins.com as the canonical GCP backend and asr.xiaojinpro.top plus auth.xiaojinpro.com/asr as compatibility aliases, XJP Auth + Stripe/Payments credits, and deploy-center/GCP runtime boundaries"
       :surface project-registry)
     (project :id timeline
       :kind rust-service
@@ -460,7 +484,7 @@
       :status project-ssot-owned
       :lifecycle external-infra-runtime
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered external infra runtime; AES-256-GCM credential vault (frozen LTS) consumed by auth/deploy-center/* via xjp-config HybridSecretProvider; production endpoint ss.xiaojinpro.top is now on the GCP xjp-backend VM with Caddy proxy to the local secret-store container"
+      :missiond-role "registered external infra runtime; AES-256-GCM credential vault (frozen LTS) consumed by auth/deploy-center/* via xjp-config HybridSecretProvider; production endpoint ss.xiaojins.com is now on the GCP xjp-backend VM with Caddy proxy to the local secret-store container; ss.xiaojinpro.top remains a compatibility alias"
       :surface project-registry)
     (project :id xiaojin-blog
       :kind nextjs-app
@@ -594,7 +618,7 @@
       :missiond-role "registered independent app; Daily Spark production runs on Vercel frontend spark.xiaojinpro.top plus GCP VM self-hosted Supabase-compatible backend/database at api.spark.xiaojinpro.top"
       :surface project-registry)
     (project :id good-things-daily
-      :aliases ["开门见喜" "世界好事日报" "Good Things Daily" goodnews "goodnews.xiaojinpro.top" "goodnews-api.xiaojinpro.top"]
+      :aliases ["开门见喜" "世界好事日报" "Good Things Daily" goodnews "goodnews.xiaojinpro.top" "goodnews-api.xiaojins.com" "goodnews-api.xiaojinpro.top"]
       :kind rust-nextjs-service
       :management-domain product-service-layer
       :runtime-layer product-fullstack
@@ -605,5 +629,5 @@
       :operations ".missiond/operations/good-things-daily-operations-blueprint.lisp"
       :status incubating-project
       :checks ["bash .missiond/check.sh"]
-      :missiond-role "registered independent app; 开门见喜 public evidence-backed good news content feed with RSS/GDELT ingest, xjp-router claude-opus-4-6 generated titles and presentation cards, anonymous feedback, Vercel frontend at goodnews.xiaojinpro.top, privatecloud-built Rust API image deployed to GCP VM at goodnews-api.xiaojinpro.top, and xjp-pg-prod Postgres"
+      :missiond-role "registered independent app; 开门见喜 public evidence-backed good news content feed with RSS/GDELT ingest, xjp-router claude-opus-4-6 generated titles and presentation cards, anonymous feedback, Vercel frontend at goodnews.xiaojinpro.top, privatecloud-built Rust API image deployed to GCP VM at goodnews-api.xiaojins.com, and xjp-pg-prod Postgres"
       :surface project-registry))

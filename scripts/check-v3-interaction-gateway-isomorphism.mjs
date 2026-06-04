@@ -87,6 +87,9 @@ requireIncludes('requestSurfaces', [
   'mission_interaction',
   'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
   'INTERACTION_AUTH_UNAVAILABLE',
+  'MISSIOND_SERVICE_TOKEN_UNCONFIGURED',
+  'MISSIOND_ALLOW_UNCONFIGURED_API_TOKEN',
+  'missiond.jarvis-auth-secret-readiness.v1',
   'missiond.jarvis-smoke/INTERACTION_SERVICE_TOKEN',
   'missiond.openai-artifact-projection.v1',
   'missiond.jarvis-pending-confirmation.v1',
@@ -211,6 +214,11 @@ requireIncludes('server', [
   'resolve_interaction_auth',
   'MISSIOND_INTERACTION_AUTH_USERINFO_URL',
   'INTERACTION_AUTH_UNAVAILABLE',
+  'validate_missiond_legacy_chat_bearer',
+  'MISSIOND_SERVICE_TOKEN_UNCONFIGURED',
+  'MISSIOND_ALLOW_UNCONFIGURED_API_TOKEN',
+  'jarvis_auth_secret_readiness',
+  'missiond.jarvis-auth-secret-readiness.v1',
   'auth-userinfo',
   'permission_resolved',
   'intent_draft',
@@ -302,6 +310,8 @@ requireIncludes('server', [
   'maybe_auto_heal_jarvis_slot',
   'JARVIS_SLOT_MANAGER_UNAVAILABLE',
   'JARVIS_SLOT_UNAVAILABLE',
+  'auth_secret_readiness',
+  'secret_store_strict_mode_enabled',
 ]);
 
 requireIncludes('jarvisChainSmoke', [

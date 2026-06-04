@@ -65,6 +65,13 @@
 #                               switches launchd to a release-local compiled
 #                               dir under the candidate release so failed or
 #                               stale deploys cannot poison the running ABI.
+#   MISSIOND_DEPLOY_CENTER_BASE_URL  Deploy Center read API base URL for
+#                               deployment channel observation. Default:
+#                               https://deploy.xiaojins.com/api/deploy
+#   MISSIOND_DEPLOY_CENTER_READ_TOKEN_REF  Secret Store reference for the
+#                               read token when the token is not injected.
+#   MISSIOND_DEPLOY_CENTER_READ_TOKEN / MISSIOND_DEPLOY_CENTER_TOKEN
+#                               optional read token injected into launchd.
 #   MISSIOND_CLEAN_REPO_RUNTIME_CACHE  after a successful deploy, prune repo
 #                               .missiond/v3/runtime cache when external
 #                               runtime dirs are verified, default: 1
@@ -714,6 +721,10 @@ ensure_launchd_runtime_root() {
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_SOCKET_PATH" "$SOCK_PATH"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_RUNTIME_DIR" "$RUNTIME_DIR"
   plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_COMPILED_RUNTIME_DIR" "$COMPILED_RUNTIME_DIR"
+  plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_DEPLOY_CENTER_BASE_URL" "${MISSIOND_DEPLOY_CENTER_BASE_URL:-https://deploy.xiaojins.com/api/deploy}"
+  plist_set_or_add_env_string "$LAUNCHD_PLIST" "MISSIOND_DEPLOY_CENTER_READ_TOKEN_REF" "${MISSIOND_DEPLOY_CENTER_READ_TOKEN_REF:-secret-store://missiond/production/MISSIOND_DEPLOY_CENTER_READ_TOKEN}"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_DEPLOY_CENTER_READ_TOKEN"
+  plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_DEPLOY_CENTER_TOKEN"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PG_MAX_CONNECTIONS"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PG_MIN_CONNECTIONS"
   plist_set_env_from_current_env "$LAUNCHD_PLIST" "MISSIOND_PG_ACQUIRE_TIMEOUT_SECS"

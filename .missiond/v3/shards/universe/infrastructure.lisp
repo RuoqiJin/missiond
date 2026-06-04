@@ -49,7 +49,7 @@
     :egress [deploy-context-pack runtime-fact-drift deploy-ops-BoardTask]
     :surfaces [".missiond/workflows/m6-deployment-rollout.lisp" ".missiond/workflows/pcea-deployment-rollout.lisp" "crates/missiond-daemon/src/bus/v2_subscribers.rs" "scripts/check-v3-workflow-isomorphism.mjs"]
     :rule "Every deployment task must perform deployment-evidence-preflight before action. Skills are evidence and operational guidance; deploy-center provenance is deployment authority; MissionD orchestrates and records the decision path."
-    :dependency-rule "Secret Store is the credential authority for deploy-center executor claim auth. Since 2026-05-11 its production runtime is ss.xiaojinpro.top on the GCP xjp-backend VM, not ClawCloud. If Secret Store is unreachable, classify deploy-blocked-by-secret-store against gcp-runtime/Caddy/docker/xjp-postgres health and surface namespace/key refs only; never expose credential values.")
+    :dependency-rule "Secret Store is the credential authority for deploy-center executor claim auth. Since 2026-06-04 its canonical production runtime is ss.xiaojins.com on the GCP xjp-backend VM, not ClawCloud; ss.xiaojinpro.top remains a compatibility alias. If Secret Store is unreachable, classify deploy-blocked-by-secret-store against gcp-runtime/Caddy/docker/xjp-postgres health and surface namespace/key refs only; never expose credential values.")
 
 (infrastructure-universe
     :schema "missiond.infrastructure-universe.v1"
@@ -148,7 +148,7 @@
       :owner_authority deploy-center
       :capabilities [auth router deploy-center missiond-jarvis-edge secret-store credential-vault caddy-reverse-proxy production-runtime google-cloud-storage global-object-store]
       :service_ids [auth router deploy-center missiond-jarvis-edge secret-store global-object-store]
-      :public_domain "ss.xiaojinpro.top"
+      :public_domain "ss.xiaojins.com"
       :public_ip "34.104.147.118"
       :credential_refs [secret-store://cloud/gcp/deploy-center-runtime secret-store://deploy-agent/gcp/DEPLOY_AGENT_API_KEY secret-store://secret-store/cloudflare/CLOUDFLARE_DNS_TOKEN]
       :diagnostic_profiles [deploy_provenance_snapshot container_inventory dependency_manifest_scan supply_chain_ioc_scan]

@@ -1484,6 +1484,42 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn missiond_production_env() -> bool {
+    matches!(
+        std::env::var("XJP_ENV")
+            .or_else(|_| std::env::var("APP_ENV"))
+            .or_else(|_| std::env::var("RUST_ENV"))
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "prod" | "production"
+    )
+}
+
+fn secret_store_strict_mode_enabled() -> bool {
+    std::env::var("SECRET_STORE_STRICT")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or_else(missiond_production_env)
+}
+
+fn missiond_unconfigured_api_token_allowed() -> bool {
+    env_flag("MISSIOND_ALLOW_UNCONFIGURED_API_TOKEN") && !missiond_production_env()
+}
+
+fn missiond_service_token_configured() -> bool {
+    ["MISSIOND_INTERACTION_SERVICE_TOKEN", "MISSIOND_API_TOKEN"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .any(|value| !value.trim().is_empty())
+}
+
 fn interaction_token(envelope: &InteractionEnvelope, headers: &str) -> Option<String> {
     envelope
         .auth_token
@@ -1668,6 +1704,55 @@ fn interaction_service_token_matches(token: &str) -> bool {
         .filter_map(|name| std::env::var(name).ok())
         .map(|value| value.trim().to_string())
         .any(|expected| !expected.is_empty() && expected == token)
+}
+
+fn validate_missiond_legacy_chat_bearer(
+    token: Option<&str>,
+) -> Result<(), (u16, &'static str, serde_json::Value)> {
+    let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err((
+            401,
+            "Unauthorized",
+            serde_json::json!({
+                "error": {
+                    "code": "MISSIOND_AUTH_REQUIRED",
+                    "message": "Missing Authorization header"
+                }
+            }),
+        ));
+    };
+
+    if interaction_service_token_matches(token) {
+        return Ok(());
+    }
+
+    if missiond_service_token_configured() {
+        return Err((
+            401,
+            "Unauthorized",
+            serde_json::json!({
+                "error": {
+                    "code": "MISSIOND_AUTH_INVALID",
+                    "message": "Invalid MissionD service token"
+                }
+            }),
+        ));
+    }
+
+    if missiond_unconfigured_api_token_allowed() {
+        return Ok(());
+    }
+
+    Err((
+        503,
+        "Service Unavailable",
+        serde_json::json!({
+            "error": {
+                "code": "MISSIOND_SERVICE_TOKEN_UNCONFIGURED",
+                "message": "MissionD service token is not configured; refusing arbitrary bearer tokens"
+            }
+        }),
+    ))
 }
 
 fn interaction_default_capabilities(
@@ -3360,7 +3445,7 @@ impl PTYWebSocketServer {
             "schema": "missiond.jarvis-runtime-topology.v1",
             "service_id": "missiond-jarvis-edge",
             "edge_node": "gcp-caddy-edge",
-            "edge_domain": "jarvis.xiaojinpro.top",
+            "edge_domain": "jarvis.xiaojins.com",
             "edge_public_ip": "34.104.147.118",
             "edge_proxy": "caddy",
             "origin_node": "bwg-tunnel",
@@ -3904,6 +3989,95 @@ impl PTYWebSocketServer {
             .unwrap_or_default()
     }
 
+    fn jarvis_auth_secret_readiness() -> serde_json::Value {
+        let auth_issuer = std::env::var("MISSIOND_INTERACTION_AUTH_ISSUER")
+            .or_else(|_| std::env::var("AUTH_ISSUER"))
+            .unwrap_or_else(|_| "https://auth.xiaojinpro.com".to_string());
+        let auth_userinfo_url = std::env::var("MISSIOND_INTERACTION_AUTH_USERINFO_URL")
+            .unwrap_or_else(|_| "https://auth.xiaojinpro.com/oidc/userinfo".to_string());
+        let auth_jwks_url = std::env::var("MISSIOND_AUTH_JWKS_URL")
+            .or_else(|_| std::env::var("AUTH_JWKS_URL"))
+            .unwrap_or_else(|_| format!("{}/.well-known/jwks.json", auth_issuer.trim_end_matches('/')));
+        let service_token_configured = missiond_service_token_configured();
+        let unconfigured_api_token_allowed = missiond_unconfigured_api_token_allowed();
+        let strict_secrets = secret_store_strict_mode_enabled();
+        let legacy_env_fallback_allowed = !strict_secrets;
+        let auth_skip_introspection = env_flag("MISSIOND_INTERACTION_AUTH_SKIP_INTROSPECTION");
+        let critical_auth = missiond_production_env() || strict_secrets;
+        let service_token_mode = if service_token_configured {
+            "configured"
+        } else if unconfigured_api_token_allowed {
+            "compat_unconfigured_allowed_nonprod"
+        } else {
+            "fail_closed_unconfigured"
+        };
+
+        serde_json::json!({
+            "schema": "missiond.jarvis-auth-secret-readiness.v1",
+            "auth": {
+                "issuer": auth_issuer,
+                "jwks_url": auth_jwks_url,
+                "userinfo_url": auth_userinfo_url,
+                "interaction_auth_mode": if auth_skip_introspection { "dev_skip_introspection" } else { "auth_userinfo" },
+                "service_token_mode": service_token_mode,
+                "service_token_configured": service_token_configured,
+                "unconfigured_api_token_allowed": unconfigured_api_token_allowed,
+            },
+            "secret_store": {
+                "strict": strict_secrets,
+                "legacy_env_fallback_allowed": legacy_env_fallback_allowed,
+                "policy": if strict_secrets { "strict_fail_closed" } else { "compat_warn" },
+            },
+            "media_upload": {
+                "user_flow": "presign_object_upload_complete",
+                "jarvis_payload": "image_service_ref_or_artifact_id_only",
+                "internal_import_auth": "auth_service_jwt",
+                "legacy_internal_token_policy": if strict_secrets { "disabled_in_strict" } else { "compat_migration" },
+            },
+            "checks": [
+                {
+                    "id": "auth-issuer-jwks",
+                    "label": "Auth issuer and JWKS configured for MissionD/Jarvis",
+                    "ok": !auth_issuer.trim().is_empty() && !auth_jwks_url.trim().is_empty(),
+                    "critical": critical_auth,
+                    "status": if !auth_issuer.trim().is_empty() && !auth_jwks_url.trim().is_empty() { "configured" } else { "missing" },
+                    "issuer": auth_issuer,
+                    "jwks_url": auth_jwks_url,
+                },
+                {
+                    "id": "missiond-service-token",
+                    "label": "MissionD interaction service token policy",
+                    "ok": service_token_configured || unconfigured_api_token_allowed,
+                    "critical": critical_auth,
+                    "status": service_token_mode,
+                    "reason": if service_token_configured {
+                        "MISSIOND_INTERACTION_SERVICE_TOKEN or MISSIOND_API_TOKEN is configured."
+                    } else if unconfigured_api_token_allowed {
+                        "Explicit non-production compatibility switch allows unconfigured API token."
+                    } else {
+                        "MissionD refuses arbitrary bearer tokens when no service token is configured."
+                    },
+                },
+                {
+                    "id": "secret-store-strictness",
+                    "label": "Secret Store fallback policy",
+                    "ok": true,
+                    "critical": false,
+                    "status": if strict_secrets { "strict_fail_closed" } else { "compat_warn" },
+                    "legacy_env_fallback_allowed": legacy_env_fallback_allowed,
+                },
+                {
+                    "id": "media-upload-auth-contract",
+                    "label": "Jarvis media upload auth contract",
+                    "ok": true,
+                    "critical": false,
+                    "status": "auth_service_jwt_import",
+                    "rule": "iOS uploads media through presign/complete; Jarvis receives only image_service_ref/artifact_id and internal import uses Auth service JWT.",
+                }
+            ]
+        })
+    }
+
     fn expand_home_path(path: &str) -> Option<std::path::PathBuf> {
         let trimmed = path.trim();
         if trimmed.is_empty() {
@@ -3946,6 +4120,7 @@ impl PTYWebSocketServer {
         let runtime_topology = Self::jarvis_runtime_topology_snapshot(&compiled_runtime_dir);
         let compiled_abi_freshness =
             Self::compiled_abi_freshness_check_in_dir(&compiled_runtime_dir);
+        let auth_secret_readiness = Self::jarvis_auth_secret_readiness();
         let provider_box_slots = Self::jarvis_provider_box_slots_snapshot(
             &pty_manager,
             &default_slot,
@@ -4016,6 +4191,12 @@ impl PTYWebSocketServer {
         ];
         checks.extend(Self::jarvis_topology_checks(&runtime_topology).await);
         checks.extend(Self::jarvis_provider_slot_checks(&provider_box_slots));
+        if let Some(auth_checks) = auth_secret_readiness
+            .get("checks")
+            .and_then(|value| value.as_array())
+        {
+            checks.extend(auth_checks.iter().cloned());
+        }
 
         let provider_slot_failures = checks
             .iter()
@@ -4092,6 +4273,7 @@ impl PTYWebSocketServer {
             "chat_endpoint": "/v1/chat/completions",
             "runtime_topology": runtime_topology,
             "route_graph": route_graph,
+            "auth_secret_readiness": auth_secret_readiness,
             "provider_box_slots": provider_box_slots,
             "readiness": readiness,
             "release": Self::release_snapshot(),
@@ -12394,24 +12576,11 @@ JSON 字段必须是：\n\
             }
         });
 
-        // Validate Bearer token: require match against MISSIOND_API_TOKEN if set.
-        // If env var is unset, accept any non-empty token (backward compatible).
-        match &auth_token {
-            None => {
-                let err = serde_json::json!({"error": {"message": "Missing Authorization header"}});
-                Self::send_http_error(&mut stream, 401, "Unauthorized", &err.to_string()).await?;
-                return Ok(());
-            }
-            Some(token) => {
-                if let Ok(expected) = std::env::var("MISSIOND_API_TOKEN") {
-                    if token != &expected {
-                        let err = serde_json::json!({"error": {"message": "Invalid API token"}});
-                        Self::send_http_error(&mut stream, 401, "Unauthorized", &err.to_string())
-                            .await?;
-                        return Ok(());
-                    }
-                }
-            }
+        if let Err((status, reason, err)) =
+            validate_missiond_legacy_chat_bearer(auth_token.as_deref())
+        {
+            Self::send_http_error(&mut stream, status, reason, &err.to_string()).await?;
+            return Ok(());
         }
 
         // Parse request body

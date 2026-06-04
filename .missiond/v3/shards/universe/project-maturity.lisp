@@ -43,6 +43,8 @@
     (maturity :id xjp-mail-service :current M5 :target M6 :gap [google-workspace-provider-mutation gmail-pubsub-e2e service-mailbox-live-smoke final-m6-report])
     (maturity :id xjp-legal-service :current M5 :target M6 :gap [live-domain-readiness legal-ledger-runtime-smoke support-mailbox-readiness final-m6-report])
     (maturity :id xjp-invoice-service :current M5 :target M6 :gap [live-domain-readiness invoice-ledger-runtime-smoke payments-invoice-lock-smoke production-secret-binding final-m6-report])
+    (maturity :id code-center :current M5 :target M6 :gap [deployment-closure-evidence domain-readiness code-browser-runtime-smoke final-m6-report])
+    (maturity :id skill-store :current M5 :target M6 :gap [legacy-upstream-health-smoke gateway-runtime-smoke domain-readiness final-m6-report])
     (maturity :id xjp-mcp :current M5 :target M6 :gap [tool-policy-ledger mcp-permission-regressions final-m6-report])
     (maturity :id xjp-cli :current M5 :target M6 :gap [command-policy-ledger mcp-parity-regressions final-m6-report])
     (maturity :id deploy-agent :current M6 :target M6 :gap [])

@@ -2191,13 +2191,13 @@ fn append_skill_derived_infra_servers(servers: &mut Vec<missiond_core::InfraServ
                 "gcp".to_string(),
                 "production".to_string(),
                 "verified-2026-05-11".to_string(),
-                "ss.xiaojinpro.top".to_string(),
+                "ss.xiaojins.com".to_string(),
             ],
             description: Some(
-                "Universe summary for GCP-hosted production services. Secret Store moved here on 2026-05-11 (ss.xiaojinpro.top -> 34.104.147.118, Caddy to local secret-store container, DB in xjp-postgres/secret_store). deploy-center provenance remains the runtime authority; MissionD keeps only the identity summary."
+                "Universe summary for GCP-hosted production services. Secret Store canonical host is ss.xiaojins.com -> 34.104.147.118, Caddy to local secret-store container, DB in xjp-postgres/secret_store; ss.xiaojinpro.top remains a compatibility alias. deploy-center provenance remains the runtime authority; MissionD keeps only the identity summary."
                     .to_string(),
             ),
-            health_endpoint: Some("https://ss.xiaojinpro.top/livez".to_string()),
+            health_endpoint: Some("https://ss.xiaojins.com/livez".to_string()),
         },
     );
 }

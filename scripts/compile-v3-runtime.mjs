@@ -94,6 +94,7 @@ function main() {
     }
     if (target.id === 'universe') {
       compiled = augmentProjectUniverseDeploymentChannels(compiled);
+      compiled = augmentProjectUniverseDomainProxyLifecycle(compiled);
       compiled = augmentProjectUniverseDomainManagement(compiled);
     }
     if (target.id === 'runtime-config') {
@@ -432,6 +433,96 @@ function normalizeGateChecks(rows) {
     .filter((entry) => entry.id && entry.argv.length > 0);
 }
 
+function augmentProjectUniverseDomainProxyLifecycle(compiled) {
+  const payload = compiled?.payload ?? {};
+  const services = Array.isArray(payload.services) ? payload.services : [];
+  const metadata = readServiceRuntimeMetadataMap();
+  const diagnostics = [];
+  for (const service of services) {
+    const serviceId = stringOrNull(service?.id);
+    if (!serviceId) continue;
+    const meta = metadata.get(serviceId) ?? {};
+    if (meta.compat_domains?.length) service.compat_domains = meta.compat_domains;
+    if (meta.domain_exception_reason) {
+      service.domain_exception_reason = meta.domain_exception_reason;
+    }
+    const proxy = service.proxy ?? meta.proxy ?? null;
+    const canonicalDomain = meta.canonical_domain
+      ?? normalizeManagedDomain(proxy?.domain)
+      ?? firstOwnedDomain(service.domains)
+      ?? firstOwnedDomain(domainsFromText([
+        service.public_base_url,
+        service.api_base_url,
+        service.frontend_url,
+      ].filter(Boolean).join(' ')));
+    if (canonicalDomain) service.canonical_domain = canonicalDomain;
+    const health = stringArray(service.health);
+    service.health_standard = {
+      live: health.includes('/health/live'),
+      ready: health.includes('/health/ready'),
+      declared_paths: health,
+    };
+    service.domain_binding_lifecycle = compactObject({
+      state_machine: ['planned', 'dns_ready', 'proxy_ready', 'smoke_ready', 'active'],
+      failure_state: 'blocked',
+      canonical_domain: canonicalDomain,
+      compat_domains: meta.compat_domains ?? [],
+      active_requires: ['dns_ready', 'proxy_ready', 'smoke_ready'],
+      source_ref: `.missiond/v3/shards/universe/service-runtime.lisp#service:${serviceId}`,
+    });
+    if (proxy && canonicalDomain) {
+      service.domain_proxy_intent = compactObject({
+        service_id: serviceId,
+        project_id: service.project ?? serviceId,
+        domain: canonicalDomain,
+        upstream: proxy.upstream,
+        routes: proxy.routes ?? [],
+        kind: proxy.kind ?? 'caddy',
+        health,
+        smoke_probes: health.filter((path) => path.startsWith('/health')),
+        lifecycle: service.domain_binding_lifecycle,
+      });
+    }
+    if (serviceId === 'auth') {
+      if (canonicalDomain !== 'auth.xiaojinpro.com') {
+        diagnostics.push({
+          kind: 'auth_canonical_domain_invalid',
+          service_id: serviceId,
+          expected: 'auth.xiaojinpro.com',
+          actual: canonicalDomain,
+        });
+      }
+      if (stringArray(service.domains).includes('auth.xiaojins.com')) {
+        diagnostics.push({
+          kind: 'auth_xiaojins_domain_forbidden',
+          service_id: serviceId,
+          domain: 'auth.xiaojins.com',
+        });
+      }
+      if (!service.domain_exception_reason) {
+        diagnostics.push({
+          kind: 'auth_domain_exception_reason_missing',
+          service_id: serviceId,
+        });
+      }
+    } else if (service.environment === 'production' && proxy?.kind === 'caddy') {
+      if (!canonicalDomain) {
+        diagnostics.push({ kind: 'canonical_domain_missing', service_id: serviceId });
+      }
+      if (!proxy.upstream) {
+        diagnostics.push({ kind: 'proxy_upstream_missing', service_id: serviceId });
+      }
+    }
+  }
+  payload.domain_proxy_diagnostics = diagnostics;
+  payload.domain_proxy_summary = {
+    services_with_canonical_domain: services.filter((service) => service.canonical_domain).length,
+    services_with_proxy_intent: services.filter((service) => service.domain_proxy_intent).length,
+    diagnostics: diagnostics.length,
+  };
+  return compiled;
+}
+
 function augmentProjectUniverseDomainManagement(compiled) {
   const payload = compiled?.payload ?? {};
   const config = readDomainControlPlaneConfig();
@@ -474,6 +565,8 @@ function augmentProjectUniverseDomainManagement(compiled) {
         owner_service_id: serviceId,
         owner_project_id: projectId,
         source_kind: 'service-runtime-domains',
+        proxy_intent: service?.domain_proxy_intent,
+        smoke_probes: service?.domain_proxy_intent?.smoke_probes,
       });
     }
     for (const domain of domainsFromText([
@@ -486,6 +579,8 @@ function augmentProjectUniverseDomainManagement(compiled) {
         owner_service_id: serviceId,
         owner_project_id: projectId,
         source_kind: 'service-runtime-url',
+        proxy_intent: service?.domain_proxy_intent,
+        smoke_probes: service?.domain_proxy_intent?.smoke_probes,
       });
     }
   }
@@ -567,6 +662,8 @@ function mergeDomainManagementRow(current, patch) {
       ...arrayOrEmpty(patch.declared_records),
     ];
   }
+  if (patch.proxy_intent && !next.proxy_intent) next.proxy_intent = patch.proxy_intent;
+  if (patch.smoke_probes && !next.smoke_probes) next.smoke_probes = patch.smoke_probes;
   return next;
 }
 
@@ -721,6 +818,14 @@ function zoneForDomain(domain, zones) {
   return zones
     .filter((zone) => domain === zone || domain.endsWith(`.${zone}`))
     .sort((a, b) => b.length - a.length)[0] ?? null;
+}
+
+function firstOwnedDomain(domains) {
+  return stringArray(domains)
+    .map(normalizeManagedDomain)
+    .find((domain) => domain?.endsWith('.xiaojins.com') || domain === 'xiaojins.com')
+    ?? stringArray(domains).map(normalizeManagedDomain).find(Boolean)
+    ?? null;
 }
 
 function keywordListValue(text, key) {
@@ -1329,6 +1434,34 @@ function readServiceDeploymentChannelMap() {
   return map;
 }
 
+function readServiceRuntimeMetadataMap() {
+  const file = '.missiond/v3/shards/universe/service-runtime.lisp';
+  const map = new Map();
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return map;
+  }
+  for (const { serviceId, body } of extractServiceRuntimeForms(text)) {
+    const proxy = parseKeywordForm(body, 'proxy');
+    map.set(serviceId, compactObject({
+      canonical_domain: normalizeManagedDomain(
+        keywordValue(body, 'canonical-domain')
+          ?? keywordValue(body, 'canonical_domain'),
+      ),
+      compat_domains: keywordListValue(body, 'compat-domains')
+        .concat(keywordListValue(body, 'compat_domains'))
+        .map(normalizeManagedDomain)
+        .filter(Boolean),
+      domain_exception_reason: keywordValue(body, 'domain-exception-reason')
+        ?? keywordValue(body, 'domain_exception_reason'),
+      proxy: proxy ? normalizeProxyForm(proxy) : null,
+    }));
+  }
+  return map;
+}
+
 function extractServiceRuntimeForms(text) {
   const forms = [];
   let cursor = 0;
@@ -1391,6 +1524,9 @@ function normalizeProxyForm(form) {
     domain: keywordValue(form, 'domain'),
     upstream: keywordValue(form, 'upstream'),
     routes: keywordListValue(form, 'routes'),
+    compat_domain: keywordValue(form, 'compat-domain') ?? keywordValue(form, 'compat_domain'),
+    compat_routes: keywordListValue(form, 'compat-routes').concat(keywordListValue(form, 'compat_routes')),
+    file: keywordValue(form, 'file'),
     sse_no_buffer: boolOrNull(keywordValue(form, 'sse-no-buffer') ?? keywordValue(form, 'sse_no_buffer')),
     flush_interval: keywordValue(form, 'flush-interval') ?? keywordValue(form, 'flush_interval'),
     read_timeout: keywordValue(form, 'read-timeout') ?? keywordValue(form, 'read_timeout'),

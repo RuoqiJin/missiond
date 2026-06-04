@@ -10,6 +10,10 @@ use crate::context::v3_blueprint_runtime::{
     load_compiled_project_universe, CompiledServiceRuntimeEntry,
 };
 
+const DEFAULT_DEPLOY_CENTER_BASE_URL: &str = "https://deploy.xiaojins.com/api/deploy";
+const DEFAULT_DEPLOY_CENTER_READ_TOKEN_REF: &str =
+    "secret-store://missiond/production/MISSIOND_DEPLOY_CENTER_READ_TOKEN";
+
 #[cfg(test)]
 use crate::context::v3_blueprint_runtime::CompiledServiceSupportCatalog;
 
@@ -187,40 +191,14 @@ async fn observe_deploy_center(channels: &[Value], include_observed: bool) -> Ve
             })
             .collect();
     }
-    let Some(base_url) = std::env::var("MISSIOND_DEPLOY_CENTER_BASE_URL")
+    let base_url = std::env::var("MISSIOND_DEPLOY_CENTER_BASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
-    else {
-        return slug_executors
-            .into_iter()
-            .map(|(slug, executors)| {
-                json!({
-                    "deploy_center_slug": slug,
-                    "status": "unavailable",
-                    "reason": "MISSIOND_DEPLOY_CENTER_BASE_URL not configured",
-                    "executor_refs": executors.into_iter().collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-    };
+        .unwrap_or_else(|| DEFAULT_DEPLOY_CENTER_BASE_URL.to_string());
     let token = std::env::var("MISSIOND_DEPLOY_CENTER_READ_TOKEN")
         .or_else(|_| std::env::var("MISSIOND_DEPLOY_CENTER_TOKEN"))
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let Some(token) = token else {
-        return slug_executors
-            .into_iter()
-            .map(|(slug, executors)| {
-                json!({
-                    "deploy_center_slug": slug,
-                    "status": "unavailable",
-                    "reason": "read token not configured",
-                    "token_ref": std::env::var("MISSIOND_DEPLOY_CENTER_READ_TOKEN_REF").ok(),
-                    "executor_refs": executors.into_iter().collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build();
@@ -238,6 +216,38 @@ async fn observe_deploy_center(channels: &[Value], include_observed: bool) -> Ve
             .collect();
     };
     let base_url = base_url.trim_end_matches('/');
+    let Some(token) = token else {
+        let health_url = format!("{base_url}/health");
+        let base_status = fetch_status_without_token(&client, &health_url).await;
+        let token_ref = std::env::var("MISSIOND_DEPLOY_CENTER_READ_TOKEN_REF")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_DEPLOY_CENTER_READ_TOKEN_REF.to_string());
+        let mut rows = Vec::new();
+        for (slug, executors) in slug_executors {
+            let provenance_url = format!("{base_url}/provenance/{slug}");
+            let provenance_status = fetch_status_without_token(&client, &provenance_url).await;
+            rows.push(
+                json!({
+                    "deploy_center_slug": slug,
+                    "status": if provenance_status == "ok" {
+                        "observed_public_provenance"
+                    } else if base_status == "ok" {
+                        "base_reachable_token_missing"
+                    } else {
+                        "unavailable"
+                    },
+                    "reason": "read token not configured; public provenance fallback used",
+                    "base_url": base_url,
+                    "base_health": base_status,
+                    "provenance": provenance_status,
+                    "token_ref": token_ref,
+                    "executor_refs": executors.into_iter().collect::<Vec<_>>(),
+                }),
+            );
+        }
+        return rows;
+    };
     let mut rows = Vec::new();
     for (slug, executors) in slug_executors {
         let project_url = format!("{base_url}/projects/{slug}");
@@ -267,6 +277,15 @@ async fn observe_deploy_center(channels: &[Value], include_observed: bool) -> Ve
 
 async fn fetch_status(client: &reqwest::Client, url: &str, token: &str) -> &'static str {
     match client.get(url).bearer_auth(token).send().await {
+        Ok(response) if response.status().is_success() => "ok",
+        Ok(response) if response.status().as_u16() == 404 => "not_found",
+        Ok(_) => "error",
+        Err(_) => "unavailable",
+    }
+}
+
+async fn fetch_status_without_token(client: &reqwest::Client, url: &str) -> &'static str {
+    match client.get(url).send().await {
         Ok(response) if response.status().is_success() => "ok",
         Ok(response) if response.status().as_u16() == 404 => "not_found",
         Ok(_) => "error",
@@ -569,10 +588,10 @@ mod tests {
             frontend: None,
             operations: None,
             environment: Some("production".to_string()),
-            public_base_url: None,
+            public_base_url: Some("https://pay.xiaojins.com".to_string()),
             frontend_url: None,
-            api_base_url: Some("https://auth.xiaojinpro.com/payments".to_string()),
-            domains: vec!["auth.xiaojinpro.com".to_string()],
+            api_base_url: Some("https://pay.xiaojins.com/payments".to_string()),
+            domains: vec!["pay.xiaojins.com".to_string()],
             health: vec!["/payments/health/ready".to_string()],
             dependencies: Vec::new(),
             ops_capability: Some("deploy-ops".to_string()),
@@ -584,10 +603,10 @@ mod tests {
             support_catalog: Some(CompiledServiceSupportCatalog {
                 service_id: Some("payments".to_string()),
                 project_id: Some("payments".to_string()),
-                domains: vec!["auth.xiaojinpro.com".to_string()],
-                public_base_url: None,
+                domains: vec!["pay.xiaojins.com".to_string()],
+                public_base_url: Some("https://pay.xiaojins.com".to_string()),
                 frontend_url: None,
-                api_base_url: Some("https://auth.xiaojinpro.com/payments".to_string()),
+                api_base_url: Some("https://pay.xiaojins.com/payments".to_string()),
                 health: vec!["/payments/health/ready".to_string()],
                 dependencies: Vec::new(),
                 deploy_center_slug: Some("xjp-payments".to_string()),
