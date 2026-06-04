@@ -500,7 +500,7 @@
       :dns-provider cloudflare
       :dns-record (:type A :name "domains.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
       :deployment (:substrate deploy-center :dc_slug "xjp-domain-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-domain-service" :default-port 8097 :authority release-provenance)
-      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/domain/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-domain-service" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/domain/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-domain-service" :artifact-lane cloud-registry-lane :manifest "services/domain/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
       :proxy (:kind caddy :domain "domains.xiaojins.com" :routes ["/health" "/health/*" "/v1/domains" "/v1/domains/*"] :upstream "localhost:8097")
       :ports (:http 8097)
       :health ["/health/live" "/health/ready"]
@@ -703,7 +703,7 @@
       :dns-provider cloudflare
       :dns-record (:type A :name "projects.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
       :deployment (:substrate deploy-center :dc_slug "xjp-project-universe" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-project-universe" :default-port 8101 :host-port 8102 :container-port 8101 :authority release-provenance)
-      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/project-universe/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-project-universe" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/project-universe/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-project-universe" :artifact-lane cloud-registry-lane :manifest "services/project-universe/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
       :proxy (:kind caddy :domain "projects.xiaojins.com" :routes ["/health" "/health/*" "/v1/project-universe" "/v1/project-universe/*"] :upstream "localhost:8102")
       :ports (:http 8101 :host 8102 :container-http 8101)
       :health ["/health/live" "/health/ready" "/v1/project-universe/status"]
