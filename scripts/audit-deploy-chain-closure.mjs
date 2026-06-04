@@ -7,6 +7,7 @@ const DEFAULT_DEPLOY_BASE_URL = process.env.DEPLOY_CENTER_PUBLIC_BASE_URL || 'ht
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEPLOY_CHAIN_AUDIT_TIMEOUT_MS || 8000);
 const PROJECT_UNIVERSE_PATH = '.missiond/v3/runtime/compiled/compiled-project-universe.json';
 const DEFAULT_READ_TOKEN_REF = 'secret-store://missiond/production/MISSIOND_DEPLOY_CENTER_READ_TOKEN';
+const DEFAULT_WRITE_TOKEN_REF = 'deploy/ci_deploy_api_key';
 const MISSIOND_ROOT = '/Users/jinchen/Projects/missiond';
 const DEPLOY_CENTER_REPO_ROOT = '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend';
 const DEPLOY_CENTER_DIRECT_PATHS = [
@@ -131,12 +132,15 @@ function envPresence() {
     MISSIOND_DEPLOY_CENTER_READ_TOKEN_REF: Boolean(process.env.MISSIOND_DEPLOY_CENTER_READ_TOKEN_REF),
     DEPLOY_CENTER_API_KEY_REF: Boolean(process.env.DEPLOY_CENTER_API_KEY_REF),
     DEPLOY_CENTER_ADMIN_TOKEN_REF: Boolean(process.env.DEPLOY_CENTER_ADMIN_TOKEN_REF),
+    SECRET_STORE_API_KEY: Boolean(process.env.SECRET_STORE_API_KEY),
     XJP_API_KEY: Boolean(process.env.XJP_API_KEY),
   };
 }
 
 function credentialRefSummary(env) {
-  const writeRef = process.env.DEPLOY_CENTER_API_KEY_REF || process.env.DEPLOY_CENTER_ADMIN_TOKEN_REF || null;
+  const writeRef = process.env.DEPLOY_CENTER_API_KEY_REF || process.env.DEPLOY_CENTER_ADMIN_TOKEN_REF || DEFAULT_WRITE_TOKEN_REF;
+  const explicitWriteRef = Boolean(process.env.DEPLOY_CENTER_API_KEY_REF || process.env.DEPLOY_CENTER_ADMIN_TOKEN_REF);
+  const secretStoreAccessPresent = env.SECRET_STORE_API_KEY || env.XJP_API_KEY;
   return {
     readToken: {
       env: 'MISSIOND_DEPLOY_CENTER_READ_TOKEN',
@@ -150,11 +154,14 @@ function credentialRefSummary(env) {
       acceptedEnv: ['DEPLOY_CENTER_API_KEY', 'DEPLOY_CENTER_ADMIN_TOKEN'],
       present: env.DEPLOY_CENTER_API_KEY || env.DEPLOY_CENTER_ADMIN_TOKEN,
       refEnv: ['DEPLOY_CENTER_API_KEY_REF', 'DEPLOY_CENTER_ADMIN_TOKEN_REF'],
-      refPresent: Boolean(writeRef),
+      refPresent: explicitWriteRef,
       ref: writeRef,
-      diagnostic: writeRef
+      defaultRefDeclared: true,
+      secretStoreAccessEnv: ['SECRET_STORE_API_KEY', 'XJP_API_KEY'],
+      secretStoreAccessPresent,
+      diagnostic: (env.DEPLOY_CENTER_API_KEY || env.DEPLOY_CENTER_ADMIN_TOKEN)
         ? null
-        : 'write token Secret Store ref is not declared in the current operator environment',
+        : 'write token value is not injected; resolving the Secret Store ref requires valid SECRET_STORE_API_KEY or XJP_API_KEY',
     },
   };
 }
