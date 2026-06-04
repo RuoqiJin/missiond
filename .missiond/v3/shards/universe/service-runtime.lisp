@@ -430,10 +430,10 @@
       :domains ["invoice.xiaojins.com"]
       :dns-provider cloudflare
       :dns-record (:type A :name "invoice.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
-      :deployment (:substrate deploy-center :dc_slug "xjp-invoice-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-invoice-service" :default-port 8100 :authority release-provenance)
+      :deployment (:substrate deploy-center :dc_slug "xjp-invoice-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-invoice-service" :default-port 8101 :container-port 8100 :authority release-provenance)
       :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/invoice/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-invoice-service" :artifact-lane cloud-registry-lane :manifest "services/invoice/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
       :proxy (:kind caddy :domain "invoice.xiaojins.com" :routes ["/health" "/health/*" "/v1/invoices" "/v1/invoices/*"])
-      :ports (:http 8100)
+      :ports (:http 8101 :container-http 8100)
       :health ["/health/live" "/health/ready"]
       :invoice-policy (:partition xjp-global :mode manual-issue-v1 :currency CNY :providers [wechat alipay] :payments-lock-table invoice_order_locks :audit-table invoice_audit_events :red-letter-table invoice_red_letters)
       :dependencies [xjp-auth payments xjp-pg-prod secret-store xjp-domain-service xjp-mail-service deploy-center]
