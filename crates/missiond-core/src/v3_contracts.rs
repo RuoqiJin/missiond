@@ -4,65 +4,65 @@
 // Do not edit by hand.
 
 pub const SCHEMA_VERSION: &str = "missiond.contract-abi.v1";
-pub const SOURCE_HASH: &str = "9bfb73329b80afe5499b2294254dd0a4";
-pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "e6d5dd08c68dedbbf6644d0c7d1d43c0";
-pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "e6d5dd08c68dedbbf6644d0c7d1d43c0";
+pub const SOURCE_HASH: &str = "a1446461a903931c4c799b36e05c2b41";
+pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "5e017104bcd6b34345e086d1227b96c1";
+pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "5e017104bcd6b34345e086d1227b96c1";
 #[rustfmt::skip]
 pub const RUNTIME_DOMAIN_SOURCE_HASHES: &[(&str, &str)] = &[
     (
         "workstation",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "flow",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "compute",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "minimax",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "router",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "cascade",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "project-registry",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "capability-governance",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "memory-kb",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "evidence-lane-policy",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "conversation-ingestion",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "autopilot",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "control-plane-kernel",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
     (
         "learning-engine",
-        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
+        "5e017104bcd6b34345e086d1227b96c1",
     ),
 ];

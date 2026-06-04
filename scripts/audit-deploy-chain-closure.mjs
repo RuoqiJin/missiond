@@ -7,6 +7,15 @@ const DEFAULT_DEPLOY_BASE_URL = process.env.DEPLOY_CENTER_PUBLIC_BASE_URL || 'ht
 const DEFAULT_TIMEOUT_MS = Number(process.env.DEPLOY_CHAIN_AUDIT_TIMEOUT_MS || 8000);
 const PROJECT_UNIVERSE_PATH = '.missiond/v3/runtime/compiled/compiled-project-universe.json';
 const DEFAULT_READ_TOKEN_REF = 'secret-store://missiond/production/MISSIOND_DEPLOY_CENTER_READ_TOKEN';
+const MISSIOND_ROOT = '/Users/jinchen/Projects/missiond';
+const DEPLOY_CENTER_REPO_ROOT = '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend';
+const DEPLOY_CENTER_DIRECT_PATHS = [
+  '.github/workflows/deploy-center.yml',
+  'docker/Dockerfile.deploy-center',
+  'services/deploy-center',
+];
+const DEPLOY_CENTER_CARGO_ROOT_PATHS = ['Cargo.toml', 'Cargo.lock'];
+const DEPLOY_CENTER_CARGO_RELEVANCE_RE = /deploy[-_]center|xjp[-_]deploy[-_]center|services\/deploy-center/i;
 
 const TARGETS = [
   {
@@ -196,6 +205,77 @@ function repoState(cwd, pathspecs = []) {
   };
 }
 
+function diffForPathspecs(cwd, pathspecs, range = null) {
+  const args = ['diff'];
+  if (range) args.push(range);
+  args.push('--', ...pathspecs);
+  return command('git', args, { cwd });
+}
+
+function deployCenterCargoRootRelevance(cwd, upstreamRef) {
+  const dirtyDiff = diffForPathspecs(cwd, DEPLOY_CENTER_CARGO_ROOT_PATHS);
+  const unpushedDiff = upstreamRef
+    ? diffForPathspecs(cwd, DEPLOY_CENTER_CARGO_ROOT_PATHS, `${upstreamRef}..HEAD`)
+    : { ok: false, stdout: '', stderr: '' };
+  const diffText = `${dirtyDiff.stdout}\n${unpushedDiff.stdout}`;
+  const relevant = DEPLOY_CENTER_CARGO_RELEVANCE_RE.test(diffText);
+  return {
+    pathspecs: DEPLOY_CENTER_CARGO_ROOT_PATHS,
+    relevant,
+    reason: relevant
+      ? 'cargo_diff_mentions_deploy_center'
+      : 'cargo_diff_does_not_mention_deploy_center',
+    dirtyDiffChecked: dirtyDiff.ok,
+    unpushedDiffChecked: unpushedDiff.ok,
+  };
+}
+
+function deployCenterRepoState(cwd) {
+  const direct = repoState(cwd, DEPLOY_CENTER_DIRECT_PATHS);
+  if (!direct.exists) return direct;
+
+  const cargo = repoState(cwd, DEPLOY_CENTER_CARGO_ROOT_PATHS);
+  const cargoRelevance = deployCenterCargoRootRelevance(cwd, direct.upstream);
+  const cargoBlocks = cargo.relevantUnpublished === true && cargoRelevance.relevant;
+  const ignoredDirtyLines = cargoBlocks ? [] : cargo.relevantDirtyLines;
+  const ignoredUnpushedLines = cargoBlocks ? [] : cargo.relevantUnpushedLines;
+
+  return {
+    ...direct,
+    relevantPathspecs: [...DEPLOY_CENTER_CARGO_ROOT_PATHS, ...DEPLOY_CENTER_DIRECT_PATHS],
+    relevantDirty: direct.relevantDirty === true || cargoBlocks,
+    relevantAhead: direct.relevantAhead === true || cargoBlocks,
+    relevantUnpublished: direct.relevantUnpublished === true || cargoBlocks,
+    relevantDirtyLines: [
+      ...direct.relevantDirtyLines,
+      ...(cargoBlocks ? cargo.relevantDirtyLines : []),
+    ],
+    relevantUnpushedLines: [
+      ...direct.relevantUnpushedLines,
+      ...(cargoBlocks ? cargo.relevantUnpushedLines : []),
+    ],
+    ignoredDirtyLines,
+    ignoredUnpushedLines,
+    sourceRelevance: {
+      direct: {
+        pathspecs: DEPLOY_CENTER_DIRECT_PATHS,
+        relevantDirty: direct.relevantDirty,
+        relevantAhead: direct.relevantAhead,
+        relevantUnpublished: direct.relevantUnpublished,
+      },
+      cargoRoot: {
+        ...cargoRelevance,
+        relevantDirty: cargo.relevantDirty,
+        relevantAhead: cargo.relevantAhead,
+        relevantUnpublished: cargo.relevantUnpublished,
+        blocksDeployCenterSource: cargoBlocks,
+        dirtyLines: cargo.relevantDirtyLines,
+        unpushedLines: cargo.relevantUnpushedLines,
+      },
+    },
+  };
+}
+
 function controlPlaneCredentialProbeConfig(env) {
   if (env.DEPLOY_CENTER_API_KEY) {
     return {
@@ -261,14 +341,8 @@ async function localSelfUpdatePreflight(opts) {
   const env = envPresence();
   const hasWriteCredential = env.DEPLOY_CENTER_API_KEY || env.DEPLOY_CENTER_ADMIN_TOKEN;
   const credentialProbe = await validateControlPlaneCredential(env, opts);
-  const missiond = repoState('/Users/jinchen/Projects/missiond');
-  const backend = repoState('/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend', [
-    'Cargo.toml',
-    'Cargo.lock',
-    '.github/workflows/deploy-center.yml',
-    'docker/Dockerfile.deploy-center',
-    'services/deploy-center',
-  ]);
+  const missiond = repoState(MISSIOND_ROOT);
+  const backend = deployCenterRepoState(DEPLOY_CENTER_REPO_ROOT);
   const blockers = [];
   if (!hasWriteCredential) blockers.push('deploy_center_write_token_missing');
   else if (!credentialProbe.ok) blockers.push('deploy_center_write_token_invalid');
