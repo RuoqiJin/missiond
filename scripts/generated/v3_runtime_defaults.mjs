@@ -4,7 +4,7 @@
 // Do not edit by hand.
 
 export const SCHEMA_VERSION = "missiond.compiled-runtime-config.v1";
-export const SOURCE_HASH = "d5d70ac2f50853785cdeb94ab074dab0";
+export const SOURCE_HASH = "9bfb73329b80afe5499b2294254dd0a4";
 export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
   "blueprint": ".missiond/v3/missiond-blueprint.lisp",
   "source_units": [
@@ -20,7 +20,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "kind": "missiond-blueprint-shards",
       "included_by": ".missiond/v3/missiond-blueprint.lisp",
       "include_line": 412,
-      "source_hash": "c4f2da90a869c8765a2c29fb0dabfc38"
+      "source_hash": "27dd3a06a859ada8a188d223f07b7d75"
     },
     {
       "file": ".missiond/v3/shards/request-runtime.lisp",
@@ -69,7 +69,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "kind": "deployment-closure-plane",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 49,
-      "source_hash": "6a7562a74ca6f2fb65bc80dc3ba3908b"
+      "source_hash": "ab85668c25f49f232cc8fa2e8a715e01"
     },
     {
       "file": ".missiond/v3/shards/v2-convergence-map.lisp",
@@ -90,7 +90,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       "kind": "multi-section-shard",
       "included_by": ".missiond/v3/shards/index.lisp",
       "include_line": 70,
-      "source_hash": "6e960df1d0600258638e38964ec2f0fb"
+      "source_hash": "408be85bda9142f147dab73b22b3e2f8"
     },
     {
       "file": ".missiond/v3/shards/universe/service-layer-template.lisp",
@@ -173,7 +173,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
   "source_domains": [
     {
       "id": "blueprint-core",
-      "source_hash": "d2ad2e90881181f34e02064c7eda5773",
+      "source_hash": "48a90ce25b1f3f64be4faeb64463d4db",
       "source_units": [
         {
           "file": ".missiond/v3/missiond-blueprint.lisp",
@@ -187,7 +187,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
           "kind": "missiond-blueprint-shards",
           "included_by": ".missiond/v3/missiond-blueprint.lisp",
           "include_line": 412,
-          "source_hash": "c4f2da90a869c8765a2c29fb0dabfc38"
+          "source_hash": "27dd3a06a859ada8a188d223f07b7d75"
         }
       ]
     },
@@ -252,7 +252,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
     },
     {
       "id": "ops-infra",
-      "source_hash": "afcd8b8a73413e38949106aadd2a3ed6",
+      "source_hash": "dcc0a92042b969b2837667ecca392070",
       "source_units": [
         {
           "file": ".missiond/v3/shards/ops-infra.lisp",
@@ -266,7 +266,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
           "kind": "deployment-closure-plane",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 49,
-          "source_hash": "6a7562a74ca6f2fb65bc80dc3ba3908b"
+          "source_hash": "ab85668c25f49f232cc8fa2e8a715e01"
         }
       ]
     },
@@ -298,14 +298,14 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
     },
     {
       "id": "universe",
-      "source_hash": "b4a377d21d88d6308a67615819f9146f",
+      "source_hash": "139138c35fc927834e2a3f4158477bbd",
       "source_units": [
         {
           "file": ".missiond/v3/shards/universe/service-runtime.lisp",
           "kind": "multi-section-shard",
           "included_by": ".missiond/v3/shards/index.lisp",
           "include_line": 70,
-          "source_hash": "6e960df1d0600258638e38964ec2f0fb"
+          "source_hash": "408be85bda9142f147dab73b22b3e2f8"
         },
         {
           "file": ".missiond/v3/shards/universe/service-layer-template.lisp",
@@ -421,7 +421,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 323,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -446,7 +446,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 344,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -468,7 +468,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 357,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -487,7 +487,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 369,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -508,7 +508,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 379,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -551,7 +551,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/control-plane-runtime.lisp",
         "source_line": 390,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -573,7 +573,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/universe/project-registry.lisp",
         "source_line": 1,
         "source_column": 1,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -593,7 +593,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 1,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -620,7 +620,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 293,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -657,7 +657,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 360,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     },
     {
@@ -701,7 +701,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
         "source_file": ".missiond/v3/shards/memory-knowledge-runtime.lisp",
         "source_line": 316,
         "source_column": 3,
-        "source_hash": "d5d70ac2f50853785cdeb94ab074dab0"
+        "source_hash": "9bfb73329b80afe5499b2294254dd0a4"
       }
     }
   ],

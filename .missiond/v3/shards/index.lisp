@@ -51,7 +51,7 @@
     :domain ops-infra
     :path "shards/deployment-closure-plane.lisp"
     :root-include "(include \"shards/deployment-closure-plane.lisp\")"
-    :surfaces [deployment-closure-plane compiled-deployment-policy release-evidence closure-verdict release-lease])
+    :surfaces [deployment-closure-plane compiled-deployment-policy release-plan runner-binding secret-requirement release-evidence closure-verdict release-lease deploy-chain-closure-audit project-universe-domain-route-config])
 
   (shard v2-convergence-map
     :status compiler-active

@@ -110,8 +110,8 @@
     (deployment-channel-plane
       :schema "missiond.deployment-channel-plane.v1"
       :authority-model (:declared missiond-v3-ssot :inferred repo-config-workflows :observed deploy-center-vercel-gcp :secret-values secret-store-only)
-      :fields [project_id service_id surface channel_kind authority source_ref workflow deploy_center_slug executor builder source_sync dockerfile manifest artifact_lane image target_side_build_prohibited declared_status observed_status drift_status]
-      :channel-surfaces [build runtime frontend]
+      :fields [project_id service_id surface channel_kind authority source_ref workflow deploy_center_slug executor builder runner_role source_sync dockerfile manifest artifact_lane image target_side_build_prohibited declared_status observed_status drift_status]
+      :channel-surfaces [build runtime frontend domain self_update]
       :channel-kinds [native_workflow privatecloud_docker_build github_actions deploy_center_runtime gcp_vm vercel kubernetes local_runtime manual_break_glass unknown]
       :scheduler-lanes [control-plane prod-release frontend-vercel frontend-cn bulk-build]
       :executor-readiness-layers [registry-active instance-online instance-ready]
@@ -127,6 +127,8 @@
          "Native workflow build channels require deploy_project_stage_configs.build.config.deploy_type=native_workflow and target-side build must be prohibited for production Rust product-service backends."
          "Deploy-center may actively manage frontend channels when deploy_project_stage_configs.frontend.config.deploy_type=vercel_frontend; Vercel webhook facts then reconcile deploy-center's managed deployment ledger instead of being only observed external state."
          "Deploy Center native workflow jobs must carry scheduler_lane, priority, concurrency_group, and required_capabilities; control-plane work such as xjp-deploy-center self-update must not be starved behind prod-release or bulk-build work."
+         "Deploy Center production jobs must carry a ReleasePlan-derived runner_role. gcp-agent may observe and mutate runtime targets only as runtime_runner, privatecloud 10900kf/12900kf lanes own build_runner work, and macmini may claim only self_update_runner, Darwin, or explicitly declared Vercel/frontend tooling lanes."
+         "runner_required_env is a ReleasePlan projection, not an adapter-specific afterthought; backend, cn_frontend, frontend-vercel, and native_workflow paths must all project SecretRequirement.env_name into job metadata before any runner claim."
          "Deploy Center executor health is a three-layer fact: registry active, concrete agent instance online, and instance ready with version, OS/arch, toolchain, workspace, service-manager, and secret-resolution capability evidence."
          "Deploy Center Vercel authority is limited to production deployment lifecycle operations and aliases: deploy/build, inspect/wait, promote, rollback, safe remove, alias read/set, and webhook reconciliation; project deletion, DNS mutation, and secret value management remain outside Deploy Center direct write scope."
          "GitHub Actions build channels must name the workflow and deploy-center trigger slug when present, so project management can answer which services still build through GA without grep."]

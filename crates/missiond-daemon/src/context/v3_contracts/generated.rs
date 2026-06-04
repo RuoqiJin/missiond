@@ -13,9 +13,9 @@ pub struct SourceUnit {
 }
 
 pub const SCHEMA_VERSION: &str = "missiond.contract-abi.v1";
-pub const SOURCE_HASH: &str = "d5d70ac2f50853785cdeb94ab074dab0";
-pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "63c45a23ca30570d9d69d315e1723977";
-pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "63c45a23ca30570d9d69d315e1723977";
+pub const SOURCE_HASH: &str = "9bfb73329b80afe5499b2294254dd0a4";
+pub const RUNTIME_CONFIG_SOURCE_HASH: &str = "e6d5dd08c68dedbbf6644d0c7d1d43c0";
+pub const PROJECT_UNIVERSE_SOURCE_HASH: &str = "e6d5dd08c68dedbbf6644d0c7d1d43c0";
 #[rustfmt::skip]
 pub const RUNTIME_DOMAIN_FILES: &[(&str, &str)] = &[
     (
@@ -79,59 +79,59 @@ pub const RUNTIME_DOMAIN_FILES: &[(&str, &str)] = &[
 pub const RUNTIME_DOMAIN_SOURCE_HASHES: &[(&str, &str)] = &[
     (
         "workstation",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "flow",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "compute",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "minimax",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "router",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "cascade",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "project-registry",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "capability-governance",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "memory-kb",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "evidence-lane-policy",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "conversation-ingestion",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "autopilot",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "control-plane-kernel",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
     (
         "learning-engine",
-        "63c45a23ca30570d9d69d315e1723977",
+        "e6d5dd08c68dedbbf6644d0c7d1d43c0",
     ),
 ];
 
@@ -148,7 +148,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "missiond-blueprint-shards",
         included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
         include_line: Some(412u32),
-        source_hash: "c4f2da90a869c8765a2c29fb0dabfc38",
+        source_hash: "27dd3a06a859ada8a188d223f07b7d75",
     },
     SourceUnit {
         file: ".missiond/v3/shards/request-runtime.lisp",
@@ -197,7 +197,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "deployment-closure-plane",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(49u32),
-        source_hash: "6a7562a74ca6f2fb65bc80dc3ba3908b",
+        source_hash: "ab85668c25f49f232cc8fa2e8a715e01",
     },
     SourceUnit {
         file: ".missiond/v3/shards/v2-convergence-map.lisp",
@@ -218,7 +218,7 @@ pub const SOURCE_UNITS: &[SourceUnit] = &[
         kind: "multi-section-shard",
         included_by: Some(".missiond/v3/shards/index.lisp"),
         include_line: Some(70u32),
-        source_hash: "6e960df1d0600258638e38964ec2f0fb",
+        source_hash: "408be85bda9142f147dab73b22b3e2f8",
     },
     SourceUnit {
         file: ".missiond/v3/shards/universe/service-layer-template.lisp",
@@ -309,7 +309,7 @@ pub struct SourceDomain {
 pub const SOURCE_DOMAINS: &[SourceDomain] = &[
     SourceDomain {
         id: "blueprint-core",
-        source_hash: "d2ad2e90881181f34e02064c7eda5773",
+        source_hash: "48a90ce25b1f3f64be4faeb64463d4db",
         source_units: &[
             SourceUnit {
                 file: ".missiond/v3/missiond-blueprint.lisp",
@@ -323,7 +323,7 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
                 kind: "missiond-blueprint-shards",
                 included_by: Some(".missiond/v3/missiond-blueprint.lisp"),
                 include_line: Some(412u32),
-                source_hash: "c4f2da90a869c8765a2c29fb0dabfc38",
+                source_hash: "27dd3a06a859ada8a188d223f07b7d75",
             },
         ],
     },
@@ -382,7 +382,7 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
     },
     SourceDomain {
         id: "ops-infra",
-        source_hash: "afcd8b8a73413e38949106aadd2a3ed6",
+        source_hash: "dcc0a92042b969b2837667ecca392070",
         source_units: &[
             SourceUnit {
                 file: ".missiond/v3/shards/ops-infra.lisp",
@@ -396,7 +396,7 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
                 kind: "deployment-closure-plane",
                 included_by: Some(".missiond/v3/shards/index.lisp"),
                 include_line: Some(49u32),
-                source_hash: "6a7562a74ca6f2fb65bc80dc3ba3908b",
+                source_hash: "ab85668c25f49f232cc8fa2e8a715e01",
             },
         ],
     },
@@ -424,14 +424,14 @@ pub const SOURCE_DOMAINS: &[SourceDomain] = &[
     },
     SourceDomain {
         id: "universe",
-        source_hash: "b4a377d21d88d6308a67615819f9146f",
+        source_hash: "139138c35fc927834e2a3f4158477bbd",
         source_units: &[
             SourceUnit {
                 file: ".missiond/v3/shards/universe/service-runtime.lisp",
                 kind: "multi-section-shard",
                 included_by: Some(".missiond/v3/shards/index.lisp"),
                 include_line: Some(70u32),
-                source_hash: "6e960df1d0600258638e38964ec2f0fb",
+                source_hash: "408be85bda9142f147dab73b22b3e2f8",
             },
             SourceUnit {
                 file: ".missiond/v3/shards/universe/service-layer-template.lisp",

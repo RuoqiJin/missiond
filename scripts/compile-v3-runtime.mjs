@@ -906,6 +906,7 @@ function buildServiceDeploymentChannels(service, channels) {
       surface: 'build',
       substrate: channels.build_lane.id ?? 'privatecloud',
       channel_kind: nativeBuildChannelKind(channels.build_lane),
+      runner_role: 'build_runner',
       build_lane: channels.build_lane.id,
       builder: channels.build_lane.builder,
       executor: channels.build_lane.executor,
@@ -930,6 +931,7 @@ function buildServiceDeploymentChannels(service, channels) {
       surface: 'runtime',
       substrate: channels.deployment.substrate,
       channel_kind: runtimeChannelKind(channels.deployment.substrate),
+      runner_role: 'runtime_runner',
       deploy_center_slug: channels.deployment.dc_slug,
       runtime_target: channels.deployment.runtime_target,
       executor: channels.deployment.executor,
@@ -954,6 +956,7 @@ function buildServiceDeploymentChannels(service, channels) {
       surface: 'frontend',
       substrate: channels.frontend_deployment.substrate,
       channel_kind: channels.frontend_deployment.substrate === 'vercel' ? 'vercel' : 'unknown',
+      runner_role: 'frontend_runner',
       project: channels.frontend_deployment.project,
       root_directory: channels.frontend_deployment.root_directory,
       production_domain: channels.frontend_deployment.production_domain,
@@ -1034,6 +1037,7 @@ function inferProjectLocalDeployCenterChannels({ serviceId, projectId, root }) {
       surface: 'build',
       substrate: isNativeWorkflow ? 'privatecloud-rust-build-lane' : 'privatecloud-docker-build-lane',
       channel_kind: isNativeWorkflow ? 'native_workflow' : 'privatecloud_docker_build',
+      runner_role: 'build_runner',
       authority: 'deploy-center',
       source_ref: `${file}#stages.build`,
       deploy_center_slug: stringOrNull(project.slug) ?? stringOrNull(build.stage_project_slug),
@@ -1059,6 +1063,7 @@ function inferProjectLocalDeployCenterChannels({ serviceId, projectId, root }) {
       surface: 'runtime',
       substrate: 'deploy-center',
       channel_kind: 'deploy_center_runtime',
+      runner_role: 'runtime_runner',
       authority: 'deploy-center',
       source_ref: `${file}#stages.deploy`,
       deploy_center_slug: stringOrNull(project.slug) ?? stringOrNull(deploy.stage_project_slug),
@@ -1091,6 +1096,7 @@ function githubActionsBuildChannel({ serviceId, projectId, workflow, registryEnt
     surface: 'build',
     substrate: 'github-actions',
     channel_kind: 'github_actions',
+    runner_role: 'build_runner',
     authority: 'github-actions',
     source_ref: workflow.source_ref,
     workflow: workflow.file,
@@ -1125,12 +1131,22 @@ function mergeDeploymentChannels(channels, defaults = {}) {
       project_id: projectId,
       surface,
       channel_kind: stringOrNull(channel.channel_kind ?? channel.channelKind) ?? channelKindForChannel(channel),
+      runner_role: stringOrNull(channel.runner_role ?? channel.runnerRole) ?? defaultRunnerRoleForSurface(surface),
       declared_status: stringOrNull(channel.declared_status ?? channel.declaredStatus) ?? 'declared',
       observed_status: stringOrNull(channel.observed_status ?? channel.observedStatus) ?? 'not_queried',
       drift_status: stringOrNull(channel.drift_status ?? channel.driftStatus) ?? 'not_checked',
     }));
   }
   return rows;
+}
+
+function defaultRunnerRoleForSurface(surface) {
+  if (surface === 'build') return 'build_runner';
+  if (surface === 'runtime') return 'runtime_runner';
+  if (surface === 'frontend') return 'frontend_runner';
+  if (surface === 'domain') return 'domain_runner';
+  if (surface === 'self_update') return 'self_update_runner';
+  return null;
 }
 
 function deploymentChannelDiagnosticsForService(service, channels) {
@@ -1287,8 +1303,8 @@ function buildDeploymentPolicy(universeJson) {
         ? ['deploy_provenance_snapshot', 'container_inventory', 'dependency_manifest_scan', 'supply_chain_ioc_scan']
         : ['deploy_provenance_snapshot'],
       closure_required_fields: strict
-        ? ['ReleaseLease', 'RuntimeObservation', 'ReleaseEvidence', 'ClosureVerdict']
-        : ['ReleaseEvidence', 'ClosureVerdict'],
+        ? ['ReleasePlan', 'RunnerBinding', 'SecretRequirement', 'ReleaseLease', 'RuntimeObservation', 'ReleaseEvidence', 'ClosureVerdict']
+        : ['ReleasePlan', 'ReleaseEvidence', 'ClosureVerdict'],
       fail_closed_blockers: strict
         ? failClosedBlockersFor({ serviceId, projectId, deployment, supportCatalog, runtimeTarget, substrate })
         : [],
@@ -1336,6 +1352,14 @@ function buildDeploymentPolicy(universeJson) {
         'release_lease_conflict',
         'deployment_lane_mismatch',
         'deploy_blocked_by_secret_store',
+        'release_plan_missing',
+        'release_plan_blocked',
+        'build_runner_unavailable',
+        'gcp_build_forbidden',
+        'target_side_build_forbidden',
+        'macmini_lane_forbidden',
+        'runner_required_env_missing',
+        'secret_availability_missing',
       ],
       policies: rows,
       source_units: Array.isArray(payload.source_units) ? payload.source_units : [],
@@ -1606,6 +1630,7 @@ function normalizeExplicitDeploymentChannelsForm(form, serviceId, projectId = se
         project_id: keywordValue(channelForm, 'project-id') ?? keywordValue(channelForm, 'project_id') ?? projectId,
         surface,
         channel_kind: keywordValue(channelForm, 'channel-kind') ?? keywordValue(channelForm, 'channel_kind'),
+        runner_role: keywordValue(channelForm, 'runner-role') ?? keywordValue(channelForm, 'runner_role'),
         substrate: keywordValue(channelForm, 'substrate'),
         authority: keywordValue(channelForm, 'authority'),
         source_ref: keywordValue(channelForm, 'source-ref') ?? keywordValue(channelForm, 'source_ref') ?? `.missiond/v3/shards/universe/service-runtime.lisp#service:${serviceId}:deployment-channels`,
