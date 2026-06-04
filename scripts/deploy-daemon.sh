@@ -1788,7 +1788,7 @@ record_timing "post-switch-mcp-smoke" "$POST_SMOKE_START"
 JARVIS_SLOT_START="$(date +%s)"
 if ! post_switch_jarvis_slot_ensure; then
   rollback_with_smoke "$PREVIOUS_ACTIVE" || true
-  fail "Jarvis default slot ensure failed; rollback attempted" 6
+  fail "Jarvis provider slot ensure failed; rollback attempted" 6
 fi
 assert_active_release_owned "post-jarvis-smoke" ||
   fail "deploy ownership guard failed after Jarvis smoke; refusing to continue" 6

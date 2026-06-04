@@ -3130,6 +3130,20 @@ impl PTYWebSocketServer {
                 continue;
             }
 
+            if Self::jarvis_provider_slot_is_workspace_trust_blocked(info.as_ref()) {
+                let workspace_trust =
+                    Self::maybe_accept_jarvis_workspace_trust(pty_manager, &spec.slot_id).await;
+                actions.push(serde_json::json!({
+                    "phase": spec.phase,
+                    "slot_id": spec.slot_id,
+                    "status": "attempted",
+                    "before_status": before_status,
+                    "before_state": before_state,
+                    "workspace_trust": workspace_trust,
+                }));
+                continue;
+            }
+
             let restartable = info
                 .as_ref()
                 .map(|slot| matches!(slot.state, SessionState::Exited | SessionState::Error))
@@ -3162,6 +3176,161 @@ impl PTYWebSocketServer {
             "actions": actions,
             "checked_at": chrono::Utc::now().to_rfc3339(),
         })
+    }
+
+    fn jarvis_provider_slot_is_workspace_trust_blocked(
+        info: Option<&crate::pty::PTYAgentInfo>,
+    ) -> bool {
+        let Some(recognition) = info.and_then(|slot| slot.recognition.as_ref()) else {
+            return false;
+        };
+        recognition.blocked_kind.as_deref() == Some("workspace_trust")
+            || recognition.reason.contains("workspace_trust_prompt")
+    }
+
+    fn jarvis_workspace_trust_selection(screen: &str) -> &'static str {
+        for line in screen.lines() {
+            let trimmed = line
+                .trim_start()
+                .trim_start_matches(|c: char| matches!(c, '│' | '┃' | '║' | '┆' | '┊'))
+                .trim_start();
+            let selected = trimmed.starts_with('>')
+                || trimmed.starts_with('›')
+                || trimmed.starts_with('❯')
+                || trimmed.starts_with('▸')
+                || trimmed.starts_with('▶')
+                || trimmed.starts_with('➜')
+                || trimmed.starts_with('→');
+            if !selected {
+                continue;
+            }
+            let lower = trimmed
+                .trim_start_matches(|c: char| matches!(c, '>' | '›' | '❯' | '▸' | '▶' | '➜' | '→'))
+                .trim_start()
+                .to_ascii_lowercase();
+            if lower.starts_with("yes, i trust this folder") {
+                return "trust";
+            }
+            if lower.starts_with("no, exit") {
+                return "exit";
+            }
+        }
+        "unknown"
+    }
+
+    async fn maybe_accept_jarvis_workspace_trust(
+        pty_manager: &PTYManager,
+        slot_id: &str,
+    ) -> serde_json::Value {
+        let mut steps = Vec::new();
+        let mut screen = match pty_manager.get_screen(slot_id).await {
+            Ok(screen) => screen,
+            Err(error) => {
+                return serde_json::json!({
+                    "status": "failed",
+                    "code": "JARVIS_WORKSPACE_TRUST_SCREEN_UNAVAILABLE",
+                    "error": error.to_string(),
+                    "checked_at": chrono::Utc::now().to_rfc3339(),
+                });
+            }
+        };
+        let mut selection = Self::jarvis_workspace_trust_selection(&screen);
+
+        if selection == "exit" {
+            for (key_name, bytes) in [("up", "\x1b[A"), ("down", "\x1b[B")] {
+                match pty_manager.write(slot_id, bytes).await {
+                    Ok(_) => {
+                        steps.push(serde_json::json!({
+                            "action": key_name,
+                            "status": "sent",
+                        }));
+                    }
+                    Err(error) => {
+                        return serde_json::json!({
+                            "status": "failed",
+                            "code": "JARVIS_WORKSPACE_TRUST_MOVE_FAILED",
+                            "action": key_name,
+                            "error": error.to_string(),
+                            "steps": steps,
+                            "checked_at": chrono::Utc::now().to_rfc3339(),
+                        });
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                screen = pty_manager.get_screen(slot_id).await.unwrap_or_default();
+                selection = Self::jarvis_workspace_trust_selection(&screen);
+                if selection == "trust" {
+                    break;
+                }
+            }
+        }
+
+        if selection != "trust" {
+            return serde_json::json!({
+                "status": "failed",
+                "code": "JARVIS_WORKSPACE_TRUST_SELECTION_UNVERIFIED",
+                "selection": selection,
+                "steps": steps,
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            });
+        }
+
+        if let Err(error) = pty_manager.write(slot_id, "\r").await {
+            return serde_json::json!({
+                "status": "failed",
+                "code": "JARVIS_WORKSPACE_TRUST_ENTER_FAILED",
+                "error": error.to_string(),
+                "steps": steps,
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            });
+        }
+        steps.push(serde_json::json!({
+            "action": "enter",
+            "status": "sent",
+        }));
+
+        let started = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let Some(after) = pty_manager.get_status(slot_id).await else {
+                return serde_json::json!({
+                    "status": "failed",
+                    "code": "JARVIS_WORKSPACE_TRUST_SLOT_MISSING_AFTER_ENTER",
+                    "steps": steps,
+                    "checked_at": chrono::Utc::now().to_rfc3339(),
+                });
+            };
+            if matches!(after.state, SessionState::Idle) {
+                return serde_json::json!({
+                    "status": "accepted",
+                    "slot_state": format!("{:?}", after.state),
+                    "elapsed_ms": started.elapsed().as_millis(),
+                    "steps": steps,
+                    "checked_at": chrono::Utc::now().to_rfc3339(),
+                });
+            }
+            if !Self::jarvis_provider_slot_is_workspace_trust_blocked(Some(&after))
+                && !matches!(after.state, SessionState::Confirming)
+            {
+                return serde_json::json!({
+                    "status": "advanced",
+                    "slot_state": format!("{:?}", after.state),
+                    "elapsed_ms": started.elapsed().as_millis(),
+                    "steps": steps,
+                    "checked_at": chrono::Utc::now().to_rfc3339(),
+                });
+            }
+            if started.elapsed() >= std::time::Duration::from_secs(10) {
+                return serde_json::json!({
+                    "status": "failed",
+                    "code": "JARVIS_WORKSPACE_TRUST_STILL_BLOCKED",
+                    "slot_state": format!("{:?}", after.state),
+                    "elapsed_ms": started.elapsed().as_millis(),
+                    "steps": steps,
+                    "checked_at": chrono::Utc::now().to_rfc3339(),
+                });
+            }
+        }
     }
 
     /// Local-only control surface for deploy-center post-deploy smoke.
@@ -16504,6 +16673,28 @@ mod tests {
         std::env::set_var("MISSIOND_JARVIS_ARTIFACT_PROJECTION_OPENAI_DELTA", "true");
         assert!(jarvis_artifact_projection_openai_delta_enabled());
         std::env::remove_var("MISSIOND_JARVIS_ARTIFACT_PROJECTION_OPENAI_DELTA");
+    }
+
+    #[test]
+    fn jarvis_workspace_trust_selection_requires_selected_option() {
+        assert_eq!(
+            PTYWebSocketServer::jarvis_workspace_trust_selection(
+                "  > Yes, I trust this folder\n    No, exit"
+            ),
+            "trust"
+        );
+        assert_eq!(
+            PTYWebSocketServer::jarvis_workspace_trust_selection(
+                "    Yes, I trust this folder\n  > No, exit"
+            ),
+            "exit"
+        );
+        assert_eq!(
+            PTYWebSocketServer::jarvis_workspace_trust_selection(
+                "    Yes, I trust this folder\n    No, exit"
+            ),
+            "unknown"
+        );
     }
 
     fn test_key_judgment_ref() -> JarvisKeyJudgmentArtifactRef {
