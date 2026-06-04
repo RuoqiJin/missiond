@@ -133,14 +133,13 @@ function envPresence() {
     DEPLOY_CENTER_API_KEY_REF: Boolean(process.env.DEPLOY_CENTER_API_KEY_REF),
     DEPLOY_CENTER_ADMIN_TOKEN_REF: Boolean(process.env.DEPLOY_CENTER_ADMIN_TOKEN_REF),
     SECRET_STORE_API_KEY: Boolean(process.env.SECRET_STORE_API_KEY),
-    XJP_API_KEY: Boolean(process.env.XJP_API_KEY),
   };
 }
 
 function credentialRefSummary(env) {
   const writeRef = process.env.DEPLOY_CENTER_API_KEY_REF || process.env.DEPLOY_CENTER_ADMIN_TOKEN_REF || DEFAULT_WRITE_TOKEN_REF;
   const explicitWriteRef = Boolean(process.env.DEPLOY_CENTER_API_KEY_REF || process.env.DEPLOY_CENTER_ADMIN_TOKEN_REF);
-  const secretStoreAccessPresent = env.SECRET_STORE_API_KEY || env.XJP_API_KEY;
+  const secretStoreAccessPresent = env.SECRET_STORE_API_KEY;
   return {
     readToken: {
       env: 'MISSIOND_DEPLOY_CENTER_READ_TOKEN',
@@ -157,11 +156,11 @@ function credentialRefSummary(env) {
       refPresent: explicitWriteRef,
       ref: writeRef,
       defaultRefDeclared: true,
-      secretStoreAccessEnv: ['SECRET_STORE_API_KEY', 'XJP_API_KEY'],
+      secretStoreAccessEnv: ['SECRET_STORE_API_KEY'],
       secretStoreAccessPresent,
       diagnostic: (env.DEPLOY_CENTER_API_KEY || env.DEPLOY_CENTER_ADMIN_TOKEN)
         ? null
-        : 'write token value is not injected; resolving the Secret Store ref requires valid SECRET_STORE_API_KEY or XJP_API_KEY',
+        : 'write token value is not injected; resolving the Secret Store ref requires valid SECRET_STORE_API_KEY',
     },
   };
 }

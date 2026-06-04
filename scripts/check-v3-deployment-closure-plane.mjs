@@ -37,6 +37,8 @@ const required = [
   ['shard', 'credential presence and Secret Store refs only'],
   ['shard', 'secret-store://missiond/production/MISSIOND_DEPLOY_CENTER_READ_TOKEN'],
   ['shard', 'deploy/ci_deploy_api_key'],
+  ['shard', 'SECRET_STORE_API_KEY'],
+  ['shard', 'XJP_API_KEY MUST NOT be treated as Secret Store access keys'],
   ['shard', 'source freshness MUST be path-aware'],
   ['shard', 'ignoredDirtyLines evidence'],
   ['shard', 'deploy_center_source_relevance_ignored'],

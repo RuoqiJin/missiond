@@ -11,6 +11,7 @@
                      ".missiond/v3/shards/deployment-closure-plane.lisp"
                      ".missiond/v3/shards/index.lisp"
                      ".missiond/v3/shards/universe/service-runtime.lisp"
+                     ".missiond/v3/runtime/compiled/**"
                      "crates/missiond-core/src/v3_contracts.rs"
                      "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
                      "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"
