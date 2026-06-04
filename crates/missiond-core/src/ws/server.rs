@@ -3078,16 +3078,106 @@ impl PTYWebSocketServer {
         Ok(())
     }
 
+    async fn ensure_jarvis_provider_slots_for_monitor(
+        pty_manager: &PTYManager,
+        default_slot: &str,
+        intent_author: &JarvisIntentAuthorConfig,
+        key_judgment_author: &JarvisKeyJudgmentAuthorConfig,
+        plan_author: &JarvisPlanAuthorConfig,
+    ) -> serde_json::Value {
+        let specs = Self::jarvis_provider_slot_monitor_specs(
+            default_slot,
+            intent_author,
+            key_judgment_author,
+            plan_author,
+        );
+        let mut handled_slot_ids = std::collections::HashSet::<String>::new();
+        let mut actions = Vec::new();
+
+        for spec in specs {
+            if !spec.critical {
+                actions.push(serde_json::json!({
+                    "phase": spec.phase,
+                    "slot_id": spec.slot_id,
+                    "status": "skipped",
+                    "reason": "provider slot is not critical for monitor readiness",
+                }));
+                continue;
+            }
+            if !handled_slot_ids.insert(spec.slot_id.clone()) {
+                actions.push(serde_json::json!({
+                    "phase": spec.phase,
+                    "slot_id": spec.slot_id,
+                    "status": "skipped",
+                    "reason": "slot_id already handled for another monitor phase",
+                }));
+                continue;
+            }
+
+            let info = pty_manager.get_status(&spec.slot_id).await;
+            let (before_status, ok, reason) =
+                Self::jarvis_provider_slot_status(info.as_ref(), &spec);
+            let before_state = info.as_ref().map(|slot| format!("{:?}", slot.state));
+            if ok {
+                actions.push(serde_json::json!({
+                    "phase": spec.phase,
+                    "slot_id": spec.slot_id,
+                    "status": "skipped",
+                    "before_status": before_status,
+                    "before_state": before_state,
+                    "reason": "provider slot already satisfies monitor readiness",
+                }));
+                continue;
+            }
+
+            let restartable = info
+                .as_ref()
+                .map(|slot| matches!(slot.state, SessionState::Exited | SessionState::Error))
+                .unwrap_or(false);
+            if !restartable {
+                actions.push(serde_json::json!({
+                    "phase": spec.phase,
+                    "slot_id": spec.slot_id,
+                    "status": "skipped",
+                    "before_status": before_status,
+                    "before_state": before_state,
+                    "reason": reason,
+                }));
+                continue;
+            }
+
+            let auto_heal = Self::maybe_auto_heal_jarvis_slot(pty_manager, &spec.slot_id).await;
+            actions.push(serde_json::json!({
+                "phase": spec.phase,
+                "slot_id": spec.slot_id,
+                "status": "attempted",
+                "before_status": before_status,
+                "before_state": before_state,
+                "auto_heal": auto_heal,
+            }));
+        }
+
+        serde_json::json!({
+            "schema": "missiond.jarvis-provider-slot-ensure.v1",
+            "actions": actions,
+            "checked_at": chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
     /// Local-only control surface for deploy-center post-deploy smoke.
     ///
     /// Public `/jarvis/*` monitor paths stay read-only. The self-update lane calls
     /// this endpoint from Mac mini localhost after blue/green restart to restore
-    /// the default Jarvis slot before judging readiness.
+    /// the default Jarvis slot and critical provider-box lanes before judging
+    /// monitor readiness.
     async fn handle_jarvis_slot_ensure(
         mut stream: TcpStream,
         addr: SocketAddr,
         pty_manager: Arc<PTYManager>,
         default_slot: String,
+        jarvis_intent_author: JarvisIntentAuthorConfig,
+        jarvis_key_judgment_author: JarvisKeyJudgmentAuthorConfig,
+        jarvis_plan_author: JarvisPlanAuthorConfig,
     ) -> anyhow::Result<()> {
         let mut buf = vec![0u8; 4096];
         let _ = stream.read(&mut buf).await;
@@ -3110,23 +3200,6 @@ impl PTYWebSocketServer {
             .get("status")
             .and_then(|value| value.as_str())
             .unwrap_or("unknown");
-        if before_status == "ready" {
-            let body = serde_json::json!({
-                "schema": "missiond.jarvis-slot-ensure.v1",
-                "overall": "ready",
-                "default_slot": default_slot,
-                "readiness_before": before,
-                "auto_heal": {
-                    "status": "skipped",
-                    "reason": "default slot already ready"
-                },
-                "checked_at": chrono::Utc::now().to_rfc3339(),
-            });
-            let response = Self::http_json_response(body.to_string());
-            stream.write_all(response.as_bytes()).await?;
-            stream.shutdown().await?;
-            return Ok(());
-        }
         if before_status == "busy" {
             let body = serde_json::json!({
                 "schema": "missiond.jarvis-slot-ensure.v1",
@@ -3162,20 +3235,65 @@ impl PTYWebSocketServer {
             .await;
         }
 
-        let auto_heal = Self::maybe_auto_heal_jarvis_slot(&pty_manager, &default_slot).await;
+        let auto_heal = if before_status == "ready" {
+            serde_json::json!({
+                "status": "skipped",
+                "reason": "default slot already ready"
+            })
+        } else {
+            Self::maybe_auto_heal_jarvis_slot(&pty_manager, &default_slot).await
+        };
         let after = Self::build_jarvis_readiness(&pty_manager, &default_slot).await;
         let after_status = after
             .get("status")
             .and_then(|value| value.as_str())
             .unwrap_or("unknown");
-        let ok = after_status == "ready";
+        let provider_slot_ensure = if after_status == "ready" {
+            Self::ensure_jarvis_provider_slots_for_monitor(
+                &pty_manager,
+                &default_slot,
+                &jarvis_intent_author,
+                &jarvis_key_judgment_author,
+                &jarvis_plan_author,
+            )
+            .await
+        } else {
+            serde_json::json!({
+                "schema": "missiond.jarvis-provider-slot-ensure.v1",
+                "status": "skipped",
+                "reason": "default slot is not ready",
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+            })
+        };
+        let provider_box_slots_after = Self::jarvis_provider_box_slots_snapshot(
+            &pty_manager,
+            &default_slot,
+            &jarvis_intent_author,
+            &jarvis_key_judgment_author,
+            &jarvis_plan_author,
+        )
+        .await;
+        let provider_slot_failures = provider_box_slots_after
+            .get("summary")
+            .and_then(|value| value.get("critical_failures"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let ok = after_status == "ready" && provider_slot_failures == 0;
         let body = serde_json::json!({
             "schema": "missiond.jarvis-slot-ensure.v1",
-            "overall": if ok { "ready" } else { "unavailable" },
+            "overall": if ok {
+                "ready"
+            } else if provider_slot_failures > 0 {
+                "provider_slot_unavailable"
+            } else {
+                "unavailable"
+            },
             "default_slot": default_slot,
             "readiness_before": before,
             "readiness_after": after,
             "auto_heal": auto_heal,
+            "provider_slot_ensure": provider_slot_ensure,
+            "provider_box_slots_after": provider_box_slots_after,
             "checked_at": chrono::Utc::now().to_rfc3339(),
         });
         if ok {
@@ -3997,7 +4115,12 @@ impl PTYWebSocketServer {
             .unwrap_or_else(|_| "https://auth.xiaojinpro.com/oidc/userinfo".to_string());
         let auth_jwks_url = std::env::var("MISSIOND_AUTH_JWKS_URL")
             .or_else(|_| std::env::var("AUTH_JWKS_URL"))
-            .unwrap_or_else(|_| format!("{}/.well-known/jwks.json", auth_issuer.trim_end_matches('/')));
+            .unwrap_or_else(|_| {
+                format!(
+                    "{}/.well-known/jwks.json",
+                    auth_issuer.trim_end_matches('/')
+                )
+            });
         let service_token_configured = missiond_service_token_configured();
         let unconfigured_api_token_allowed = missiond_unconfigured_api_token_allowed();
         let strict_secrets = secret_store_strict_mode_enabled();
@@ -15478,14 +15601,22 @@ JSON 字段必须是：\n\
                 system_event_tx: system_event_tx.clone(),
                 frontend_events_tx: frontend_events_tx.clone(),
             };
-            // Local deploy-center smoke may restore the default Jarvis slot after
-            // a blue/green restart. This is intentionally not a normalized
+            // Local deploy-center smoke may restore Jarvis provider slots after a
+            // blue/green restart. This is intentionally not a normalized
             // `/jarvis/*` public route.
             if method == "POST" && path == "/internal/jarvis/slot/ensure" && !is_upgrade {
                 return match pty_manager {
                     Some(pm) => {
-                        Self::handle_jarvis_slot_ensure(stream, addr, pm, default_chat_slot.clone())
-                            .await
+                        Self::handle_jarvis_slot_ensure(
+                            stream,
+                            addr,
+                            pm,
+                            default_chat_slot.clone(),
+                            jarvis_intent_author.clone(),
+                            jarvis_key_judgment_author.clone(),
+                            jarvis_plan_author.clone(),
+                        )
+                        .await
                     }
                     None => {
                         let mut s = stream;

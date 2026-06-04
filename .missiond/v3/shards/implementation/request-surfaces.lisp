@@ -46,7 +46,7 @@
 	                      "scripts/smoke-jarvis-interaction.mjs"]
 	      :slot-auto-heal (:env MISSIOND_JARVIS_SLOT_AUTO_HEAL
 	                       :timeout-env MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS
-	                       :rule "monitor is read-only; chat request and localhost-only /internal/jarvis/slot/ensure may restart default Exited/Error slot once and must fail fast with typed diagnostic if restart fails")
+	                       :rule "monitor is read-only; chat request may restart the default Exited/Error slot once; localhost-only /internal/jarvis/slot/ensure must reuse the monitor provider-slot spec, restart deduplicated critical Exited/Error slots once, and fail fast with typed diagnostics if the monitor-ready contract is still not closed")
       :public-tools [mission_interaction]
 	      :auth-boundary (:authority auth
 	                      :userinfo-endpoint "/oidc/userinfo"
