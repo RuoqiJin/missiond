@@ -114,6 +114,10 @@
 #   MISSION_WS_PORT             daemon HTTP/WebSocket port, default: 9120.
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 90
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 45
+#   MISSIOND_DEPLOY_JARVIS_SLOT_ENSURE_REQUEST_TIMEOUT_SECS
+#                               max seconds for one localhost Jarvis slot ensure
+#                               request. Default derives from
+#                               MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS.
 #   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
 #   MISSIOND_USE_SCCACHE        when 1 and sccache exists, export RUSTC_WRAPPER=sccache
 #   CARGO_INCREMENTAL           defaults to 0 for deploy builds to avoid filling
@@ -1188,27 +1192,66 @@ should_ensure_jarvis_slot() {
   esac
 }
 
+jarvis_slot_auto_heal_timeout_secs() {
+  local value
+  value="${MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS:-}"
+  if [ -z "$value" ]; then
+    value="$(plist_read_string "$LAUNCHD_PLIST" "EnvironmentVariables:MISSIOND_JARVIS_SLOT_AUTO_HEAL_TIMEOUT_SECS" || true)"
+  fi
+  case "$value" in
+    ''|*[!0-9]*) value=45 ;;
+  esac
+  if [ "$value" -lt 5 ]; then
+    value=5
+  elif [ "$value" -gt 180 ]; then
+    value=180
+  fi
+  printf '%s\n' "$value"
+}
+
+jarvis_slot_ensure_request_timeout_secs() {
+  local configured heal_timeout computed
+  configured="${MISSIOND_DEPLOY_JARVIS_SLOT_ENSURE_REQUEST_TIMEOUT_SECS:-}"
+  case "$configured" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$configured" -gt 0 ]; then
+        printf '%s\n' "$configured"
+        return 0
+      fi
+      ;;
+  esac
+  heal_timeout="$(jarvis_slot_auto_heal_timeout_secs)"
+  computed=$(( heal_timeout * 8 + 30 ))
+  printf '%s\n' "$computed"
+}
+
 post_switch_jarvis_slot_ensure() {
   if ! should_ensure_jarvis_slot; then
     log "jarvis-slot: ensure skipped (MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT=$MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT)"
     return 0
   fi
   command -v curl >/dev/null 2>&1 || fail "curl not on PATH; cannot run Jarvis slot ensure smoke" 6
-  local url body status elapsed start ensure_mode
+  local url body status elapsed start ensure_mode request_timeout wait_timeout
   ensure_mode="$(printf '%s' "$MISSIOND_DEPLOY_ENSURE_JARVIS_SLOT" | tr '[:upper:]' '[:lower:]')"
+  request_timeout="$(jarvis_slot_ensure_request_timeout_secs)"
+  wait_timeout="$SMOKE_TIMEOUT"
+  if [ "$request_timeout" -gt "$wait_timeout" ]; then
+    wait_timeout="$request_timeout"
+  fi
   url="http://127.0.0.1:${MISSION_WS_PORT}/internal/jarvis/slot/ensure"
-  log "jarvis-slot: ensure $url"
+  log "jarvis-slot: ensure $url request_timeout=${request_timeout}s wait_timeout=${wait_timeout}s"
   start="$(date +%s)"
   while true; do
-    body="$(curl -m 20 -sS -X POST -w $'\n%{http_code}' "$url" 2>&1 || true)"
+    body="$(curl -m "$request_timeout" -sS -X POST -w $'\n%{http_code}' "$url" 2>&1 || true)"
     status="$(printf '%s\n' "$body" | tail -1)"
     body="$(printf '%s\n' "$body" | sed '$d')"
     if [ "$status" = "200" ] && printf '%s' "$body" | grep -q '"overall":"ready"'; then
-      log "jarvis-slot: default slot ready"
+      log "jarvis-slot: monitor provider slots ready"
       return 0
     fi
     elapsed=$(( $(date +%s) - start ))
-    [ "$elapsed" -lt "$SMOKE_TIMEOUT" ] || break
+    [ "$elapsed" -lt "$wait_timeout" ] || break
     log "jarvis-slot: not ready yet status=${status:-unknown}; retrying..."
     sleep 2
   done

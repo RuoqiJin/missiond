@@ -12,6 +12,7 @@
                      "crates/missiond-core/src/v3_contracts.rs"
                      "crates/missiond-daemon/src/context/v3_contracts/generated.rs"
                      "crates/missiond-daemon/src/context/v3_runtime_defaults/generated.rs"
+                     "scripts/deploy-daemon.sh"
                      "scripts/generated/v3_contracts.d.ts"
                      "scripts/generated/v3_contracts.mjs"
                      "scripts/generated/v3_runtime_defaults.mjs"]
