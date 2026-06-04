@@ -766,10 +766,14 @@ function augmentProjectUniverseDeploymentChannels(compiled) {
     if (channels?.proxy) service.proxy = channels.proxy;
     if (channels?.jarvis_runtime_topology) service.jarvis_runtime_topology = channels.jarvis_runtime_topology;
 
+    const projectId = stringOrNull(service?.project) ?? serviceId;
     const explicit = channels?.deployment_channels ?? [];
     const legacy = channels ? buildServiceDeploymentChannels(service, channels) : [];
     const inferred = inference.channelsByService.get(serviceId) ?? [];
-    const merged = mergeDeploymentChannels([...explicit, ...legacy, ...inferred]);
+    const merged = mergeDeploymentChannels([...explicit, ...legacy, ...inferred], {
+      serviceId,
+      projectId,
+    });
     service.deployment_channels = merged;
     allChannels.push(...merged);
 
@@ -995,12 +999,17 @@ function githubActionsBuildChannel({ serviceId, projectId, workflow, registryEnt
   });
 }
 
-function mergeDeploymentChannels(channels) {
+function mergeDeploymentChannels(channels, defaults = {}) {
   const rows = [];
   const seen = new Set();
   for (const channel of channels) {
     if (!channel || typeof channel !== 'object') continue;
-    const serviceId = stringOrNull(channel.service_id ?? channel.serviceId) ?? 'service';
+    const serviceId = stringOrNull(channel.service_id ?? channel.serviceId)
+      ?? stringOrNull(defaults.serviceId)
+      ?? 'service';
+    const projectId = stringOrNull(channel.project_id ?? channel.projectId)
+      ?? stringOrNull(channel.project)
+      ?? stringOrNull(defaults.projectId);
     const surface = stringOrNull(channel.surface) ?? 'runtime';
     const key = `${serviceId}:${surface}`;
     if (seen.has(key)) continue;
@@ -1008,7 +1017,7 @@ function mergeDeploymentChannels(channels) {
     rows.push(compactObject({
       ...channel,
       service_id: serviceId,
-      project_id: stringOrNull(channel.project_id ?? channel.projectId),
+      project_id: projectId,
       surface,
       channel_kind: stringOrNull(channel.channel_kind ?? channel.channelKind) ?? channelKindForChannel(channel),
       declared_status: stringOrNull(channel.declared_status ?? channel.declaredStatus) ?? 'declared',
@@ -1021,16 +1030,41 @@ function mergeDeploymentChannels(channels) {
 
 function deploymentChannelDiagnosticsForService(service, channels) {
   const serviceId = stringOrNull(service?.id);
-  if (!serviceId || !serviceNeedsBuildChannel(service, {})) return [];
+  if (!serviceId) return [];
+  const diagnostics = [];
+  for (const channel of channels) {
+    if (!stringOrNull(channel?.service_id ?? channel?.serviceId)) {
+      diagnostics.push({
+        kind: 'deployment_channel_missing_service_id',
+        service_id: serviceId,
+        project_id: stringOrNull(service?.project) ?? serviceId,
+        channel_id: stringOrNull(channel?.id),
+        surface: stringOrNull(channel?.surface),
+        message: `${serviceId} has a deployment channel without service_id`,
+      });
+    }
+    if (!stringOrNull(channel?.project_id ?? channel?.projectId)) {
+      diagnostics.push({
+        kind: 'deployment_channel_missing_project_id',
+        service_id: serviceId,
+        project_id: stringOrNull(service?.project) ?? serviceId,
+        channel_id: stringOrNull(channel?.id),
+        surface: stringOrNull(channel?.surface),
+        message: `${serviceId} has a deployment channel without project_id`,
+      });
+    }
+  }
+  if (!serviceNeedsBuildChannel(service, {})) return diagnostics;
   const buildChannels = channels.filter((channel) => channel.surface === 'build');
-  if (buildChannels.length === 1) return [];
-  return [{
+  if (buildChannels.length === 1) return diagnostics;
+  diagnostics.push({
     kind: buildChannels.length === 0 ? 'missing_build_channel' : 'multiple_build_channels',
     service_id: serviceId,
     project_id: stringOrNull(service?.project) ?? serviceId,
     build_channel_count: buildChannels.length,
     message: `${serviceId} must expose exactly one build channel or an explicit exception`,
-  }];
+  });
+  return diagnostics;
 }
 
 function buildDeploymentChannelSummary(channels, diagnostics) {
@@ -1271,6 +1305,7 @@ function readServiceDeploymentChannelMap() {
     return map;
   }
   for (const { serviceId, body } of extractServiceRuntimeForms(text)) {
+    const projectId = keywordValue(body, 'project') ?? serviceId;
     const deployment = parseKeywordForm(body, 'deployment');
     const frontendDeployment = parseKeywordForm(body, 'frontend-deployment');
     const buildLane = parseKeywordForm(body, 'build-lane');
@@ -1287,7 +1322,7 @@ function readServiceDeploymentChannelMap() {
         ? normalizeJarvisRuntimeTopologyForm(jarvisRuntimeTopology, serviceId)
         : null,
       deployment_channels: deploymentChannels
-        ? normalizeExplicitDeploymentChannelsForm(deploymentChannels, serviceId)
+        ? normalizeExplicitDeploymentChannelsForm(deploymentChannels, serviceId, projectId)
         : [],
     }));
   }
@@ -1425,14 +1460,14 @@ function normalizeBuildLaneForm(form) {
   });
 }
 
-function normalizeExplicitDeploymentChannelsForm(form, serviceId) {
+function normalizeExplicitDeploymentChannelsForm(form, serviceId, projectId = serviceId) {
   return extractNamedForms(form, 'channel')
     .map((channelForm, index) => {
       const surface = keywordValue(channelForm, 'surface') ?? 'runtime';
       return compactObject({
         id: keywordValue(channelForm, 'id') ?? `${serviceId}:${surface}:declared:${index}`,
         service_id: keywordValue(channelForm, 'service-id') ?? keywordValue(channelForm, 'service_id') ?? serviceId,
-        project_id: keywordValue(channelForm, 'project-id') ?? keywordValue(channelForm, 'project_id'),
+        project_id: keywordValue(channelForm, 'project-id') ?? keywordValue(channelForm, 'project_id') ?? projectId,
         surface,
         channel_kind: keywordValue(channelForm, 'channel-kind') ?? keywordValue(channelForm, 'channel_kind'),
         substrate: keywordValue(channelForm, 'substrate'),

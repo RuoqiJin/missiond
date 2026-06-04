@@ -351,6 +351,10 @@ function checkFiles(root) {
     'mission_slots and /api/slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask',
     'Codex master-control is a resident orchestrator lane',
     'Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml`',
+    'communication-preference-read',
+    'MISSIOND_JARVIS_COMMUNICATION_PREFERENCES_FILE',
+    'MISSIOND_RUNTIME_DIR/jarvis/communication-preferences.lisp',
+    'preference-observation',
     'ProjectRegistry path resolution MUST be path-component aware rather than raw string prefix matching',
     'Daemon startup MUST overlay the active missiond project root from MISSIOND_PROJECT_ROOT/current blueprint root',
   ]);
@@ -789,10 +793,11 @@ function buildFixture() {
       :write-allowed true)
     :invariants ["Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration"
                  "V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots"
-                 "mission_compute_slot list status MUST derive from PTYManager"
-                 "mission_slots and /api/slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask"
-                 "Codex master-control is a resident orchestrator lane"
-                 "Read-only Gemini pool workers MUST project to Gemini CLI \`--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml\`"]
+	                 "mission_compute_slot list status MUST derive from PTYManager"
+	                 "mission_slots and /api/slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask"
+	                 "Codex master-control is a resident orchestrator lane"
+	                 "Read-only Gemini pool workers MUST project to Gemini CLI \`--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml\`"
+	                 "communication-preference-read MISSIOND_JARVIS_COMMUNICATION_PREFERENCES_FILE MISSIOND_RUNTIME_DIR/jarvis/communication-preferences.lisp preference-observation"]
     :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
   (implementation-map
     (surface workstation-pool

@@ -74,6 +74,34 @@ function checkUniverseProjection(diagnostics, universe) {
     }
   }
   for (const channel of channels) {
+    if (!stringValue(channel.id)) {
+      diagnostics.push({
+        file: 'compiled-project-universe.json',
+        service: channel.service_id,
+        message: 'deployment channel must expose id',
+      });
+    }
+    if (!stringValue(channel.service_id)) {
+      diagnostics.push({
+        file: 'compiled-project-universe.json',
+        service: channel.service_id,
+        message: `${channel.id ?? '<unknown>'} deployment channel must expose service_id`,
+      });
+    }
+    if (!stringValue(channel.project_id)) {
+      diagnostics.push({
+        file: 'compiled-project-universe.json',
+        service: channel.service_id,
+        message: `${channel.id ?? channel.service_id ?? '<unknown>'} deployment channel must expose project_id`,
+      });
+    }
+    if (!stringValue(channel.surface)) {
+      diagnostics.push({
+        file: 'compiled-project-universe.json',
+        service: channel.service_id,
+        message: `${channel.id ?? channel.service_id ?? '<unknown>'} deployment channel must expose surface`,
+      });
+    }
     if (channel.channel_kind === 'github_actions') {
       if (!channel.workflow) {
         diagnostics.push({
@@ -128,6 +156,7 @@ function checkUniverseProjection(diagnostics, universe) {
     'deploy-center',
     'search-center',
     'payments',
+    'xjp-project-universe',
     'xjp-image-service',
     'xjp-video-service',
     'xjp-domain-service',

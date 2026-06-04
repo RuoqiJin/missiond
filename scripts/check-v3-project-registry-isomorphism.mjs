@@ -331,6 +331,11 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.reconcile, sources.reconcile, [
     'handle_reconcile',
     'missiond.project-registry-reconcile.v1',
+    'missiond.project-registry-db-v3-diff.v1',
+    'missing_in_db',
+    'missing_in_v3',
+    'inactive_or_legacy',
+    'metadata_drift',
     'deploy_fact_missing',
     'root_mismatch',
     'alias_conflict',
@@ -596,6 +601,7 @@ project_resolution "action": "resolve" effective_project_id "requested_project_i
 
   writeFixture(root, DEFAULT_FILES.reconcile, `
 handle_reconcile missiond.project-registry-reconcile.v1 root_mismatch deploy_fact_missing alias_conflict missing_in_missiond
+missiond.project-registry-db-v3-diff.v1 missing_in_db missing_in_v3 inactive_or_legacy metadata_drift
 `);
 
   writeFixture(root, DEFAULT_FILES.universe, `

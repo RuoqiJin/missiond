@@ -257,17 +257,20 @@
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/payments-backend-blueprint.lisp"
       :environment production
+      :public-base-url "https://pay.xiaojinpro.com"
       :api-base-url "https://auth.xiaojinpro.com/payments"
-      :domains ["auth.xiaojinpro.com"]
-      :deployment (:substrate deploy-center :dc_slug "xjp-payments" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-payments" :default-port 8080 :host-bind "127.0.0.1:3109" :authority release-provenance)
+      :domains ["pay.xiaojinpro.com" "auth.xiaojinpro.com"]
+      :dns-provider xjp-domain-service
+      :dns-record (:type A :name "pay.xiaojinpro.com" :content "34.104.147.118" :proxied false :ttl 600 :authority aliyun)
+      :deployment (:substrate deploy-center :dc_slug "xjp-payments" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-payments" :default-port 8080 :host-bind "127.0.0.1:8080" :authority release-provenance)
       :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/payments/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-payments" :artifact-lane cloud-registry-lane :manifest "services/payments/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
-      :proxy (:kind caddy :domain "auth.xiaojinpro.com" :routes ["/payments" "/payments/*"] :upstream "localhost:3109")
-      :ports (:host 3109 :container 8080)
-      :health ["/payments/health" "/payments/health/ready" "/payments/health/runtime"]
-      :dependencies [xjp-auth xjp-router xjp-pg-prod secret-store stripe wechatpay alipay]
+      :proxy (:kind caddy :domain "pay.xiaojinpro.com" :routes ["/checkout" "/checkout/*" "/health" "/health/*" "/payments" "/payments/*"] :compat-domain "auth.xiaojinpro.com" :compat-routes ["/payments" "/payments/*"] :upstream "localhost:8080")
+      :ports (:host 8080 :container 8080)
+      :health ["/health" "/payments/health" "/payments/health/ready" "/payments/health/runtime"]
+      :dependencies [xjp-auth xjp-router xjp-pg-prod secret-store stripe wechatpay alipay caddy xjp-domain-service aliyun-dns]
       :ops-capability deploy-ops
       :source-evidence [skill:services/payments services/payments/service.manifest.toml payments-provenance-20260602]
-      :risks [stripe-live-secret-pending activation-code-test-channel-required multi-product-payment-config-readiness]
+      :risks [stripe-live-secret-pending activation-code-test-channel-required multi-product-payment-config-readiness pay-checkout-runtime-release-pending]
       :surface service-runtime-universe)
     (service :id xiaojinpro-frontend
       :project xiaojinpro-frontend
@@ -394,6 +397,50 @@
       :ops-capability deploy-ops
       :source-evidence [xjp-mail-service-google-workspace-plan-20260602]
       :surface service-runtime-universe)
+    (service :id xjp-legal-service
+      :project xjp-legal-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/legal"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-legal-service-blueprint.lisp"
+      :operations ".missiond/operations/xjp-legal-service-operations-blueprint.lisp"
+      :environment production
+      :api-base-url "https://legal.xiaojins.com/v1/legal"
+      :domains ["legal.xiaojins.com"]
+      :dns-provider cloudflare
+      :dns-record (:type A :name "legal.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
+      :deployment (:substrate deploy-center :dc_slug "xjp-legal-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-legal-service" :default-port 8099 :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/legal/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-legal-service" :artifact-lane cloud-registry-lane :manifest "services/legal/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
+      :proxy (:kind caddy :domain "legal.xiaojins.com" :routes ["/health" "/health/*" "/v1/legal" "/v1/legal/*" "/v1/admin/legal" "/v1/admin/legal/*"])
+      :ports (:http 8099)
+      :health ["/health/live" "/health/ready"]
+      :legal-policy (:partition xjp-global :public-read anonymous-published-policy :admin-auth xjp-admin-jwt :ledger-write xjp-auth-or-internal-token :audit-table legal_acceptance_events :consent-table legal_consent_events :support-mail "legal@xiaojins.com")
+      :dependencies [xjp-auth xjp-pg-prod secret-store xjp-domain-service xjp-mail-service deploy-center]
+      :ops-capability deploy-ops
+      :source-evidence [services/legal/service.manifest.toml services/legal/deploy/deploy-center/project.json services/legal/.missiond/intent.lisp]
+      :risks [live-domain-readiness-pending support-mailbox-readiness-pending deploy-center-release-closure-pending]
+      :surface service-runtime-universe)
+    (service :id xjp-invoice-service
+      :project xjp-invoice-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/invoice"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-invoice-service-blueprint.lisp"
+      :operations ".missiond/operations/xjp-invoice-service-operations-blueprint.lisp"
+      :environment production
+      :api-base-url "https://invoice.xiaojins.com/v1/invoices"
+      :domains ["invoice.xiaojins.com"]
+      :dns-provider cloudflare
+      :dns-record (:type A :name "invoice.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
+      :deployment (:substrate deploy-center :dc_slug "xjp-invoice-service" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-invoice-service" :default-port 8100 :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/invoice/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-invoice-service" :artifact-lane cloud-registry-lane :manifest "services/invoice/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
+      :proxy (:kind caddy :domain "invoice.xiaojins.com" :routes ["/health" "/health/*" "/v1/invoices" "/v1/invoices/*"])
+      :ports (:http 8100)
+      :health ["/health/live" "/health/ready"]
+      :invoice-policy (:partition xjp-global :mode manual-issue-v1 :currency CNY :providers [wechat alipay] :payments-lock-table invoice_order_locks :audit-table invoice_audit_events :red-letter-table invoice_red_letters)
+      :dependencies [xjp-auth payments xjp-pg-prod secret-store xjp-domain-service xjp-mail-service deploy-center]
+      :ops-capability deploy-ops
+      :source-evidence [services/invoice/service.manifest.toml services/invoice/deploy/deploy-center/project.json services/invoice/.missiond/intent.lisp services/payments/migrations/20250101000015_create_invoice_order_locks.sql]
+      :risks [live-domain-readiness-pending production-secret-binding-pending deploy-center-release-closure-pending]
+      :surface service-runtime-universe)
     (service :id wepub
       :project wechat-publisher
       :root "/Users/jinchen/Projects/wechat-publisher"
@@ -482,6 +529,26 @@
       :health ["/health" "/health/live" "/health/ready" "/v1/eventhub/status"]
       :dependencies [deploy-center timeline? postgres?]
       :ops-capability eventhub
+      :surface service-runtime-universe)
+    (service :id xjp-project-universe
+      :project xjp-project-universe
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/project-universe"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xjp-project-universe-backend-blueprint.lisp"
+      :environment production
+      :api-base-url "https://projects.xiaojins.com/v1/project-universe"
+      :domains ["projects.xiaojins.com"]
+      :dns-provider cloudflare
+      :dns-record (:type A :name "projects.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
+      :deployment (:substrate deploy-center :dc_slug "xjp-project-universe" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-project-universe" :default-port 8101 :authority release-provenance)
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "services/project-universe/Dockerfile" :image "ghcr.io/xiaojinpro-team/xjp-project-universe" :artifact-lane cloud-registry-lane :authority deploy-center :target-side-build-prohibited true)
+      :proxy (:kind caddy :domain "projects.xiaojins.com" :routes ["/health" "/health/*" "/v1/project-universe" "/v1/project-universe/*"])
+      :ports (:http 8101)
+      :health ["/health/live" "/health/ready" "/v1/project-universe/status"]
+      :read-model-policy (:cache in-memory-snapshot :authority-chain [missiond deploy-center xjp-domain-service forge] :raw-lisp-parsing prohibited :partial-source-diagnostics required)
+      :dependencies [missiond deploy-center xjp-domain-service forge? secret-store?]
+      :ops-capability project-management-read-model
+      :source-evidence [services/project-universe/.missiond/intent.lisp services/project-universe/deploy/deploy-center/project.json]
       :surface service-runtime-universe)
     (service :id legacy-refactor-service
       :project legacy-refactor-service

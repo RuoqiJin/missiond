@@ -122,6 +122,8 @@ pub struct JarvisGroundingRequest {
     #[serde(default)]
     pub permission_context: serde_json::Value,
     #[serde(default)]
+    pub media_context: serde_json::Value,
+    #[serde(default)]
     pub unknowns: Vec<String>,
 }
 
@@ -965,6 +967,384 @@ fn normalize_interaction_message(message: &serde_json::Value) -> String {
     }
 }
 
+fn interaction_short_hash(input: &str) -> String {
+    Sha256::digest(input.as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn json_nested_string_field(value: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| {
+        let mut cursor = value;
+        for segment in *path {
+            cursor = cursor.get(*segment)?;
+        }
+        cursor
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn attachment_url_from_value(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
+    }
+    json_nested_string_field(
+        value,
+        &[
+            &["image_url", "url"],
+            &["imageUrl"],
+            &["image_url"],
+            &["url"],
+            &["uri"],
+            &["signed_url", "url"],
+            &["media_artifact", "signed_url", "url"],
+            &["media_artifact", "url"],
+            &["media_artifact", "uri"],
+        ],
+    )
+}
+
+fn redacted_attachment_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.to_ascii_lowercase().starts_with("data:") {
+        return "data:<redacted>".to_string();
+    }
+    let without_fragment = trimmed
+        .split_once('#')
+        .map(|(base, _)| base)
+        .unwrap_or(trimmed);
+    match without_fragment.split_once('?') {
+        Some((base, _)) if !base.is_empty() => format!("{base}?<redacted>"),
+        _ => without_fragment.to_string(),
+    }
+}
+
+fn xjp_image_ref_from_attachment(value: &serde_json::Value, url: Option<&str>) -> Option<String> {
+    let explicit = json_nested_string_field(
+        value,
+        &[
+            &["image_service_ref"],
+            &["xjp_image_ref"],
+            &["media_ref"],
+            &["media_artifact", "image_service_ref"],
+            &["media_artifact", "uri"],
+        ],
+    );
+    if let Some(reference) = explicit {
+        if reference.starts_with("xjp-image://") || reference.starts_with("media-artifact://") {
+            return Some(reference);
+        }
+        return Some(format!("xjp-image://{}", reference.trim_matches('/')));
+    }
+
+    if let Some(id) = json_nested_string_field(
+        value,
+        &[
+            &["xjp_image_id"],
+            &["image_id"],
+            &["media_id"],
+            &["artifact_id"],
+            &["media_artifact", "id"],
+            &["media_artifact", "artifact_id"],
+        ],
+    ) {
+        return Some(format!("xjp-image://images/{}", id.trim_matches('/')));
+    }
+
+    let Some(url) = url.map(str::trim).filter(|url| !url.is_empty()) else {
+        return None;
+    };
+    if url.starts_with("xjp-image://") || url.starts_with("media-artifact://") {
+        return Some(url.to_string());
+    }
+    let redacted = redacted_attachment_url(url);
+    let lower = redacted.to_ascii_lowercase();
+    if lower.contains("xjp-image")
+        || lower.contains("xiaojin")
+        || lower.contains("/v1/images/")
+        || lower.contains("/images/")
+    {
+        return Some(redacted);
+    }
+    None
+}
+
+fn attachment_is_image_like(value: &serde_json::Value, url: Option<&str>) -> bool {
+    if let Some(kind) = json_nested_string_field(
+        value,
+        &[
+            &["kind"],
+            &["type"],
+            &["media_kind"],
+            &["media_artifact", "kind"],
+            &["media_artifact", "type"],
+        ],
+    ) {
+        let lower = kind.to_ascii_lowercase();
+        if lower.contains("image") || lower == "media_artifact" || lower == "imageurl" {
+            return true;
+        }
+    }
+    if let Some(media_type) = json_nested_string_field(
+        value,
+        &[
+            &["media_type"],
+            &["mime_type"],
+            &["content_type"],
+            &["media_artifact", "media_type"],
+            &["media_artifact", "mime_type"],
+        ],
+    ) {
+        if media_type.to_ascii_lowercase().starts_with("image/") {
+            return true;
+        }
+    }
+    if value.get("image_url").is_some()
+        || value.get("imageUrl").is_some()
+        || value.get("xjp_image_id").is_some()
+        || value.get("media_artifact").is_some()
+    {
+        return true;
+    }
+    url.map(|url| {
+        let lower = url.to_ascii_lowercase();
+        lower.starts_with("data:image/")
+            || lower.contains("/images/")
+            || lower.ends_with(".png")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg")
+            || lower.ends_with(".webp")
+            || lower.ends_with(".gif")
+    })
+    .unwrap_or(false)
+}
+
+fn normalize_interaction_attachment_ref(
+    value: &serde_json::Value,
+    source: &str,
+    index: usize,
+) -> Option<serde_json::Value> {
+    let url = attachment_url_from_value(value);
+    if !attachment_is_image_like(value, url.as_deref()) {
+        return None;
+    }
+    let data_url_rejected = url
+        .as_deref()
+        .map(|url| url.trim().to_ascii_lowercase().starts_with("data:"))
+        .unwrap_or(false);
+    let image_service_ref = if data_url_rejected {
+        None
+    } else {
+        xjp_image_ref_from_attachment(value, url.as_deref())
+    };
+    let media_type = json_nested_string_field(
+        value,
+        &[
+            &["media_type"],
+            &["mime_type"],
+            &["content_type"],
+            &["media_artifact", "media_type"],
+            &["media_artifact", "mime_type"],
+        ],
+    )
+    .or_else(|| {
+        url.as_deref()
+            .filter(|url| url.to_ascii_lowercase().starts_with("data:image/"))
+            .and_then(|url| url.split_once(';').map(|(prefix, _)| prefix))
+            .and_then(|prefix| prefix.strip_prefix("data:"))
+            .map(ToOwned::to_owned)
+    });
+    let artifact_id = json_nested_string_field(
+        value,
+        &[
+            &["artifact_id"],
+            &["media_artifact", "artifact_id"],
+            &["media_artifact", "id"],
+            &["image_id"],
+            &["xjp_image_id"],
+        ],
+    );
+    let id_seed = artifact_id
+        .as_deref()
+        .or(image_service_ref.as_deref())
+        .or(url.as_deref())
+        .unwrap_or(source);
+    let attachment_id = json_nested_string_field(value, &[&["attachment_id"], &["id"]])
+        .unwrap_or_else(|| format!("media-{}", interaction_short_hash(id_seed)));
+    let status = if data_url_rejected {
+        "rejected"
+    } else if image_service_ref.is_some() {
+        "accepted"
+    } else {
+        "accepted_remote_reference"
+    };
+    let transport = if data_url_rejected {
+        "inline-data-url-rejected"
+    } else if image_service_ref.is_some() {
+        "xjp-image-service-ref"
+    } else {
+        "remote-url-ref"
+    };
+    let signed_url_present = json_nested_string_field(
+        value,
+        &[
+            &["signed_url", "url"],
+            &["signed_url"],
+            &["media_artifact", "signed_url", "url"],
+            &["media_artifact", "signed_url"],
+        ],
+    )
+    .is_some()
+        || url
+            .as_deref()
+            .map(|url| {
+                let lower = url.to_ascii_lowercase();
+                lower.contains("signature=")
+                    || lower.contains("sig=")
+                    || lower.contains("token=")
+                    || lower.contains("expires=")
+            })
+            .unwrap_or(false);
+    let mut attachment = serde_json::json!({
+        "schema": "missiond.interaction-media-attachment.v1",
+        "kind": "image",
+        "attachment_id": attachment_id,
+        "source": source,
+        "index": index,
+        "status": status,
+        "transport": transport,
+        "binary_owner": "xjp-image-service",
+        "missiond_transport": "reference-only",
+        "media_type": media_type,
+        "image_service_ref": image_service_ref,
+        "artifact_id": artifact_id,
+        "artifact_hash": json_nested_string_field(value, &[&["artifact_hash"], &["hash"], &["media_artifact", "artifact_hash"]]),
+        "sha256": json_nested_string_field(value, &[&["sha256"], &["digest"], &["media_artifact", "sha256"]]),
+        "size_bytes": value.get("size_bytes").or_else(|| value.get("size")).or_else(|| value.pointer("/media_artifact/size_bytes")).cloned(),
+        "width": value.get("width").or_else(|| value.pointer("/metadata/width")).or_else(|| value.pointer("/media_artifact/width")).cloned(),
+        "height": value.get("height").or_else(|| value.pointer("/metadata/height")).or_else(|| value.pointer("/media_artifact/height")).cloned(),
+        "detail": json_nested_string_field(value, &[&["detail"], &["image_url", "detail"]]),
+        "source_url_redacted": url.as_deref().map(redacted_attachment_url),
+        "signed_url_present": signed_url_present,
+    });
+    if data_url_rejected {
+        if let Some(object) = attachment.as_object_mut() {
+            object.insert(
+                "diagnostics".to_string(),
+                serde_json::json!([{
+                    "code": "IMAGE_INLINE_DATA_URL_REQUIRES_XJP_UPLOAD",
+                    "message": "Upload image bytes to xjp-image-service first; MissionD accepts reference-only media attachments."
+                }]),
+            );
+        }
+    }
+    Some(crate::evidence_redactor::redact_json_value(&attachment))
+}
+
+fn normalize_interaction_attachments(
+    attachments: &[serde_json::Value],
+    source: &str,
+) -> Vec<serde_json::Value> {
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+    for (index, attachment) in attachments.iter().enumerate() {
+        let Some(value) = normalize_interaction_attachment_ref(attachment, source, index) else {
+            continue;
+        };
+        let key = value
+            .get("attachment_id")
+            .and_then(|field| field.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !key.is_empty() && !seen.insert(key) {
+            continue;
+        }
+        normalized.push(value);
+    }
+    normalized
+}
+
+fn interaction_accepted_attachment_count(attachments: &[serde_json::Value]) -> usize {
+    attachments
+        .iter()
+        .filter(|attachment| {
+            attachment.get("status").and_then(|value| value.as_str()) != Some("rejected")
+        })
+        .count()
+}
+
+fn interaction_media_context(attachments: &[serde_json::Value]) -> serde_json::Value {
+    let accepted_count = interaction_accepted_attachment_count(attachments);
+    serde_json::json!({
+        "schema": "missiond.interaction-media-context.v1",
+        "binary_owner": "xjp-image-service",
+        "missiond_transport": "reference-only",
+        "attachment_count": attachments.len(),
+        "accepted_attachment_count": accepted_count,
+        "rejected_attachment_count": attachments.len().saturating_sub(accepted_count),
+        "attachment_refs": attachments,
+        "rules": [
+            "iOS uploads image bytes to xjp-image-service before calling MissionD",
+            "MissionD stores and replays image references, not base64 payloads",
+            "signed URLs are redacted from public events and artifacts"
+        ]
+    })
+}
+
+fn interaction_media_summary_for_objective(attachments: &[serde_json::Value]) -> Option<String> {
+    let accepted = interaction_accepted_attachment_count(attachments);
+    if accepted == 0 {
+        return None;
+    }
+    let refs = attachments
+        .iter()
+        .filter(|attachment| {
+            attachment.get("status").and_then(|value| value.as_str()) != Some("rejected")
+        })
+        .filter_map(|attachment| {
+            attachment
+                .get("image_service_ref")
+                .and_then(|value| value.as_str())
+                .or_else(|| {
+                    attachment
+                        .get("artifact_id")
+                        .and_then(|value| value.as_str())
+                })
+                .or_else(|| {
+                    attachment
+                        .get("attachment_id")
+                        .and_then(|value| value.as_str())
+                })
+        })
+        .take(5)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(if refs.is_empty() {
+        format!("用户上传了 {accepted} 张图片，图片二进制由 xjp-image-service 托管。")
+    } else {
+        format!("用户上传了 {accepted} 张图片，图片引用：{refs}。")
+    })
+}
+
+fn openai_request_latest_user_message(req: &serde_json::Value) -> Option<&serde_json::Value> {
+    req.get("messages")
+        .and_then(|messages| messages.as_array())
+        .and_then(|messages| {
+            messages.iter().rev().find(|message| {
+                message.get("role").and_then(|value| value.as_str()) == Some("user")
+            })
+        })
+}
+
 fn openai_content_to_text(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(text) => text.trim().to_string(),
@@ -991,22 +1371,10 @@ fn openai_content_to_text(content: &serde_json::Value) -> String {
 }
 
 fn openai_request_user_message(req: &serde_json::Value) -> String {
-    req.get("messages")
-        .and_then(|messages| messages.as_array())
-        .and_then(|messages| {
-            messages.iter().rev().find_map(|message| {
-                let role = message.get("role").and_then(|value| value.as_str())?;
-                if role != "user" {
-                    return None;
-                }
-                let text = openai_content_to_text(message.get("content")?);
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text)
-                }
-            })
-        })
+    openai_request_latest_user_message(req)
+        .and_then(|message| message.get("content"))
+        .map(openai_content_to_text)
+        .filter(|text| !text.is_empty())
         .unwrap_or_else(|| {
             req.get("prompt")
                 .and_then(|value| value.as_str())
@@ -1014,6 +1382,35 @@ fn openai_request_user_message(req: &serde_json::Value) -> String {
                 .unwrap_or_default()
                 .to_string()
         })
+}
+
+fn openai_request_attachments(req: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut raw = Vec::new();
+    if let Some(attachments) = req.get("attachments").and_then(|value| value.as_array()) {
+        raw.extend(attachments.iter().cloned());
+    }
+    if let Some(parts) = openai_request_latest_user_message(req)
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_array())
+    {
+        raw.extend(parts.iter().filter_map(|part| {
+            let kind = part
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if kind.contains("image")
+                || part.get("image_url").is_some()
+                || part.get("imageUrl").is_some()
+                || part.get("media_artifact").is_some()
+            {
+                Some(part.clone())
+            } else {
+                None
+            }
+        }));
+    }
+    normalize_interaction_attachments(&raw, "openai-chat-completions")
 }
 
 fn openai_request_to_interaction_envelope(req: &serde_json::Value) -> InteractionEnvelope {
@@ -1070,7 +1467,7 @@ fn openai_request_to_interaction_envelope(req: &serde_json::Value) -> Interactio
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned),
         message: serde_json::Value::String(openai_request_user_message(req)),
-        attachments: Vec::new(),
+        attachments: openai_request_attachments(req),
         metadata,
     }
 }
@@ -2078,6 +2475,106 @@ impl PTYWebSocketServer {
             body.len(),
             body
         );
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    /// HTTP API — compiled MissionD project universe.
+    ///
+    /// This endpoint is read-only and serves the compiled ABI projection. Hot
+    /// callers must consume this JSON instead of parsing V3 Lisp directly.
+    async fn handle_project_universe(mut stream: TcpStream) -> anyhow::Result<()> {
+        let mut buf = vec![0u8; 4096];
+        let _ = stream.read(&mut buf).await;
+
+        let compiled_runtime_dir = Self::compiled_runtime_dir();
+        let path = compiled_runtime_dir.join("compiled-project-universe.json");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                let body = serde_json::json!({
+                    "schema": "missiond.project-universe-api-error.v1",
+                    "status": "unavailable",
+                    "kind": "compiled_project_universe_unavailable",
+                    "path": path,
+                    "reason": err.to_string(),
+                    "recovery": "Run node scripts/project-v3-contracts.mjs --write and node scripts/compile-v3-runtime.mjs --write, then restart MissionD."
+                });
+                return Self::send_http_error(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    &body.to_string(),
+                )
+                .await;
+            }
+        };
+
+        let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                let body = serde_json::json!({
+                    "schema": "missiond.project-universe-api-error.v1",
+                    "status": "unavailable",
+                    "kind": "compiled_project_universe_invalid_json",
+                    "path": path,
+                    "reason": err.to_string(),
+                    "recovery": "Regenerate compiled V3 runtime artifacts and restart MissionD."
+                });
+                return Self::send_http_error(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    &body.to_string(),
+                )
+                .await;
+            }
+        };
+
+        let actual_schema = parsed
+            .get("schema_version")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let actual_source_hash = parsed
+            .get("source_hash")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let diagnostics_count = parsed
+            .get("diagnostics")
+            .and_then(|value| value.as_array())
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+        if actual_schema != "missiond.compiled-project-universe.v1"
+            || actual_source_hash != crate::v3_contracts::SOURCE_HASH
+            || diagnostics_count > 0
+        {
+            let body = serde_json::json!({
+                "schema": "missiond.project-universe-api-error.v1",
+                "status": "unavailable",
+                "kind": "compiled_project_universe_stale",
+                "path": path,
+                "expected": {
+                    "schema_version": "missiond.compiled-project-universe.v1",
+                    "source_hash": crate::v3_contracts::SOURCE_HASH,
+                },
+                "actual": {
+                    "schema_version": actual_schema,
+                    "source_hash": actual_source_hash,
+                    "diagnostics_count": diagnostics_count,
+                },
+                "recovery": "Run node scripts/project-v3-contracts.mjs --write and node scripts/compile-v3-runtime.mjs --write, then restart MissionD."
+            });
+            return Self::send_http_error(
+                &mut stream,
+                503,
+                "Service Unavailable",
+                &body.to_string(),
+            )
+            .await;
+        }
+
+        let response = Self::http_json_response(raw);
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
         Ok(())
@@ -3830,12 +4327,28 @@ impl PTYWebSocketServer {
         };
         let auth_token = auth_resolution.token;
         let permission_context = auth_resolution.permission_context;
-        let raw_user_text = normalize_interaction_message(&envelope.message);
+        envelope.attachments =
+            normalize_interaction_attachments(&envelope.attachments, "interaction-envelope");
+        let media_context = interaction_media_context(&envelope.attachments);
+        let accepted_attachment_count =
+            interaction_accepted_attachment_count(&envelope.attachments);
+        let mut raw_user_text = normalize_interaction_message(&envelope.message);
+        if raw_user_text.is_empty() && accepted_attachment_count > 0 {
+            raw_user_text = "请分析我上传的图片".to_string();
+            envelope.message = serde_json::Value::String(raw_user_text.clone());
+        }
         if raw_user_text.is_empty() {
-            let err = serde_json::json!({"error": {"message": "InteractionEnvelope.message text is required"}});
+            let err = serde_json::json!({
+                "error": {
+                    "code": "INTERACTION_MESSAGE_OR_MEDIA_REQUIRED",
+                    "message": "InteractionEnvelope.message text or an accepted xjp-image-service media attachment is required"
+                },
+                "media_context": media_context
+            });
             Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
             return Ok(());
         }
+        let media_summary = interaction_media_summary_for_objective(&envelope.attachments);
 
         let interaction_id = interaction_metadata_string(&envelope, "interaction_id")
             .unwrap_or_else(|| format!("ix-{}", uuid::Uuid::new_v4().simple()));
@@ -3860,6 +4373,8 @@ impl PTYWebSocketServer {
             "conversation_id": envelope.conversation_id,
             "message_chars": raw_user_text.chars().count(),
             "attachments_count": envelope.attachments.len(),
+            "accepted_attachments_count": accepted_attachment_count,
+            "media_context": media_context.clone(),
             "remote_addr": addr.to_string(),
         });
         let authenticated = serde_json::json!({
@@ -3983,7 +4498,13 @@ impl PTYWebSocketServer {
                     let _ = db
                         .router_chat_append_messages(
                             &id,
-                            &[("user".to_string(), raw_user_text.clone())],
+                            &[(
+                                "user".to_string(),
+                                media_summary
+                                    .as_ref()
+                                    .map(|summary| format!("{raw_user_text}\n\n[media]\n{summary}"))
+                                    .unwrap_or_else(|| raw_user_text.clone()),
+                            )],
                         )
                         .await;
                     Some(id)
@@ -4180,10 +4701,12 @@ impl PTYWebSocketServer {
                     topic_id: conversation_scope.topic_id.clone(),
                     topic_label: conversation_scope.topic_label.clone(),
                     permission_context: permission_context.clone(),
+                    media_context: media_context.clone(),
                     unknowns: vec![
                         "Collect MissionD upstream/downstream facts that affect this confirmed intent.".to_string(),
                         "Identify project registry, SSOT, runtime, skill, provider, infra, and permission evidence needed before plan.lisp.".to_string(),
                         "Write the grounded evidence report for the plan author instead of creating BoardTask or implementing changes.".to_string(),
+                        "If media_context has accepted image attachments, include their xjp-image-service refs and any available dimensions/hash in the grounding report; never ask for or persist inline base64.".to_string(),
                     ],
                 },
             )
@@ -4279,6 +4802,7 @@ impl PTYWebSocketServer {
                 "topic_id": resolved_topic_id,
                 "topic_label": resolved_topic_label,
                 "sources_used": sources_used,
+                "media_context": media_context.clone(),
                 "diagnostics": grounding_diagnostics,
             });
             Self::write_sse_event(&mut stream, "grounding", &grounding_ledger_event).await?;
@@ -4308,6 +4832,7 @@ impl PTYWebSocketServer {
                 resolved_topic_label.as_deref(),
                 &sources_used,
                 Some(&permission_context),
+                &media_context,
             )
             .await
             {
@@ -4358,6 +4883,7 @@ impl PTYWebSocketServer {
                 "topic_id": resolved_topic_id,
                 "topic_label": resolved_topic_label,
                 "permission_context": permission_context.clone(),
+                "media_context": media_context.clone(),
                 "understanding": authored_intent.understanding,
                 "objective": objective_text,
                 "original_user_message": &raw_user_text,
@@ -4403,6 +4929,7 @@ impl PTYWebSocketServer {
                         "channel": &channel,
                         "conversation_id": jarvis_conv_id,
                         "grounding_context_id": grounding_context_id,
+                        "media_context": media_context.clone(),
                     }),
                 },
             )
@@ -4520,10 +5047,12 @@ impl PTYWebSocketServer {
                         topic_id: conversation_scope.topic_id.clone(),
                         topic_label: conversation_scope.topic_label.clone(),
                         permission_context: permission_context.clone(),
+                        media_context: media_context.clone(),
                         unknowns: vec![
                             "Collect MissionD upstream/downstream facts that affect this archived intent.".to_string(),
                             "Identify project registry, SSOT, runtime, skill, provider, infra, and permission evidence needed before plan.lisp.".to_string(),
                             "Write the grounded evidence report for the plan author instead of creating BoardTask or implementing changes.".to_string(),
+                            "If media_context has accepted image attachments, include their xjp-image-service refs and any available dimensions/hash in the grounding report; never ask for or persist inline base64.".to_string(),
                         ],
                     },
                 )
@@ -4614,6 +5143,7 @@ impl PTYWebSocketServer {
                     "topic_id": resolved_topic_id,
                     "topic_label": resolved_topic_label,
                     "sources_used": sources_used,
+                    "media_context": media_context.clone(),
                     "diagnostics": grounding_diagnostics,
                 });
                 Self::write_sse_event(&mut stream, "grounding", &grounding_ledger_event).await?;
@@ -4767,6 +5297,7 @@ impl PTYWebSocketServer {
                 "topic_id": resolved_topic_id,
                 "topic_label": resolved_topic_label,
                 "intent_artifact_id": intent_artifact_id,
+                "media_context": media_context.clone(),
                 "objective": objective_text,
                 "judgment": authored_key_judgment.judgment,
                 "review_text": authored_key_judgment.review_text,
@@ -4807,6 +5338,7 @@ impl PTYWebSocketServer {
                         "conversation_id": jarvis_conv_id,
                         "grounding_context_id": grounding_context_id,
                         "intent_artifact_id": intent_artifact_id,
+                        "media_context": media_context.clone(),
                     }),
                 },
             )
@@ -5020,6 +5552,7 @@ impl PTYWebSocketServer {
                 "topic_id": resolved_topic_id,
                 "topic_label": resolved_topic_label,
                 "intent_artifact_id": intent_artifact_id,
+                "media_context": media_context.clone(),
                 "key_judgment_artifact_id": key_judgment_ref.artifact_id,
                 "key_judgment_artifact_hash": key_judgment_ref.artifact_hash,
                 "key_judgment_artifact_path": key_judgment_ref.artifact_path,
@@ -5087,6 +5620,7 @@ impl PTYWebSocketServer {
                         "channel": &channel,
                         "grounding_context_id": grounding_context_id,
                         "intent_artifact_id": intent_artifact_id,
+                        "media_context": media_context.clone(),
                     }),
                 },
             )
@@ -5316,6 +5850,7 @@ impl PTYWebSocketServer {
                 direct_answer_draft.as_deref(),
                 &permission_context,
                 &sources_used,
+                &media_context,
                 &provider_box_http,
                 db.as_ref(),
                 jarvis_conv_id.as_deref(),
@@ -5384,7 +5919,7 @@ impl PTYWebSocketServer {
         } else {
             objective_text.clone()
         };
-        let dispatch_metadata = Self::derive_jarvis_dispatch_contract(
+        let mut dispatch_metadata = Self::derive_jarvis_dispatch_contract(
             &objective_text,
             &grounding_context_id,
             context_pack_path.as_deref(),
@@ -5398,6 +5933,9 @@ impl PTYWebSocketServer {
             &plan_atomization_graph,
             &Self::jarvis_runtime_read_scope_root(),
         );
+        if let Some(object) = dispatch_metadata.as_object_mut() {
+            object.insert("media_context".to_string(), media_context.clone());
+        }
         let prompt_template = Self::build_jarvis_worker_prompt(&objective_text, &dispatch_metadata);
         let meta = serde_json::json!({
             "source": "interaction-gateway",
@@ -5423,6 +5961,7 @@ impl PTYWebSocketServer {
             "key_judgment_artifact_hash": key_judgment_ref.artifact_hash,
             "key_judgment": key_judgment_ref.judgment,
             "plan_atomization_graph": plan_atomization_graph,
+            "media_context": media_context.clone(),
             "dispatch_metadata": dispatch_metadata,
             "user_message": raw_user_text,
             "objective": objective_text,
@@ -5642,6 +6181,7 @@ impl PTYWebSocketServer {
                         "planned_atom_task_ids": planned_atom_task_ids,
                         "follow_payload": result_pending.get("follow_payload").cloned(),
                         "dispatch_accepted": dispatch_accepted,
+                        "media_context": media_context.clone(),
                     }),
                     &provider_box_http,
                     Some(db),
@@ -6910,6 +7450,7 @@ impl PTYWebSocketServer {
         topic_label: Option<&str>,
         sources_used: &[String],
         permission_context: Option<&serde_json::Value>,
+        media_context: &serde_json::Value,
     ) -> String {
         let provider = Self::jarvis_author_text_provider();
         let engine = Self::provider_box_engine_for_provider(provider.as_str()).unwrap_or("codex");
@@ -6924,6 +7465,7 @@ impl PTYWebSocketServer {
             "topic_label": topic_label,
             "sources_used": sources_used,
             "permission_context": permission_context.cloned().unwrap_or(serde_json::Value::Null),
+            "media_context": media_context,
             "authoring_lane": {
                 "provider": provider,
                 "engine": engine,
@@ -7731,6 +8273,7 @@ JSON 字段必须是：\n\
         topic_id: Option<&str>,
         topic_label: Option<&str>,
         sources_used: &[String],
+        media_context: &serde_json::Value,
     ) -> String {
         let provider = Self::jarvis_author_text_provider();
         let engine = Self::provider_box_engine_for_provider(provider.as_str()).unwrap_or("codex");
@@ -7742,7 +8285,7 @@ JSON 字段必须是：\n\
             &config.reasoning_effort,
         );
         format!(
-            "(intent-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :original-message {}\n  :objective {}\n  :intent-kind {}\n  :confidence {}\n  :understanding {}\n  :grounding-context-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-intent-confirmation :required true)\n  :next-step \"confirm intent -> collect MissionD MCP grounding report -> generate plan.lisp -> confirm plan -> direct answer or BoardTask\")",
+            "(intent-draft\n  :schema {}\n  :authority {}\n  :semantic-author (:provider {} :engine {} :slot-id {} :model {} :reasoning-effort {} :sandbox {} :approval-policy {})\n  :channel {}\n  :original-message {}\n  :objective {}\n  :intent-kind {}\n  :confidence {}\n  :understanding {}\n  :grounding-context-id {}\n  :topic-id {}\n  :topic-label {}\n  :sources-used {}\n  :media-context-json {}\n  :assumptions {}\n  :non-goals {}\n  :acceptance-signals {}\n  :approval (:state awaiting-intent-confirmation :required true)\n  :next-step \"confirm intent -> collect MissionD MCP grounding report -> generate plan.lisp -> confirm plan -> direct answer or BoardTask\")",
             Self::jarvis_lisp_string(schema),
             Self::jarvis_lisp_string(&authority),
             Self::jarvis_lisp_string(&provider),
@@ -7762,6 +8305,7 @@ JSON 字段必须是：\n\
             Self::jarvis_lisp_optional(topic_id),
             Self::jarvis_lisp_optional(topic_label),
             Self::jarvis_lisp_string_list(sources_used),
+            Self::jarvis_lisp_json(media_context),
             Self::jarvis_lisp_string_list(&draft.assumptions),
             Self::jarvis_lisp_string_list(&draft.non_goals),
             Self::jarvis_lisp_string_list(&draft.acceptance_signals),
@@ -7779,6 +8323,7 @@ JSON 字段必须是：\n\
         topic_label: Option<&str>,
         sources_used: &[String],
         permission_context: Option<&serde_json::Value>,
+        media_context: &serde_json::Value,
     ) -> anyhow::Result<JarvisAuthoredIntentDraft> {
         let prompt = Self::jarvis_codex_intent_prompt(
             config,
@@ -7790,6 +8335,7 @@ JSON 字段必须是：\n\
             topic_label,
             sources_used,
             permission_context,
+            media_context,
         );
         let response =
             Self::run_jarvis_codex_intent_turn(provider_box_http, config, &prompt).await?;
@@ -7804,6 +8350,7 @@ JSON 字段必须是：\n\
             topic_id,
             topic_label,
             sources_used,
+            media_context,
         );
         Ok(JarvisAuthoredIntentDraft {
             objective: parsed.recognized_objective.trim().to_string(),
@@ -7833,6 +8380,7 @@ JSON 字段必须是：\n\
         topic_label: Option<&str>,
         sources_used: &[String],
         permission_context: Option<&serde_json::Value>,
+        media_context: &serde_json::Value,
     ) -> anyhow::Result<JarvisAuthoredIntentDraft> {
         const HEARTBEAT_SECS: u64 = 8;
         let (provider, slot_id, author) = Self::jarvis_author_progress_identity(
@@ -7866,6 +8414,7 @@ JSON 字段必须是：\n\
             topic_label,
             sources_used,
             permission_context,
+            media_context,
         ));
         let mut heartbeat = Box::pin(tokio::time::sleep(std::time::Duration::from_secs(
             HEARTBEAT_SECS,
@@ -9318,6 +9867,211 @@ JSON 字段必须是：\n\
             .clamp(10, timeout_secs.max(10).min(180))
     }
 
+    fn jarvis_runtime_root_dir() -> std::path::PathBuf {
+        std::env::var("MISSIOND_RUNTIME_DIR")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                    .join(".missiond")
+                    .join("runtime")
+                    .join("missiond")
+            })
+    }
+
+    fn jarvis_communication_preferences_path() -> std::path::PathBuf {
+        if let Some(path) = Self::env_var_trimmed("MISSIOND_JARVIS_COMMUNICATION_PREFERENCES_FILE")
+        {
+            return Self::expand_home_path(path.as_str())
+                .unwrap_or_else(|| std::path::PathBuf::from(path));
+        }
+        Self::jarvis_runtime_root_dir()
+            .join("jarvis")
+            .join("communication-preferences.lisp")
+    }
+
+    fn default_jarvis_communication_preferences_lisp(path: &Path) -> String {
+        format!(
+            "(jarvis-communication-preferences\n  :schema {}\n  :owner jarvis-communication-officer\n  :provider agy\n  :model {}\n  :path {}\n  :base-style [zh-CN concise evidence-bound current-step-first]\n  :maintenance \"MissionD appends redacted preference-observation forms; provider-box AGY turns receive this file as read-only prompt context and must not write it.\"\n  :observations-append-only true\n)\n",
+            Self::jarvis_lisp_string("missiond.jarvis-communication-preferences.v1"),
+            Self::jarvis_lisp_string(
+                Self::jarvis_default_text_only_model("agy")
+                    .as_deref()
+                    .unwrap_or("Gemini 3.1 Pro (High)")
+            ),
+            Self::jarvis_lisp_string(&path.display().to_string())
+        )
+    }
+
+    async fn read_jarvis_communication_preferences_lisp() -> (std::path::PathBuf, String, bool) {
+        const MAX_PREFERENCE_CHARS: usize = 12_000;
+        let path = Self::jarvis_communication_preferences_path();
+        let (content, existed) = match tokio::fs::read_to_string(&path).await {
+            Ok(content) => (content, true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let default = Self::default_jarvis_communication_preferences_lisp(&path);
+                if let Some(parent) = path.parent() {
+                    if let Err(create_err) = tokio::fs::create_dir_all(parent).await {
+                        warn!(
+                            "Jarvis communication preferences directory could not be created: {}",
+                            create_err
+                        );
+                    }
+                }
+                if let Err(write_err) = tokio::fs::write(&path, default.as_bytes()).await {
+                    warn!(
+                        "Jarvis communication preferences file could not be initialized: {}",
+                        write_err
+                    );
+                }
+                (default, false)
+            }
+            Err(err) => {
+                warn!(
+                    "Jarvis communication preferences file could not be read: {}",
+                    err
+                );
+                (
+                    Self::default_jarvis_communication_preferences_lisp(&path),
+                    false,
+                )
+            }
+        };
+        let redacted = crate::evidence_redactor::redact_text(&content).text;
+        let preview = redacted.chars().take(MAX_PREFERENCE_CHARS).collect();
+        (path, preview, existed)
+    }
+
+    fn jarvis_short_hash(input: &str) -> String {
+        Sha256::digest(input.as_bytes())
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    }
+
+    fn jarvis_communication_preference_signal(text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        let lower = text.to_ascii_lowercase();
+        let style_context = [
+            "沟通风格",
+            "说话风格",
+            "回复风格",
+            "表达风格",
+            "沟通偏好",
+            "语气",
+            "口吻",
+            "话术",
+            "沟通官",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker));
+        let durable_intent = ["以后", "下次", "记住", "偏好", "要求", "应该", "以后都"]
+            .iter()
+            .any(|marker| text.contains(marker));
+        let concrete_style = [
+            "简洁",
+            "详细",
+            "直接",
+            "分步骤",
+            "列表",
+            "不要废话",
+            "别废话",
+            "少说",
+            "多说",
+            "少一点",
+            "多一点",
+            "中文",
+            "英文",
+            "markdown",
+            "bullet",
+            "tone",
+            "style",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker) || lower.contains(marker));
+        let negative_style = ["不要", "别", "少"]
+            .iter()
+            .any(|marker| text.contains(marker));
+
+        (style_context && (durable_intent || concrete_style || negative_style))
+            || (durable_intent && concrete_style)
+    }
+
+    async fn persist_jarvis_communication_preference_observation(
+        phase: &str,
+        objective: &str,
+        interaction_id: Option<&str>,
+        chat_id: &str,
+        provider: &str,
+        slot_id: &str,
+        model: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        if !Self::jarvis_communication_preference_signal(objective) {
+            return Ok(None);
+        }
+        let path = Self::jarvis_communication_preferences_path();
+        let redacted = crate::evidence_redactor::redact_text(objective).text;
+        let preference_text = redacted.trim().chars().take(1_200).collect::<String>();
+        if preference_text.is_empty() {
+            return Ok(None);
+        }
+        let observed_at = chrono::Utc::now().to_rfc3339();
+        let observation_id = format!(
+            "comm-pref-{}",
+            Self::jarvis_short_hash(&format!(
+                "{}|{}|{}|{}",
+                phase,
+                interaction_id.unwrap_or(""),
+                chat_id,
+                preference_text
+            ))
+        );
+        let entry = format!(
+            "(preference-observation\n  :schema {}\n  :observation-id {}\n  :observed-at {}\n  :source jarvis-user-message\n  :status candidate\n  :phase {}\n  :interaction-id {}\n  :chat-id {}\n  :provider {}\n  :slot-id {}\n  :model {}\n  :source-text-hash {}\n  :preference-text {}\n)\n",
+            Self::jarvis_lisp_string("missiond.jarvis-communication-preferences.v1"),
+            Self::jarvis_lisp_string(&observation_id),
+            Self::jarvis_lisp_string(&observed_at),
+            Self::jarvis_lisp_string(phase),
+            Self::jarvis_lisp_optional(interaction_id),
+            Self::jarvis_lisp_string(chat_id),
+            Self::jarvis_lisp_string(provider),
+            Self::jarvis_lisp_string(slot_id),
+            Self::jarvis_lisp_optional(model),
+            Self::jarvis_lisp_string(&Self::jarvis_short_hash(&preference_text)),
+            Self::jarvis_lisp_string(&preference_text),
+        );
+
+        let mut content = match tokio::fs::read_to_string(&path).await {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Self::default_jarvis_communication_preferences_lisp(&path)
+            }
+            Err(err) => return Err(err.into()),
+        };
+        if content.contains(observation_id.as_str()) {
+            return Ok(Some(observation_id));
+        }
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push('\n');
+        content.push_str(&entry);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let tmp_path = path.with_extension("lisp.tmp");
+        tokio::fs::write(&tmp_path, content.as_bytes()).await?;
+        tokio::fs::rename(&tmp_path, &path).await?;
+        Ok(Some(observation_id))
+    }
+
     async fn read_jarvis_file_preview(path: Option<&str>, max_chars: usize) -> Option<String> {
         let path = path?.trim();
         if path.is_empty() || path.starts_with("shared-artifact://") {
@@ -9360,8 +10114,12 @@ JSON 字段必须是：\n\
         plan_direct_answer_draft: Option<&str>,
         permission_context: &serde_json::Value,
         sources_used: &[String],
+        media_context: &serde_json::Value,
+        communication_preferences_file: Option<&Path>,
+        communication_preferences_existed: bool,
+        communication_preferences_lisp: &str,
     ) -> (String, String) {
-        let system_prompt = "你是 MissionD Jarvis 的 grounded direct-answer materializer。你只能基于随请求提供的 grounding report、key judgment、grounding context、PermissionContext、sources_used、intent/plan artifact 生成自然语言回答。不要调用工具，不要读取文件，不要声称已创建 BoardTask，不要编造没有证据的事实。若证据不足，直接说明证据不足并列出还缺什么。".to_string();
+        let system_prompt = "你是 MissionD Jarvis 的 grounded direct-answer materializer。你只能基于随请求提供的 grounding report、key judgment、grounding context、PermissionContext、sources_used、intent/plan artifact 生成自然语言回答。你会收到 MissionD 维护的 communication_preferences_lisp，只能把它作为用户沟通偏好的只读风格上下文；不要调用工具，不要读取文件，不要声称已创建 BoardTask，不要编造没有证据的事实。若证据不足，直接说明证据不足并列出还缺什么。".to_string();
         let payload = serde_json::json!({
             "schema": "missiond.jarvis-grounded-direct-answer-input.v1",
             "objective": objective,
@@ -9384,10 +10142,17 @@ JSON 字段必须是：\n\
             "acceptance_focus": key_judgment.acceptance_focus,
             "permission_context": permission_context,
             "sources_used": sources_used,
+            "media_context": media_context,
+            "communication_preferences_file": communication_preferences_file
+                .map(|path| path.display().to_string()),
+            "communication_preferences_existed": communication_preferences_existed,
+            "communication_preferences_schema": "missiond.jarvis-communication-preferences.v1",
+            "communication_preferences_lisp": communication_preferences_lisp,
             "answer_contract": {
                 "must_use_grounding": true,
                 "must_not_create_board_task": true,
                 "must_not_claim_tool_execution": true,
+                "must_apply_communication_preferences_when_safe": true,
                 "must_report_evidence": true
             }
         });
@@ -9402,16 +10167,31 @@ JSON 字段必须是：\n\
         phase: &str,
         objective: &str,
         context: &serde_json::Value,
+        communication_preferences_file: Option<&Path>,
+        communication_preferences_existed: bool,
+        communication_preferences_lisp: &str,
     ) -> String {
         let payload = serde_json::json!({
             "schema": "missiond.jarvis-communication-officer-input.v1",
             "phase": phase,
             "objective": objective,
             "context": context,
+            "communication_preferences_file": communication_preferences_file
+                .map(|path| path.display().to_string()),
+            "communication_preferences_existed": communication_preferences_existed,
+            "communication_preferences_schema": "missiond.jarvis-communication-preferences.v1",
+            "communication_preferences_lisp": communication_preferences_lisp,
+            "communication_preferences_contract": {
+                "maintainer": "missiond-runtime",
+                "provider_access": "read-only-prompt-context",
+                "observation_status": "candidate",
+                "must_not_write_file": true
+            },
             "output_contract": {
                 "language": "zh-CN",
                 "style": "concise",
                 "must_be_evidence_bound": true,
+                "must_apply_communication_preferences_when_safe": true,
                 "must_not_show_lisp_body": true,
                 "must_not_ask_user_to_confirm_intent_or_plan": true,
                 "must_not_claim_terminal_result_unless_context_has_terminal_task_result": true,
@@ -9422,6 +10202,7 @@ JSON 字段必须是：\n\
             "你是 MissionD Jarvis 的沟通官，由 AGY Gemini 3.1 Pro 工位承担。\
              你只负责把当前计划、派工状态或执行结果用中文告诉用户。\
              你不能修改 intent.lisp、key judgment、plan.lisp、BoardTask，也不能声称没有证据的执行结果。\
+             你会收到 communication_preferences_lisp；它是 MissionD 维护的候选沟通偏好，只能作为风格参考，不能展示正文或声称已经改写偏好文件。\
              不要展示 Lisp 正文，不要让用户点击确认 intent/plan。\
              回复必须先用一到三行说明当前执行到哪一步，然后给出对用户可读的简短说明。\n\n{}",
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
@@ -9445,6 +10226,33 @@ JSON 字段必须是：\n\
         let engine = Self::provider_box_engine_for_provider(provider.as_str())?;
         let timeout_secs = Self::jarvis_communicator_timeout_secs();
         let slot_id = Self::jarvis_communicator_slot_id(provider.as_str());
+        let model = Self::jarvis_communicator_model_for_provider(provider.as_str());
+        let preference_observation_id =
+            match Self::persist_jarvis_communication_preference_observation(
+                phase,
+                objective,
+                interaction_id,
+                chat_id,
+                provider.as_str(),
+                slot_id.as_str(),
+                model.as_deref(),
+            )
+            .await
+            {
+                Ok(id) => id,
+                Err(err) => {
+                    warn!(
+                        "Jarvis communication preference observation could not be persisted: {}",
+                        err
+                    );
+                    None
+                }
+            };
+        let (
+            communication_preferences_file,
+            communication_preferences_lisp,
+            communication_preferences_existed,
+        ) = Self::read_jarvis_communication_preferences_lisp().await;
         Self::write_jarvis_progress(
             stream,
             progress_bus,
@@ -9460,10 +10268,16 @@ JSON 字段必须是：\n\
         )
         .await?;
 
-        let prompt = Self::build_jarvis_communicator_prompt(phase, objective, &context);
+        let prompt = Self::build_jarvis_communicator_prompt(
+            phase,
+            objective,
+            &context,
+            Some(communication_preferences_file.as_path()),
+            communication_preferences_existed,
+            communication_preferences_lisp.as_str(),
+        );
         let correlation_id = format!("jarvis-communicator-{}", uuid::Uuid::new_v4().simple());
         let agy_text_lane = engine == "agy";
-        let model = Self::jarvis_communicator_model_for_provider(provider.as_str());
         let body = serde_json::json!({
             "schema": "missiond.provider-interaction-request.v1",
             "command": "pure-text-single-turn",
@@ -9523,6 +10337,12 @@ JSON 字段必须是：\n\
             "slot_id": Self::jarvis_communicator_slot_id(Self::jarvis_communicator_provider().as_str()),
             "model": model,
             "content": text,
+            "communication_preferences_file": communication_preferences_file.display().to_string(),
+            "communication_preferences_schema": "missiond.jarvis-communication-preferences.v1",
+            "preference_observation_ids": preference_observation_id
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
         });
         Self::write_sse_event(stream, event_name, &event).await?;
         Self::persist_interaction_event(db, conversation_id, interaction_id, event_name, &event)
@@ -9544,6 +10364,9 @@ JSON 字段必须是：\n\
                     "communicator_engine": engine,
                     "communicator_slot_id": event.get("slot_id").cloned(),
                     "communicator_model": event.get("model").cloned(),
+                    "communication_preferences_file": event.get("communication_preferences_file").cloned(),
+                    "communication_preferences_schema": "missiond.jarvis-communication-preferences.v1",
+                    "preference_observation_ids": event.get("preference_observation_ids").cloned(),
                     "objective": objective,
                     "context": context,
                     "content": event.get("content").cloned(),
@@ -9596,12 +10419,43 @@ JSON 字段必须是：\n\
         plan_direct_answer_draft: Option<&str>,
         permission_context: &serde_json::Value,
         sources_used: &[String],
+        media_context: &serde_json::Value,
         provider_box_http: &ProviderBoxHttpSlot,
         db: Option<&Arc<dyn crate::db::traits::MissionStore>>,
         conversation_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let provider = Self::jarvis_direct_answer_provider();
         let timeout_secs = Self::jarvis_direct_answer_timeout_secs();
+        let direct_answer_slot_id = Self::jarvis_text_only_slot_id(
+            provider.as_str(),
+            std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
+                .ok()
+                .or_else(|| std::env::var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID").ok())
+                .as_deref(),
+            "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
+        );
+        let direct_answer_model = Self::jarvis_direct_answer_model(provider.as_str());
+        let direct_answer_preference_observation_id =
+            match Self::persist_jarvis_communication_preference_observation(
+                "grounded_direct_answer",
+                objective,
+                interaction_id,
+                chat_id,
+                provider.as_str(),
+                direct_answer_slot_id.as_str(),
+                direct_answer_model.as_deref(),
+            )
+            .await
+            {
+                Ok(id) => id,
+                Err(err) => {
+                    warn!(
+                        "Jarvis direct-answer communication preference observation could not be persisted: {}",
+                        err
+                    );
+                    None
+                }
+            };
         Self::write_jarvis_progress(
             stream,
             progress_bus,
@@ -9645,6 +10499,11 @@ JSON 字段必须是：\n\
             let grounding_report_preview =
                 Self::read_jarvis_grounding_report_preview(grounding_report_file).await;
             let context_preview = Self::read_jarvis_context_preview(context_pack_file).await;
+            let (
+                communication_preferences_file,
+                communication_preferences_lisp,
+                communication_preferences_existed,
+            ) = Self::read_jarvis_communication_preferences_lisp().await;
             let (system_prompt, prompt) = Self::build_jarvis_direct_answer_prompt(
                 objective,
                 grounding_context_id,
@@ -9661,6 +10520,10 @@ JSON 字段必须是：\n\
                 plan_direct_answer_draft,
                 permission_context,
                 sources_used,
+                media_context,
+                Some(communication_preferences_file.as_path()),
+                communication_preferences_existed,
+                communication_preferences_lisp.as_str(),
             );
             let prompt = format!("{system_prompt}\n\n{prompt}");
             let correlation_id = format!("jarvis-direct-answer-{}", uuid::Uuid::new_v4().simple());
@@ -9670,25 +10533,16 @@ JSON 字段必须是：\n\
             } else {
                 "grounded-direct-answer"
             };
-            let slot_id = Self::jarvis_text_only_slot_id(
-                provider.as_str(),
-                std::env::var("MISSIOND_JARVIS_DIRECT_ANSWER_SLOT_ID")
-                    .ok()
-                    .or_else(|| std::env::var("MISSIOND_JARVIS_COMMUNICATOR_SLOT_ID").ok())
-                    .as_deref(),
-                "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
-            );
-            let model = Self::jarvis_direct_answer_model(provider.as_str());
             let body = serde_json::json!({
                 "schema": "missiond.provider-interaction-request.v1",
                 "command": command,
                 "provider": &provider,
                 "engine": engine,
                 "prompt": prompt,
-                "model": model.clone(),
+                "model": direct_answer_model.clone(),
                 "timeout_secs": timeout_secs,
                 "correlation_id": correlation_id,
-                "slot_id": slot_id,
+                "slot_id": direct_answer_slot_id,
                 "provider_box_lane": "jarvis-communication-officer",
                 "xjp_request_stage": "grounded_direct_answer",
                 "dangerously_bypass_approvals_and_sandbox": pure_text_command && engine == "agy",
@@ -9696,7 +10550,7 @@ JSON 字段必须是：\n\
                 "allow_respawn": true,
                 "require_verification": true,
                 "model_switch_policy": {
-                    "target_model": model,
+                    "target_model": direct_answer_model,
                     "allow_respawn": true,
                     "require_verification": true
                 },
@@ -9833,6 +10687,15 @@ JSON 字段必须是：\n\
             "answer_source": &answer_source,
             "answer_text": answer,
             "sources_used": sources_used,
+            "media_context": media_context,
+            "communication_preferences_file": Self::jarvis_communication_preferences_path()
+                .display()
+                .to_string(),
+            "communication_preferences_schema": "missiond.jarvis-communication-preferences.v1",
+            "preference_observation_ids": direct_answer_preference_observation_id
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
             "terminal_task_result": true,
             "board_task_created": false,
         });
@@ -11357,6 +12220,13 @@ JSON 字段必须是：\n\
             .get("assignment_policy")
             .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string()))
             .unwrap_or_else(|| "{}".to_string());
+        let media_context = dispatch_metadata
+            .get("media_context")
+            .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| {
+                serde_json::to_string_pretty(&interaction_media_context(&[]))
+                    .unwrap_or_else(|_| "{}".to_string())
+            });
         let read_scope = dispatch_metadata
             .get("read_scope")
             .and_then(|v| v.as_array())
@@ -11426,8 +12296,9 @@ JSON 字段必须是：\n\
              accepted_atom_objective: {aao}\n\n\
              Accepted plan atom:\n{apa}\n\n\
              Plan atomization graph:\n{pag}\n\n\
-             Fixed assignment policy:\n{ap}\n\n\
-             已接受执行切片：\n\
+	             Fixed assignment policy:\n{ap}\n\n\
+	             Media attachments:\n{mc}\n\n\
+	             已接受执行切片：\n\
              - 这个任务已经通过 Jarvis intent 确认和 plan 确认。\n\
              - 关键判断是 plan 的前提；不要推翻它，除非你在证据中明确报告冲突并停止执行。\n\
              - plan atomization graph 已经标记串行/并行和工位分配；你只执行属于当前 BoardTask/worker 的切片，不要重新一拆十或创建隐藏子任务。\n\
@@ -11472,6 +12343,7 @@ JSON 字段必须是：\n\
             apa = accepted_plan_atom,
             pag = plan_atomization_graph,
             ap = assignment_policy,
+            mc = media_context,
             acc = acceptance,
             cph = context_pack_hash,
             wc = write_constraint,
@@ -11760,6 +12632,7 @@ JSON 字段必须是：\n\
             }
         };
         let permission_context = auth_resolution.permission_context;
+        let media_context = interaction_media_context(&auth_envelope.attachments);
         let conversation_scope = conversation_scope_from_permission(
             &auth_envelope,
             &permission_context,
@@ -11930,6 +12803,7 @@ JSON 字段必须是：\n\
                         topic_id: conversation_scope.topic_id.clone(),
                         topic_label: conversation_scope.topic_label.clone(),
                         permission_context: permission_context.clone(),
+                        media_context: media_context.clone(),
                         unknowns: vec![
                             "Collect MissionD upstream/downstream facts that affect this confirmed intent.".to_string(),
                             "Identify project registry, SSOT, runtime, skill, provider, infra, and permission evidence needed before plan.lisp.".to_string(),
@@ -12023,6 +12897,7 @@ JSON 字段必须是：\n\
                     resolved_topic_label.as_deref(),
                     &sources_used,
                     Some(&permission_context),
+                    &media_context,
                 )
                 .await
                 {
@@ -12180,6 +13055,7 @@ JSON 字段必须是：\n\
                             topic_id: conversation_scope.topic_id.clone(),
                             topic_label: conversation_scope.topic_label.clone(),
                             permission_context: permission_context.clone(),
+                            media_context: media_context.clone(),
                             unknowns: vec![
                                 "Collect MissionD upstream/downstream facts that affect this archived intent.".to_string(),
                                 "Identify project registry, SSOT, runtime, skill, provider, infra, and permission evidence needed before plan.lisp.".to_string(),
@@ -12774,6 +13650,7 @@ JSON 字段必须是：\n\
                     direct_answer_draft.as_deref(),
                     &permission_context,
                     &sources_used,
+                    &media_context,
                     &provider_box_http,
                     db.as_ref(),
                     jarvis_conv_id.as_deref(),
@@ -14457,6 +15334,9 @@ JSON 字段必须是：\n\
             if method == "GET" && normalized_path == "/health" && !is_upgrade {
                 return Self::handle_health(stream).await;
             }
+            if method == "GET" && normalized_path == "/v1/project-universe" && !is_upgrade {
+                return Self::handle_project_universe(stream).await;
+            }
             if method == "OPTIONS" && normalized_path.starts_with("/provider-box/v1/") {
                 let mut s = stream;
                 let response = "HTTP/1.1 204 No Content\r\n\
@@ -15562,6 +16442,72 @@ mod tests {
     }
 
     #[test]
+    fn jarvis_communication_preference_signal_detects_style_requests() {
+        assert!(PTYWebSocketServer::jarvis_communication_preference_signal(
+            "以后沟通风格更直接一点，不要废话"
+        ));
+        assert!(PTYWebSocketServer::jarvis_communication_preference_signal(
+            "沟通官应该记住我的偏好：先给结论，再给依据"
+        ));
+        assert!(!PTYWebSocketServer::jarvis_communication_preference_signal(
+            "现在查一下 MissionD 的状态"
+        ));
+    }
+
+    #[test]
+    fn jarvis_communicator_prompt_includes_preference_lisp_as_read_only_context() {
+        let prompt = PTYWebSocketServer::build_jarvis_communicator_prompt(
+            "plan_archived",
+            "告诉用户当前计划",
+            &serde_json::json!({"plan_artifact_id": "plan-1"}),
+            Some(Path::new("/tmp/communication-preferences.lisp")),
+            true,
+            "(jarvis-communication-preferences :schema \"missiond.jarvis-communication-preferences.v1\")",
+        );
+        assert!(prompt.contains("communication_preferences_lisp"));
+        assert!(prompt.contains("missiond.jarvis-communication-preferences.v1"));
+        assert!(prompt.contains("must_not_write_file"));
+        assert!(prompt.contains("read-only-prompt-context"));
+        assert!(prompt.contains("风格参考"));
+    }
+
+    #[test]
+    fn jarvis_communication_preference_observation_is_redacted_and_appended() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prefs_path = dir.path().join("communication-preferences.lisp");
+        std::env::set_var(
+            "MISSIOND_JARVIS_COMMUNICATION_PREFERENCES_FILE",
+            &prefs_path,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let observation_id = runtime
+            .block_on(
+                PTYWebSocketServer::persist_jarvis_communication_preference_observation(
+                    "communicator",
+                    "以后沟通风格更简洁，token=sk_test_1234567890 不要展示",
+                    Some("interaction-1"),
+                    "chat-1",
+                    "agy",
+                    "slot-agy-gemini-31-pro-high-jarvis-communicator-a",
+                    Some("Gemini 3.1 Pro (High)"),
+                ),
+            )
+            .unwrap()
+            .unwrap();
+        std::env::remove_var("MISSIOND_JARVIS_COMMUNICATION_PREFERENCES_FILE");
+
+        let content = std::fs::read_to_string(&prefs_path).unwrap();
+        assert!(content.contains(&observation_id));
+        assert!(content.contains("preference-observation"));
+        assert!(content.contains("<redacted:"));
+        assert!(!content.contains("sk_test_1234567890"));
+    }
+
+    #[test]
     fn jarvis_stage_errors_have_standard_phase_codes() {
         assert_eq!(
             PTYWebSocketServer::jarvis_phase_error_code("intent_artifact"),
@@ -15761,6 +16707,7 @@ done"#;
             Some("topic-1"),
             Some("Jarvis intent"),
             &["source-a".to_string()],
+            &interaction_media_context(&[]),
         );
         assert!(body.contains(":authority \"codex-cli-gpt-5.5-xhigh\""));
         assert!(body.contains(":semantic-author"));
@@ -16130,7 +17077,8 @@ done"#;
                 {"role": "assistant", "content": "old"},
                 {"role": "user", "content": [
                     {"type": "text", "text": "请测试 MissionD"},
-                    {"type": "text", "text": "并返回计划"}
+                    {"type": "text", "text": "并返回计划"},
+                    {"type": "image_url", "image_url": {"url": "https://images.xiaojins.com/v1/images/img_test/content?token=secret-token", "detail": "auto"}}
                 ]}
             ]
         });
@@ -16160,6 +17108,46 @@ done"#;
             interaction_metadata_string(&envelope, "missiond_follow_task_id").as_deref(),
             Some("follow-task-1")
         );
+        assert_eq!(envelope.attachments.len(), 1);
+        assert_eq!(
+            envelope.attachments[0]["schema"],
+            "missiond.interaction-media-attachment.v1"
+        );
+        assert_eq!(envelope.attachments[0]["status"], "accepted");
+        assert_eq!(
+            envelope.attachments[0]["transport"],
+            "xjp-image-service-ref"
+        );
+        assert_eq!(envelope.attachments[0]["signed_url_present"], true);
+        let serialized = serde_json::to_string(&envelope.attachments).unwrap();
+        assert!(!serialized.contains("secret-token"));
+        assert!(serialized.contains("?<redacted>"));
+    }
+
+    #[test]
+    fn openai_inline_data_image_is_rejected_without_persisting_base64() {
+        let req = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "看看这张图"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,VERY_SECRET_BASE64"}}
+                ]}
+            ]
+        });
+        let envelope = openai_request_to_interaction_envelope(&req);
+        assert_eq!(envelope.attachments.len(), 1);
+        assert_eq!(envelope.attachments[0]["status"], "rejected");
+        assert_eq!(
+            envelope.attachments[0]["transport"],
+            "inline-data-url-rejected"
+        );
+        assert_eq!(
+            envelope.attachments[0]["diagnostics"][0]["code"],
+            "IMAGE_INLINE_DATA_URL_REQUIRES_XJP_UPLOAD"
+        );
+        let serialized = serde_json::to_string(&envelope.attachments).unwrap();
+        assert!(!serialized.contains("VERY_SECRET_BASE64"));
+        assert!(serialized.contains("data:<redacted>"));
     }
 
     #[test]

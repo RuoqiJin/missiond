@@ -122,24 +122,30 @@
          :storage "shared_artifacts(kind=context-gather)"
          :fields [unknowns query project_id source_profile sources_used source_summaries evidence_lanes evidence_items support_catalog authority_order noise_diagnostics context_noise_metrics raw_sources_omitted raw_sources_policy evidence_refs diagnostics grounded_intent_summary runtime_environment context_pack_path context_pack_file canonical_context_pack_file evidence_lane_persistence]
          :rule "mission_context_gather(persist=true) returns grounding_context_id, shared-artifact context_pack_path, canonical_context_pack_file under MISSIOND_RUNTIME_DIR, and a bounded worker-readable context_pack_file mirror under ignored MISSIOND_RUNTIME_DIR/context-gather-worker/** when deployed; repo .missiond/v3/runtime/context-gather-worker/** is a dev fallback only. Worker prompts receive only this small context slice plus confirmed intent/plan artifact refs and accepted execution metadata, not broad KB/history preloads.")
-      (kind interaction-grounding-report
-         :schema "missiond.interaction-grounding-report.v1"
-         :id-field artifact_hash
-         :storage "shared_artifacts(kind=interaction-grounding-report)"
-         :fields [interaction_id conversation_id chat_id grounding_context_id context_pack_path context_pack_file grounding_report_file confirmed_intent_artifact_id grounding_worker_slot_id grounding_worker_turn_id provider_session_identity content evidence_sources unknowns plan_author_recommendations]
-         :rule "Jarvis full context collection after confirmed intent is a ClaudeCode provider-box worker-turn with MissionD/XJP MCP mounted. It MUST write a bounded Markdown report file before plan.lisp authoring and persist that report as this artifact kind. The report is evidence for plan.lisp, grounded_direct_answer, BoardTask runtime_metadata, archive, and replay; it is not a BoardTask result and must not itself create/settle a BoardTask.")
-      (kind interaction-key-judgment
-         :schema "missiond.interaction-key-judgment.v1"
-         :id-field artifact_hash
-         :storage "shared_artifacts(kind=interaction-key-judgment)"
-         :fields [interaction_id conversation_id chat_id grounding_context_id grounding_report_file grounding_report_hash intent_artifact_id judgment confidence rejected_hypotheses evidence_refs planning_implications acceptance_focus author provider slot_id model]
-         :rule "After ClaudeCode writes interaction-grounding-report and before plan.lisp authoring, Codex CLI GPT-5.5 xhigh MUST produce a concise key judgment artifact from the user input plus the grounding report, such as '不是算力差异，是用量差异'. This is a planning premise, not a user confirmation gate and not an implementation step. plan.lisp MUST cite this artifact/hash, use its planning_implications, and fail closed if the key judgment is absent or low-confidence without explanation.")
-      (kind interaction-communication
-         :schema "missiond.interaction-communication.v1"
-         :id-field artifact_hash
-         :storage "shared_artifacts(kind=interaction-communication)"
-         :fields [interaction_id conversation_id chat_id phase communicator_provider communicator_engine communicator_slot_id communicator_model intent_artifact_id grounding_context_id grounding_report_hash key_judgment_artifact_id plan_artifact_id board_task_id final_task_id task_result_artifact_hash plan_summary status_summary result_summary caveats next_actions sources_used]
-         :rule "Jarvis user-facing speech after plan authoring, BoardTask dispatch, follow-up, or terminal result SHOULD be produced by the communication officer lane. The communicator is a read-only AGY/Gemini 3.1 Pro provider-box turn: it may summarize current plan/status/result from archived artifacts and task-result-artifact evidence, but MUST NOT change intent.lisp, key judgment, plan.lisp, atomization, BoardTask state, or claim execution that has not completed.")
+	      (kind interaction-grounding-report
+	         :schema "missiond.interaction-grounding-report.v1"
+	         :id-field artifact_hash
+	         :storage "shared_artifacts(kind=interaction-grounding-report)"
+	         :fields [interaction_id conversation_id chat_id grounding_context_id context_pack_path context_pack_file grounding_report_file confirmed_intent_artifact_id media_context attachment_refs grounding_worker_slot_id grounding_worker_turn_id provider_session_identity content evidence_sources unknowns plan_author_recommendations]
+	         :rule "Jarvis full context collection after confirmed intent is a ClaudeCode provider-box worker-turn with MissionD/XJP MCP mounted. It MUST write a bounded Markdown report file before plan.lisp authoring and persist that report as this artifact kind. The report is evidence for plan.lisp, grounded_direct_answer, BoardTask runtime_metadata, archive, and replay; it is not a BoardTask result and must not itself create/settle a BoardTask. If interaction media attachments are present, grounding receives missiond.interaction-media-context.v1 with xjp-image-service refs and must include those refs/dimensions/hashes in the report without requesting inline base64 or storing signed URL values.")
+	      (kind interaction-media-attachment
+	         :schema "missiond.interaction-media-attachment.v1"
+	         :id-field attachment_id
+	         :storage "conversation_events.raw_data.media_context and shared_artifacts payload media_context"
+	         :fields [attachment_id interaction_id conversation_id kind status transport binary_owner missiond_transport media_type image_service_ref artifact_id artifact_hash sha256 size_bytes width height source_url_redacted signed_url_present diagnostics]
+	         :rule "Jarvis/iOS image upload uses xjp-image-service as the binary owner. iOS uploads bytes to xjp backend first, then MissionD receives only reference metadata such as image_service_ref=xjp-image://..., artifact_id/hash, media_type, dimensions, and optional redacted source_url. MissionD hot paths MUST NOT accept base64 as the canonical image transport, MUST NOT write /tmp/missiond_media for Jarvis attachments, MUST redact signed URL query/token values from SSE, artifacts, monitor diagnostics, and conversation history, and MUST carry the same media_context through intent.lisp, grounding, key judgment, plan.lisp, direct answer, BoardTask runtime_metadata, archive, and replay.")
+	      (kind interaction-key-judgment
+	         :schema "missiond.interaction-key-judgment.v1"
+	         :id-field artifact_hash
+	         :storage "shared_artifacts(kind=interaction-key-judgment)"
+	         :fields [interaction_id conversation_id chat_id grounding_context_id grounding_report_file grounding_report_hash intent_artifact_id media_context judgment confidence rejected_hypotheses evidence_refs planning_implications acceptance_focus author provider slot_id model]
+	         :rule "After ClaudeCode writes interaction-grounding-report and before plan.lisp authoring, Codex CLI GPT-5.5 xhigh MUST produce a concise key judgment artifact from the user input plus the grounding report, such as '不是算力差异，是用量差异'. This is a planning premise, not a user confirmation gate and not an implementation step. plan.lisp MUST cite this artifact/hash, use its planning_implications, and fail closed if the key judgment is absent or low-confidence without explanation.")
+	      (kind interaction-communication
+	         :schema "missiond.interaction-communication.v1"
+	         :id-field artifact_hash
+	         :storage "shared_artifacts(kind=interaction-communication)"
+	         :fields [interaction_id conversation_id chat_id phase communicator_provider communicator_engine communicator_slot_id communicator_model communication_preferences_file communication_preferences_schema preference_observation_ids media_context intent_artifact_id grounding_context_id grounding_report_hash key_judgment_artifact_id plan_artifact_id board_task_id final_task_id task_result_artifact_hash plan_summary status_summary result_summary caveats next_actions sources_used]
+         :rule "Jarvis user-facing speech after plan authoring, BoardTask dispatch, follow-up, or terminal result SHOULD be produced by the communication officer lane. The communicator is a read-only AGY/Gemini 3.1 Pro provider-box turn: it may summarize current plan/status/result from archived artifacts and task-result-artifact evidence, and it receives the MissionD-maintained communication preference Lisp from MISSIOND_JARVIS_COMMUNICATION_PREFERENCES_FILE or MISSIOND_RUNTIME_DIR/jarvis/communication-preferences.lisp as read-only style context. MissionD, not AGY, appends redacted preference-observation forms when user input explicitly expresses communication style preferences; the communicator MUST NOT write this file, change intent.lisp, key judgment, plan.lisp, atomization, BoardTask state, or claim execution that has not completed.")
       (kind task-result-artifact
          :schema "missiond.task-result-artifact.v1"
          :id-field artifact_hash
@@ -152,11 +158,11 @@
          :storage "task_result_artifacts"
          :fields [task_id slot_id conversation_id provider result_status summary artifact_hash deduped]
          :rule "Provider settle loops, Jarvis follow-up supervision, and Board note revalidation may observe the same final more than once. task_result_put MUST check for an existing row with the same task_id, slot_id, conversation_id, provider, result_status, and summary, then return that artifact_hash with deduped=true instead of writing timestamp-only duplicate artifacts or emitting duplicate task_result_artifact.created events.")
-      (kind interaction-direct-answer
-         :schema "missiond.interaction-result-artifact.v1"
-         :id-field artifact_hash
-         :storage "shared_artifacts(kind=interaction-direct-answer)"
-         :fields [interaction_id grounding_context_id grounding_report_file grounding_report_artifact_path grounding_report_hash intent_artifact_id plan_artifact_id execution_mode requires_board_task answer_policy provider content sources_used]
+	      (kind interaction-direct-answer
+	         :schema "missiond.interaction-result-artifact.v1"
+	         :id-field artifact_hash
+	         :storage "shared_artifacts(kind=interaction-direct-answer)"
+	         :fields [interaction_id grounding_context_id grounding_report_file grounding_report_artifact_path grounding_report_hash intent_artifact_id plan_artifact_id media_context execution_mode requires_board_task answer_policy provider content sources_used]
         :rule "After mandatory archived intent.lisp, interaction-grounding-report, key judgment, and archived plan.lisp, execution_mode=grounded_direct_answer with requires_board_task=false answers through provider-interaction-box and writes this interaction result artifact before terminal final. The default user-facing materializer is the Jarvis communication officer (AGY/Gemini 3.1 Pro) unless explicitly overridden. Missing provider-box auth, unavailable provider CLI, missing grounding report, or missing matched durable final is a typed failure and must not fall back to BoardTask, xjpcode text-only, local code search, or fabricated answers.")
       (kind provider-interaction-turn
          :schema "missiond.provider-interaction-turn.v1"

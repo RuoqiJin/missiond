@@ -16,6 +16,7 @@ function exists(rel) {
 
 const files = {
   v3: '.missiond/v3/shards/pillar-flow-map.lisp',
+  requestRuntime: '.missiond/v3/shards/request-runtime.lisp',
   requestSurfaces: '.missiond/v3/shards/implementation/request-surfaces.lisp',
   workstationRuntime: '.missiond/v3/shards/workstation-runtime.lisp',
   v2: '.missiond/v3/shards/v2-convergence-map.lisp',
@@ -100,6 +101,16 @@ requireIncludes('requestSurfaces', [
   'provider-interaction-box mode=semantic-authoring',
   'missiond.interaction-result-artifact.v1',
   'interaction-direct-answer',
+  'communication-preferences-file',
+  'MISSIOND_JARVIS_COMMUNICATION_PREFERENCES_FILE',
+  'MISSIOND_RUNTIME_DIR/jarvis/communication-preferences.lisp',
+  'missiond.interaction-media-context.v1',
+  'missiond.interaction-media-attachment.v1',
+  'xjp-image-service',
+  'openai_request_attachments',
+  'normalize_interaction_attachments',
+  'IMAGE_INLINE_DATA_URL_REQUIRES_XJP_UPLOAD',
+  'signed URL query/token values are redacted',
   'answer_delta',
   'missiond.jarvis-progress.v1',
   'SystemEvent::ExternalServiceEvent',
@@ -117,6 +128,19 @@ requireIncludes('requestSurfaces', [
   'event_bus_projection',
   'intent_authoring_failed',
   'JARVIS_PLAN_AUTHOR_FAILED',
+]);
+
+requireIncludes('requestRuntime', [
+  '(kind interaction-media-attachment',
+  'missiond.interaction-media-attachment.v1',
+  'missiond.interaction-media-context.v1',
+  'xjp-image-service',
+  'image_service_ref',
+  'source_url_redacted',
+  'signed_url_present',
+  'MUST NOT accept base64 as the canonical image transport',
+  'MUST NOT write /tmp/missiond_media for Jarvis attachments',
+  'media_context through intent.lisp, grounding, key judgment, plan.lisp, direct answer, BoardTask runtime_metadata, archive, and replay',
 ]);
 
 requireIncludes('workstationRuntime', [
@@ -250,6 +274,22 @@ requireIncludes('server', [
   'provider_box_engine_for_provider',
   'call_provider_box_turn',
   'provider_box_grounded_direct_answer_start',
+  'jarvis_communication_preferences_path',
+  'missiond.jarvis-communication-preferences.v1',
+  'communication_preferences_lisp',
+  'preference-observation',
+  'openai_request_attachments',
+  'normalize_interaction_attachment_ref',
+  'interaction_media_context',
+  'missiond.interaction-media-attachment.v1',
+  'missiond.interaction-media-context.v1',
+  'IMAGE_INLINE_DATA_URL_REQUIRES_XJP_UPLOAD',
+  'inline-data-url-rejected',
+  'xjp-image-service-ref',
+  'source_url_redacted',
+  'signed_url_present',
+  'media_context',
+  'no_file_access',
   'answer_delta',
   'interaction-direct-answer',
   'missiond.interaction-result-artifact.v1',
@@ -322,6 +362,17 @@ requireIncludes('deployDaemon', [
 ]);
 
 const serverText = requireFile('server');
+const openaiNormalizer = serverText
+  .split('fn openai_request_to_interaction_envelope')
+  .at(1)
+  ?.split('fn resolve_interaction_auth')
+  .at(0) ?? '';
+if (!openaiNormalizer.includes('attachments: openai_request_attachments(req)')) {
+  diagnostics.push({
+    file: files.server,
+    message: 'OpenAI/Jarvis normalizer must preserve image-service attachment refs instead of dropping attachments',
+  });
+}
 if (!/POST \/v1\/chat\/completions[\s\S]{0,600}handle_chat_completions_interaction_adapter/.test(serverText)) {
   diagnostics.push({
     file: files.server,
