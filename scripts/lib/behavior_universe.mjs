@@ -29,6 +29,7 @@ const EXCLUDED_DIRS = new Set([
   '.git',
   '.missiond',
   '.next',
+  '.next-dev',
   '.turbo',
   '.cache',
   '.vercel',

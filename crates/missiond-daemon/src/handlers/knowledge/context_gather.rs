@@ -2172,7 +2172,7 @@ fn build_support_catalog(sources: &serde_json::Map<String, Value>) -> Value {
     let project_id_hint = text_from_sources(&[project], &["id", "project_id", "projectId"]);
     let compiled_service = compiled_service_runtime_payload_for_project(project_id_hint.as_deref());
     let source_service = first_service_runtime_payload(sources);
-    let service = compiled_service.as_ref().or(source_service);
+    let service = source_service.or(compiled_service.as_ref());
     let service_catalog = service.and_then(|value| {
         value
             .get("supportCatalog")

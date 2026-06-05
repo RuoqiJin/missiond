@@ -189,40 +189,6 @@
       :calls "node scripts/compile-v3-runtime.mjs --check --json"))
 
   (behavior
-    :id jarvis-runtime-topology-check-subprocess
-    :kind subprocess
-    :owner ops-infra
-    :observed ["subprocess:scripts/check-jarvis-runtime-topology.mjs:*"]
-    :code ["scripts/check-jarvis-runtime-topology.mjs"]
-    :effects []
-    (anchor
-      :role subprocess
-      :observed "subprocess:scripts/check-jarvis-runtime-topology.mjs:*"
-      :file "scripts/check-jarvis-runtime-topology.mjs"
-      :symbol "Jarvis runtime topology check")
-    (trigger
-      :from-file "scripts/check-jarvis-runtime-topology.mjs"
-      :from-symbol "Jarvis runtime topology check"
-      :calls "validates Jarvis edge, tunnel, launchd, deploy-agent, and compiled runtime topology authority"))
-
-  (behavior
-    :id runtime-evidence-redaction-check-subprocess
-    :kind subprocess
-    :owner evidence-collector
-    :observed ["subprocess:scripts/check-runtime-evidence-redaction.mjs:*"]
-    :code ["scripts/check-runtime-evidence-redaction.mjs"]
-    :effects []
-    (anchor
-      :role subprocess
-      :observed "subprocess:scripts/check-runtime-evidence-redaction.mjs:*"
-      :file "scripts/check-runtime-evidence-redaction.mjs"
-      :symbol "main")
-    (trigger
-      :from-file "scripts/check-runtime-evidence-redaction.mjs"
-      :from-symbol "main"
-      :calls "scans context-gather worker and runtime shared-artifact mirrors for credential-like literals"))
-
-  (behavior
     :id board-runtime-metadata-backfill-psql
     :kind subprocess
     :owner control-plane-kernel

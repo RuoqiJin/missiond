@@ -261,6 +261,7 @@ pub(crate) struct WorkstationPoolRuntimeConfig {
     pub default_use: String,
     pub accepts_boardtask: bool,
     pub write_allowed: bool,
+    #[serde(default)]
     pub skip_permissions: bool,
     #[serde(default)]
     pub provider_authorization_allowlist: Vec<String>,

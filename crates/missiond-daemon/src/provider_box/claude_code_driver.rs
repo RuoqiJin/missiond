@@ -4284,7 +4284,9 @@ fn normalize_claude_code_placeholder_text(value: &str) -> String {
 fn is_known_claude_code_placeholder_text(normalized: &str) -> bool {
     matches!(
         normalized,
-        "try \"fix lint errors\"" | "try \"how does <filepath> work?\""
+        "try \"fix lint errors\""
+            | "try \"how does <filepath> work?\""
+            | "try \"edit <filepath> to...\""
     )
 }
 

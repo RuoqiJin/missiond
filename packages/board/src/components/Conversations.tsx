@@ -154,6 +154,7 @@ function formatTime(dateStr: string): string {
 }
 
 const CODEX_REQUEST_MARKER = "## My request for Codex:";
+const CODEX_BOTTOM_THRESHOLD_PX = 96;
 
 function extractUserDisplayContent(content: string | null | undefined): string {
   const text = (content || "").trim();
@@ -2054,16 +2055,107 @@ export function Conversations({
   }, [flatTimeline]);
 
   const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const [codexFollowLatest, setCodexFollowLatestState] = useState(true);
+  const [codexAtBottom, setCodexAtBottomState] = useState(true);
+  const [codexScrollerEl, setCodexScrollerEl] = useState<HTMLElement | null>(null);
+  const codexFollowLatestRef = useRef(true);
+  const codexAtBottomRef = useRef(true);
+  const codexInitialScrollSessionRef = useRef<string | null>(null);
+  const codexProgrammaticScrollUntilRef = useRef(0);
+
+  const setCodexFollowLatest = useCallback((next: boolean) => {
+    codexFollowLatestRef.current = next;
+    setCodexFollowLatestState(next);
+  }, []);
+
+  const setCodexAtBottom = useCallback((next: boolean) => {
+    codexAtBottomRef.current = next;
+    setCodexAtBottomState(next);
+  }, []);
+
+  const measureCodexAtBottom = useCallback(
+    (el: HTMLElement | null = codexScrollerEl) => {
+      if (!el) return true;
+      return (
+        el.scrollHeight - el.scrollTop - el.clientHeight <=
+        CODEX_BOTTOM_THRESHOLD_PX
+      );
+    },
+    [codexScrollerEl],
+  );
+
+  const handleCodexScrollerRef = useCallback(
+    (ref: HTMLElement | null | Window) => {
+      const next =
+        ref && "scrollHeight" in ref ? (ref as HTMLElement) : null;
+      setCodexScrollerEl((prev) => (prev === next ? prev : next));
+    },
+    [],
+  );
 
   const scrollToLatest = useCallback(() => {
     if (flatTimeline.length === 0) return;
+    codexProgrammaticScrollUntilRef.current = Date.now() + 1000;
     requestAnimationFrame(() => {
       virtuosoRef.current?.scrollToIndex({
         index: flatTimeline.length - 1,
         align: "end",
       });
+      requestAnimationFrame(() => {
+        virtuosoRef.current?.autoscrollToBottom();
+      });
     });
   }, [flatTimeline.length]);
+
+  const handleCodexAtBottomChange = useCallback(
+    (atBottom: boolean) => {
+      setCodexAtBottom(atBottom);
+    },
+    [setCodexAtBottom],
+  );
+
+  const handleFollowLatest = useCallback(() => {
+    setCodexFollowLatest(true);
+    setCodexAtBottom(true);
+    scrollToLatest();
+  }, [scrollToLatest, setCodexAtBottom, setCodexFollowLatest]);
+
+  const followCodexOutput = useCallback((atBottom: boolean) => {
+    return codexFollowLatestRef.current && atBottom ? "auto" : false;
+  }, []);
+
+  useEffect(() => {
+    if (viewMode !== "codex" || !codexScrollerEl) return;
+    let frame: number | null = null;
+    const updateBottomState = () => {
+      if (frame != null) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        const atBottom = measureCodexAtBottom(codexScrollerEl);
+        setCodexAtBottom(atBottom);
+        if (atBottom) {
+          codexProgrammaticScrollUntilRef.current = 0;
+        } else if (Date.now() > codexProgrammaticScrollUntilRef.current) {
+          setCodexFollowLatest(false);
+        }
+      });
+    };
+
+    codexScrollerEl.addEventListener("scroll", updateBottomState, {
+      passive: true,
+    });
+    updateBottomState();
+    return () => {
+      if (frame != null) window.cancelAnimationFrame(frame);
+      codexScrollerEl.removeEventListener("scroll", updateBottomState);
+    };
+  }, [
+    viewMode,
+    codexScrollerEl,
+    measureCodexAtBottom,
+    setCodexAtBottom,
+    setCodexFollowLatest,
+  ]);
 
   // Restore message scroll position after messages finish loading (Virtuoso)
   useEffect(() => {
@@ -2083,11 +2175,48 @@ export function Conversations({
   }, [loadingMessages, flatTimeline, msgScrollStorageKey, viewMode]);
 
   useEffect(() => {
-    if (viewMode !== "codex" || loadingMessages || flatTimeline.length === 0) {
+    if (
+      viewMode !== "codex" ||
+      loadingMessages ||
+      flatTimeline.length === 0 ||
+      !selectedId
+    ) {
+      return;
+    }
+    if (codexInitialScrollSessionRef.current === selectedId) return;
+    codexInitialScrollSessionRef.current = selectedId;
+    setCodexFollowLatest(true);
+    setCodexAtBottom(true);
+    scrollToLatest();
+  }, [
+    viewMode,
+    loadingMessages,
+    selectedId,
+    flatTimeline.length,
+    scrollToLatest,
+    setCodexAtBottom,
+    setCodexFollowLatest,
+  ]);
+
+  useEffect(() => {
+    if (
+      viewMode !== "codex" ||
+      loadingMessages ||
+      flatTimeline.length === 0 ||
+      !codexFollowLatestRef.current ||
+      (!codexAtBottomRef.current && !measureCodexAtBottom())
+    ) {
       return;
     }
     scrollToLatest();
-  }, [viewMode, loadingMessages, latestTimelineKey, flatTimeline.length, scrollToLatest]);
+  }, [
+    viewMode,
+    loadingMessages,
+    latestTimelineKey,
+    flatTimeline.length,
+    measureCodexAtBottom,
+    scrollToLatest,
+  ]);
 
   // Handle pending scroll to a message ID (after onLoadAround reloads messages)
   useEffect(() => {
@@ -3103,11 +3232,17 @@ export function Conversations({
                         </div>
                       );
                     })()}
-                  <div className="flex flex-1 min-h-0">
+                  <div className="relative flex flex-1 min-h-0">
                   <Virtuoso
                     ref={virtuosoRef}
                     style={{ flex: 1, minHeight: 0 }}
                     data={flatTimeline}
+                    followOutput={viewMode === "codex" ? followCodexOutput : false}
+                    scrollerRef={viewMode === "codex" ? handleCodexScrollerRef : undefined}
+                    atBottomThreshold={CODEX_BOTTOM_THRESHOLD_PX}
+                    atBottomStateChange={
+                      viewMode === "codex" ? handleCodexAtBottomChange : undefined
+                    }
                     rangeChanged={(range: ListRange) => {
                       visibleRangeRef.current = {
                         startIndex: range.startIndex,
@@ -3173,9 +3308,25 @@ export function Conversations({
                               {loadingMore ? "加载中..." : ""}
                             </span>
                           </div>
-                        ) : null,
+                      ) : null,
                     }}
                   />
+                  {viewMode === "codex" &&
+                    flatTimeline.length > 0 &&
+                    (!codexFollowLatest || !codexAtBottom) && (
+                      <button
+                        type="button"
+                        onClick={handleFollowLatest}
+                        className="absolute bottom-4 z-20 flex h-9 w-9 items-center justify-center rounded-full border border-teal-400/30 bg-neutral-950/90 text-teal-200 shadow-lg shadow-black/40 backdrop-blur transition-colors hover:border-teal-300/60 hover:bg-teal-400/10 hover:text-white"
+                        style={{
+                          right: userIndex.length > 0 ? "9.75rem" : "1rem",
+                        }}
+                        title="跟随最新消息"
+                        aria-label="跟随最新消息"
+                      >
+                        <ChevronDown className="h-5 w-5" />
+                      </button>
+                    )}
                   {/* User message minimap sidebar */}
                   {userIndex.length > 0 && (
                   <UserMessageMinimap

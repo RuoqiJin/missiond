@@ -481,10 +481,10 @@ function checkFiles(root, files) {
     // BoardTask e1a5ac1f :: provider-aware classification + raw_role
     // preservation. Codex ingestion must call the new classifier
     // (no more hardcoded `conversation_type: "user"`) and forward the
-    // provider role into `raw_role` so downstream audits can reason
+    // parsed provider role into `raw_role` so downstream audits can reason
     // about turn segmentation without re-parsing JSONL.
     'classify_conversation_type',
-    'raw_role: Some(m.role.clone())',
+    'raw_role: Some(m.raw_role.clone())',
     'get_running_slot_task',
     'refresh_conversation_message_count(&thread.id)',
     'codex_background_thread_classifies_as_codex_chat_not_user',

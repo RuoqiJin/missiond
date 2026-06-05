@@ -5,12 +5,15 @@ import {
   Activity,
   AlertTriangle,
   Bot,
+  Gauge,
   Loader2,
   Plus,
+  Play,
   RefreshCw,
   Send,
   Square,
   Terminal,
+  Trash2,
   User,
   Wifi,
   WifiOff,
@@ -18,6 +21,12 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { MarkdownContent } from '@/components/timeline/MarkdownContent';
 import { cn } from '@/lib/utils';
@@ -61,10 +70,38 @@ type StatusPayload = {
   models?: { ok?: boolean; body?: unknown };
 };
 
+type ModelOption = {
+  id: string;
+  ownedBy?: string;
+  root?: string;
+};
+
+type LatencySample = {
+  durationMs?: number;
+  firstByteMs?: number | null;
+  error?: string;
+  finishedAt?: string;
+};
+
+type LatencyRow = {
+  model: ModelOption;
+  attempts: Array<LatencySample | null>;
+  status: 'idle' | 'running' | 'done' | 'error' | 'stopped';
+};
+
+type LatencyResponse = {
+  ok?: boolean;
+  durationMs?: number;
+  firstByteMs?: number | null;
+  error?: string;
+};
+
 const DEFAULT_BASE_URL = 'http://127.0.0.1:4040';
 const SESSION_STORAGE_KEY = 'board:xjpcode:session-id';
 const BASE_URL_STORAGE_KEY = 'board:xjpcode:base-url';
 const NON_CHAT_MODEL_IDS = new Set(['codex_image_generation', 'codex_research']);
+const LATENCY_ATTEMPTS = 3;
+const LATENCY_PROBE_TIMEOUT_MS = 60_000;
 
 function newId(prefix: string): string {
   const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -113,17 +150,83 @@ function jsonPreview(value: unknown): string {
   }
 }
 
-function statusModels(payload: StatusPayload): { current: string; models: string[] } {
+function readStringField(value: unknown, key: string): string {
+  return value && typeof value === 'object' && key in value && typeof value[key as keyof typeof value] === 'string'
+    ? value[key as keyof typeof value] as string
+    : '';
+}
+
+function modelProviderLabel(model: ModelOption): string {
+  const ownedBy = model.ownedBy?.toLowerCase().replace(/[_\s-]/g, '') || '';
+  const id = model.id.toLowerCase();
+
+  if (ownedBy === 'missiondagy') {
+    if (id.startsWith('claude-code-')) return 'MissionD-ClaudeCode';
+    if (id.startsWith('codex-')) return 'MissionD-Codex';
+    return 'MissionD-AGY';
+  }
+
+  if (ownedBy === 'vertex') return 'Google-Vertex';
+  if (ownedBy === 'geminisource') return 'Gemini';
+  if (ownedBy === 'anthropicdirect') return 'Anthropic';
+  if (ownedBy === 'ccsource') return 'ClaudeCode';
+  if (ownedBy === 'openrouter') return 'OpenRouter';
+  if (ownedBy === 'clewdr') return 'Clewdr';
+  if (ownedBy === 'minimax') return 'MiniMax';
+  if (ownedBy === 'zhipu') return 'Zhipu';
+  if (ownedBy === 'jarvis') return 'Jarvis';
+  if (ownedBy === 'meow61') return 'Meow61';
+
+  if (id.startsWith('agy-')) return 'MissionD-AGY';
+  if (id.startsWith('claude-code-')) return 'MissionD-ClaudeCode';
+  if (id.startsWith('codex-')) return 'MissionD-Codex';
+  if (id.startsWith('gemini-')) return 'Google-Vertex';
+  if (id.startsWith('glm-')) return 'Zhipu';
+  if (id.startsWith('minimax-')) return 'MiniMax';
+  if (id.startsWith('claude-')) return 'Claude';
+  return 'Router';
+}
+
+function modelDisplayLabel(model: ModelOption): string {
+  return `${modelProviderLabel(model)} - ${model.id}`;
+}
+
+function emptyLatencyAttempts(): Array<LatencySample | null> {
+  return Array.from({ length: LATENCY_ATTEMPTS }, () => null);
+}
+
+function makeLatencyRow(model: ModelOption): LatencyRow {
+  return {
+    model,
+    attempts: emptyLatencyAttempts(),
+    status: 'idle',
+  };
+}
+
+function averageLatencyMs(attempts: Array<LatencySample | null>): number | undefined {
+  const values = attempts
+    .map((sample) => sample?.durationMs)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (values.length === 0) return undefined;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function statusModels(payload: StatusPayload): { current: string; models: ModelOption[] } {
   const body = payload.models?.body as { current?: unknown; models?: unknown } | undefined;
   const models = Array.isArray(body?.models)
     ? body.models
         .map((item) => {
-          if (typeof item === 'string') return item;
-          if (item && typeof item === 'object' && 'id' in item && typeof item.id === 'string') return item.id;
-          return '';
+          if (typeof item === 'string') return { id: item };
+          const id = readStringField(item, 'id');
+          if (!id) return null;
+          return {
+            id,
+            ownedBy: readStringField(item, 'owned_by') || readStringField(item, 'provider') || undefined,
+            root: readStringField(item, 'root') || undefined,
+          } satisfies ModelOption;
         })
         .filter(Boolean)
-        .filter((id) => !NON_CHAT_MODEL_IDS.has(id))
+        .filter((item): item is ModelOption => Boolean(item && !NON_CHAT_MODEL_IDS.has(item.id)))
     : [];
   return {
     current: typeof body?.current === 'string' && !NON_CHAT_MODEL_IDS.has(body.current) ? body.current : '',
@@ -135,7 +238,7 @@ export function XjpcodePanel() {
   const [baseUrl, setBaseUrl] = useState(initialBaseUrl);
   const [sessionId, setSessionId] = useState(initialSessionId);
   const [model, setModel] = useState('');
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<ModelOption[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [turnEvents, setTurnEvents] = useState<TurnEvent[]>([]);
   const [input, setInput] = useState('');
@@ -143,14 +246,42 @@ export function XjpcodePanel() {
   const [currentStatus, setCurrentStatus] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [latencyRows, setLatencyRows] = useState<Record<string, LatencyRow>>({});
+  const [isTestingLatency, setIsTestingLatency] = useState(false);
+  const [testingModelId, setTestingModelId] = useState('');
+  const [testingAttempt, setTestingAttempt] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const latencyAbortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const online = status?.ok === true;
   const currentModel = useMemo(
-    () => model || statusModels(status ?? {}).current || models[0] || '',
+    () => model || statusModels(status ?? {}).current || models[0]?.id || '',
     [model, models, status],
   );
+  const currentModelOption = useMemo(
+    () => models.find((item) => item.id === currentModel) || (currentModel ? { id: currentModel } : null),
+    [currentModel, models],
+  );
+  const latencyRowsForDisplay = useMemo(() => {
+    const modelIds = new Set(models.map((item) => item.id));
+    const modelOrder = new Map(models.map((item, index) => [item.id, index]));
+    const liveRows = models.map((item) => (
+      latencyRows[item.id] ? { ...latencyRows[item.id], model: item } : makeLatencyRow(item)
+    ));
+    const staleRows = Object.values(latencyRows).filter((row) => !modelIds.has(row.model.id));
+    return [...liveRows, ...staleRows].sort((a, b) => {
+      const rank = (row: LatencyRow) => {
+        if (row.model.id === testingModelId) return 0;
+        if (row.attempts.some(Boolean)) return 1;
+        return 2;
+      };
+      const rankDelta = rank(a) - rank(b);
+      if (rankDelta !== 0) return rankDelta;
+      return (modelOrder.get(a.model.id) ?? Number.MAX_SAFE_INTEGER)
+        - (modelOrder.get(b.model.id) ?? Number.MAX_SAFE_INTEGER);
+    });
+  }, [latencyRows, models, testingModelId]);
 
   useEffect(() => {
     localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
@@ -312,6 +443,117 @@ export function XjpcodePanel() {
     }
   }, []);
 
+  function resetLatencyRows(targetModels: ModelOption[]) {
+    setLatencyRows((prev) => {
+      const next = { ...prev };
+      for (const target of targetModels) {
+        next[target.id] = makeLatencyRow(target);
+      }
+      return next;
+    });
+  }
+
+  function updateLatencyRow(
+    target: ModelOption,
+    updater: (row: LatencyRow) => LatencyRow,
+  ) {
+    setLatencyRows((prev) => {
+      const current = prev[target.id] || makeLatencyRow(target);
+      return {
+        ...prev,
+        [target.id]: updater({ ...current, model: target, attempts: [...current.attempts] }),
+      };
+    });
+  }
+
+  async function runLatencyProbe(target: ModelOption, signal: AbortSignal): Promise<LatencySample> {
+    const response = await fetch('/api/xjpcode/latency', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        baseUrl,
+        model: target.id,
+        timeoutMs: LATENCY_PROBE_TIMEOUT_MS,
+      }),
+      signal,
+    });
+    const raw = await response.text();
+    let payload: LatencyResponse = {};
+    try {
+      payload = raw ? JSON.parse(raw) as LatencyResponse : {};
+    } catch {
+      payload = { error: raw };
+    }
+
+    const sample: LatencySample = {
+      durationMs: typeof payload.durationMs === 'number' ? payload.durationMs : undefined,
+      firstByteMs: typeof payload.firstByteMs === 'number' ? payload.firstByteMs : null,
+      finishedAt: new Date().toISOString(),
+    };
+
+    if (!response.ok || !payload.ok) {
+      sample.error = payload.error || `HTTP ${response.status}`;
+    }
+
+    return sample;
+  }
+
+  async function startLatencyTests(targetModels: ModelOption[]) {
+    if (isTestingLatency) {
+      latencyAbortRef.current?.abort();
+      return;
+    }
+
+    const uniqueTargets = targetModels.filter((target, index, list) => (
+      target.id && list.findIndex((item) => item.id === target.id) === index
+    ));
+    if (uniqueTargets.length === 0) return;
+
+    resetLatencyRows(uniqueTargets);
+    setIsTestingLatency(true);
+    const abort = new AbortController();
+    latencyAbortRef.current = abort;
+
+    let activeTarget: ModelOption | null = null;
+    try {
+      for (const target of uniqueTargets) {
+        activeTarget = target;
+        setTestingModelId(target.id);
+
+        for (let attemptIndex = 0; attemptIndex < LATENCY_ATTEMPTS; attemptIndex += 1) {
+          if (abort.signal.aborted) throw new DOMException('Latency probe stopped', 'AbortError');
+          setTestingAttempt(attemptIndex + 1);
+          updateLatencyRow(target, (row) => ({ ...row, status: 'running' }));
+
+          const sample = await runLatencyProbe(target, abort.signal);
+          updateLatencyRow(target, (row) => {
+            const attempts = [...row.attempts];
+            attempts[attemptIndex] = sample;
+            return {
+              ...row,
+              attempts,
+              status: attemptIndex + 1 === LATENCY_ATTEMPTS
+                ? attempts.some((item) => item?.error) ? 'error' : 'done'
+                : 'running',
+            };
+          });
+        }
+      }
+    } catch (err) {
+      if (activeTarget) {
+        updateLatencyRow(activeTarget, (row) => ({
+          ...row,
+          status: err instanceof Error && err.name === 'AbortError' ? 'stopped' : 'error',
+        }));
+      }
+    } finally {
+      latencyAbortRef.current = null;
+      setIsTestingLatency(false);
+      setTestingModelId('');
+      setTestingAttempt(null);
+    }
+  }
+
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
     if (isStreaming) {
@@ -460,13 +702,13 @@ export function XjpcodePanel() {
             </div>
             <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-stone-500">
               <span className="font-mono">{shortId(sessionId)}</span>
-              <span className="truncate">{currentModel || 'model pending'}</span>
+              <span className="truncate">{currentModelOption ? modelDisplayLabel(currentModelOption) : 'model pending'}</span>
               {currentStatus ? <span className="truncate text-stone-400">{currentStatus}</span> : null}
             </div>
           </div>
         </div>
 
-        <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(180px,280px)_minmax(150px,220px)_auto_auto]">
+        <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(180px,280px)_minmax(220px,340px)_auto_auto]">
           <Input
             value={baseUrl}
             onBlur={refreshStatus}
@@ -474,16 +716,34 @@ export function XjpcodePanel() {
             className="h-8 font-mono text-xs"
             aria-label="xjpcode endpoint"
           />
-          <select
-            value={currentModel}
-            onChange={(event) => setModel(event.target.value)}
-            className="h-8 rounded-md border border-input bg-white/[0.035] px-2 text-xs text-foreground shadow-inner shadow-black/10 focus:outline-none focus:ring-2 focus:ring-ring/35"
-            aria-label="xjpcode model"
+          <Select
+            value={currentModel || undefined}
+            onValueChange={setModel}
+            disabled={!currentModel && models.length === 0}
           >
-            {currentModel && !models.includes(currentModel) ? <option value={currentModel}>{currentModel}</option> : null}
-            {models.length === 0 ? <option value="">Current model</option> : null}
-            {models.map((item) => <option key={item} value={item}>{item}</option>)}
-          </select>
+            <SelectTrigger className="h-8 font-mono text-xs text-stone-100" aria-label="xjpcode model">
+              <span className="truncate">
+                {currentModelOption ? modelDisplayLabel(currentModelOption) : 'Current model'}
+              </span>
+            </SelectTrigger>
+            <SelectContent className="max-h-[360px] border-white/10 bg-stone-950 text-stone-100 shadow-2xl shadow-black/50">
+              {currentModelOption && !models.some((item) => item.id === currentModelOption.id) ? (
+                <SelectItem value={currentModel} className="font-mono text-xs text-stone-100 focus:bg-teal-400/15 focus:text-teal-100">
+                  <span className="flex min-w-0 flex-col">
+                    <span className="truncate">{modelDisplayLabel(currentModelOption)}</span>
+                  </span>
+                </SelectItem>
+              ) : null}
+              {models.map((item) => (
+                <SelectItem key={item.id} value={item.id} className="font-mono text-xs text-stone-100 focus:bg-teal-400/15 focus:text-teal-100">
+                  <span className="flex min-w-0 flex-col">
+                    <span className="truncate">{modelDisplayLabel(item)}</span>
+                    {item.root ? <span className="truncate text-[10px] text-stone-500">{item.root}</span> : null}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button type="button" size="sm" variant="outline" onClick={refreshStatus} disabled={isRefreshing}>
             {isRefreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             Refresh
@@ -531,7 +791,22 @@ export function XjpcodePanel() {
           </form>
         </main>
 
-        <aside className="flex max-h-72 w-full shrink-0 flex-col bg-black/10 lg:max-h-none lg:w-96">
+        <aside className="flex max-h-72 w-full shrink-0 flex-col bg-black/10 lg:max-h-none lg:w-[30rem]">
+          <LatencyTestPanel
+            rows={latencyRowsForDisplay}
+            modelCount={models.length}
+            isTesting={isTestingLatency}
+            testingModelId={testingModelId}
+            testingAttempt={testingAttempt}
+            onTestAll={() => startLatencyTests(models)}
+            onTestCurrent={() => {
+              if (currentModelOption) startLatencyTests([currentModelOption]);
+            }}
+            onStop={() => latencyAbortRef.current?.abort()}
+            onClear={() => setLatencyRows({})}
+            canTestAll={models.length > 0}
+            canTestCurrent={Boolean(currentModelOption)}
+          />
           <div className="shrink-0 border-b border-white/[0.07] px-3 py-2.5">
             <div className="flex items-center justify-between gap-3">
               <div className="text-xs font-medium text-stone-200">Turn Events</div>
@@ -551,6 +826,173 @@ export function XjpcodePanel() {
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function LatencyTestPanel({
+  rows,
+  modelCount,
+  isTesting,
+  testingModelId,
+  testingAttempt,
+  onTestAll,
+  onTestCurrent,
+  onStop,
+  onClear,
+  canTestAll,
+  canTestCurrent,
+}: {
+  rows: LatencyRow[];
+  modelCount: number;
+  isTesting: boolean;
+  testingModelId: string;
+  testingAttempt: number | null;
+  onTestAll: () => void;
+  onTestCurrent: () => void;
+  onStop: () => void;
+  onClear: () => void;
+  canTestAll: boolean;
+  canTestCurrent: boolean;
+}) {
+  const testedCount = rows.filter((row) => row.attempts.some(Boolean)).length;
+  const activeRow = rows.find((row) => row.model.id === testingModelId);
+
+  return (
+    <section className="shrink-0 border-b border-white/[0.07] p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Gauge className="h-3.5 w-3.5 shrink-0 text-teal-300" />
+          <div className="truncate text-xs font-medium text-stone-200">Model Latency</div>
+        </div>
+        <div className="font-mono text-[10px] text-stone-500">{testedCount}/{modelCount}</div>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={isTesting ? onStop : onTestAll}
+          disabled={!isTesting && !canTestAll}
+          className="h-7 px-2 text-xs"
+        >
+          {isTesting ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+          {isTesting ? 'Stop' : 'Test All'}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onTestCurrent}
+          disabled={isTesting || !canTestCurrent}
+          className="h-7 px-2 text-xs"
+        >
+          <Gauge className="h-3.5 w-3.5" />
+          Current
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onClear}
+          disabled={isTesting || testedCount === 0}
+          className="h-7 px-2 text-xs"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          Clear
+        </Button>
+      </div>
+
+      {isTesting && activeRow ? (
+        <div className="mt-2 flex min-w-0 items-center gap-2 rounded border border-amber-400/20 bg-amber-400/[0.06] px-2 py-1.5 text-[10px] text-amber-100">
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+          <span className="truncate font-mono">{modelDisplayLabel(activeRow.model)}</span>
+          <span className="shrink-0 font-mono">#{testingAttempt || 1}</span>
+        </div>
+      ) : null}
+
+      <div className="mt-2 max-h-56 overflow-auto rounded-md border border-white/[0.07] bg-black/10">
+        {rows.length === 0 ? (
+          <div className="p-3 text-xs text-stone-600">No models loaded.</div>
+        ) : (
+          <div className="min-w-[560px]">
+            <div className="grid grid-cols-[minmax(220px,1fr)_58px_58px_58px_72px] gap-2 border-b border-white/[0.07] px-2 py-1.5 font-mono text-[10px] uppercase text-stone-600">
+              <div>model</div>
+              <div>1st</div>
+              <div>2nd</div>
+              <div>3rd</div>
+              <div>avg</div>
+            </div>
+            {rows.map((row) => (
+              <LatencyRowView
+                key={row.model.id}
+                row={row}
+                activeAttempt={row.model.id === testingModelId ? testingAttempt : null}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function LatencyRowView({ row, activeAttempt }: { row: LatencyRow; activeAttempt: number | null }) {
+  const average = averageLatencyMs(row.attempts);
+  const hasError = row.attempts.some((sample) => sample?.error);
+  const averageText = typeof average === 'number' ? durationLabel(average) : '';
+
+  return (
+    <div className="grid grid-cols-[minmax(220px,1fr)_58px_58px_58px_72px] items-center gap-2 border-b border-white/[0.04] px-2 py-1.5 last:border-b-0">
+      <div className="min-w-0">
+        <div className="truncate font-mono text-[10px] text-stone-300" title={modelDisplayLabel(row.model)}>
+          {modelDisplayLabel(row.model)}
+        </div>
+        {row.model.root ? (
+          <div className="truncate font-mono text-[9px] text-stone-600" title={row.model.root}>{row.model.root}</div>
+        ) : null}
+      </div>
+      {row.attempts.map((sample, index) => (
+        <LatencyCell
+          key={`${row.model.id}-${index}`}
+          sample={sample}
+          active={activeAttempt === index + 1}
+        />
+      ))}
+      <div className={cn('truncate font-mono text-[10px]',
+        row.status === 'running' ? 'text-amber-200' : hasError ? 'text-red-300' : averageText ? 'text-teal-300' : 'text-stone-700')}>
+        {row.status === 'running'
+          ? 'running'
+          : averageText || (row.status === 'stopped' ? 'stopped' : hasError ? 'error' : '--')}
+      </div>
+    </div>
+  );
+}
+
+function LatencyCell({ sample, active }: { sample: LatencySample | null; active: boolean }) {
+  if (active && !sample) {
+    return (
+      <div className="flex items-center gap-1 font-mono text-[10px] text-amber-200">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        run
+      </div>
+    );
+  }
+
+  if (!sample) return <div className="font-mono text-[10px] text-stone-700">--</div>;
+  if (sample.error) {
+    return (
+      <div className="truncate font-mono text-[10px] text-red-300" title={sample.error}>
+        err
+      </div>
+    );
+  }
+
+  const firstByte = typeof sample.firstByteMs === 'number' ? `first byte ${durationLabel(sample.firstByteMs)}` : '';
+  return (
+    <div className="truncate font-mono text-[10px] text-stone-300" title={firstByte}>
+      {durationLabel(sample.durationMs)}
     </div>
   );
 }
