@@ -63,6 +63,7 @@ export const EXPECTED_SURFACES = [
   'lisp-code-sync-loop',
   'nightly-evolution-loop',
   'context-pack',
+  'context-surface-registry',
   'workstation-config',
   'workstation-pool',
   'resident-master-control',
@@ -141,6 +142,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-source-hygiene-isomorphism.mjs',
   'scripts/check-v3-direct-code-drift-policy.mjs',
   'scripts/check-v3-context-pack-isomorphism.mjs',
+  'scripts/check-v3-context-surface-registry.mjs',
   'scripts/check-v3-grounded-dispatch-isomorphism.mjs',
   'scripts/check-v3-interactive-provider-box.mjs',
   'scripts/check-v3-macmini-self-update-lane.mjs',
@@ -788,6 +790,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface context-surface-registry
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface workstation-config
       :status "code-aligned"
       :code ["a"]
@@ -895,7 +901,7 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all thirty surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all expected surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });

@@ -160,6 +160,141 @@
        "Default context-pack generation MUST NOT preload KB/history/provider logs; memory is opt-in by workflow and scope."]
     :checker "node scripts/check-v3-service-extraction-isomorphism.mjs")
 
+  (context-surface-registry
+    :schema "missiond.context-surface-registry.v1"
+    :purpose "Single registry for MissionD context-like artifacts so new context packages do not copy evidence gathering, startup protocol, or worker sidecar semantics under a new schema name."
+    :canonical-runtime-builder mission_context_gather
+    :canonical-startup-surface mission_context_boot
+    :canonical-planning-ledger context-pack
+    :registry-owner memory-knowledge-runtime
+    :surface-classes
+      ((class planning-ledger
+         :role "Append-only human/agent planning evidence that may later compile into accepted shards."
+         :may-gather-evidence false)
+       (class runtime-gather
+         :role "Profile-first source aggregation over SSOT/project/memory/board/infra/conversation lanes."
+         :may-gather-evidence true)
+       (class derived-binding
+         :role "Hashable capsule or file derived from a context gather result and bound to an interaction, conversation, BoardTask, or worker."
+         :may-gather-evidence false)
+       (class startup-contract
+         :role "Small collaboration protocol loaded before task-specific evidence."
+         :may-gather-evidence false)
+       (class worker-sidecar
+         :role "A bounded task/worker projection that points at an existing context source and scope."
+         :may-gather-evidence false)
+       (class support-context
+         :role "Typed sub-payload used inside an owning surface; it is not a standalone context package."
+         :may-gather-evidence false))
+    :surfaces
+      ((surface planning-context-pack
+         :schema "missiond.context-pack.v1"
+         :class planning-ledger
+         :authority ssot
+         :producer [scripts/context-pack-append.mjs]
+         :consumers [scripts/context-pack-compile-shards.mjs scripts/context-pack-materialize-wave.mjs scripts/context-pack-run-wave.mjs]
+         :must-not [runtime-evidence-aggregation startup-protocol conversation-binding])
+       (surface runtime-context-gather
+         :schema "missiond.context-gather.v1"
+         :artifact-schema "missiond.context-gather-artifact.v1"
+         :class runtime-gather
+         :authority canonical-runtime-context-builder
+         :producer mission_context_gather
+         :consumers [mission_interaction Jarvis mission_task_delegate resident-master Codex-App-bootstrap]
+         :owns [evidence-lanes source-profile-policy raw-source-policy support-catalog materialized-context-pack-file context-gather-runs-read-model])
+       (surface interaction-context-capsule
+         :schema "missiond.context-capsule.v1"
+         :class derived-binding
+         :authority derived-from-context-gather
+         :producer context_capsule::generate_lisp_capsule
+         :source mission_context_gather
+         :binding-targets [conversation topic BoardTask intent_alignment plan task_result_artifact]
+         :must-not [perform-retrieval copy-source-profile-policy])
+       (surface codex-boot-context
+         :schema "missiond.codex-boot-context.v1"
+         :policy-schema "missiond.codex-boot-context-policy.v1"
+         :class startup-contract
+         :authority boot-protocol
+         :producer mission_context_boot
+         :source ".missiond/v3/evidence/codex-boot-context.lisp"
+         :must-not [bulk-chat-history raw-provider-logs unreviewed-kb-dump])
+       (surface codex-app-bootstrap-hints
+         :schema "missiond.codex-app-context-pack.v1"
+         :live-schema "missiond.codex-app-live-context.v1"
+         :class startup-contract
+         :authority fallback-hints-only
+         :producer "scripts/mission-context-pack.mjs"
+         :source [mission_context_boot mission_context_gather]
+         :rule "When MissionD runtime/MCP is available this script MUST delegate to mission_context_boot and mission_context_gather; deterministic local heuristics are fallback hints only and must not become a second context authority.")
+       (surface swarm-context-pack
+         :schema "missiond.swarm-context-pack.v1"
+         :class worker-sidecar
+         :authority worker-dispatch-sidecar
+         :producer mission_swarm_run
+         :source [context_pack_path grounding_context_id target_project_roots read_scope write_scope]
+         :must-not [evidence-lane-aggregation replace-context-pack-v1])
+       (surface master-control-context-pack
+         :schema "missiond.master-control-context-pack.v1"
+         :class worker-sidecar
+         :authority resident-master-runtime-snapshot
+         :producer resident-master-control
+         :source [active-objective checkpoint event-summary context_pack_path]
+         :rule "Master-control context packs carry runtime snapshot fields; protocol text should be sourced from codex-boot-context / this registry, not re-authored as an independent context policy.")
+       (surface context-slice
+         :schema "missiond.context-slice.v1"
+         :class derived-binding
+         :authority shared-memory-slice
+         :producer mission_context_slice
+         :source shared_memory)
+       (surface context-atlas
+         :schema "missiond.context-atlas.v1"
+         :compat-schemas ["missiond.context-atlas.dispatch.v0" "missiond.context-atlas.v0"]
+         :class support-context
+         :authority task-brief-support)
+       (surface interaction-media-context
+         :schema "missiond.interaction-media-context.v1"
+         :class support-context
+         :authority interaction-gateway-subpayload)
+       (surface permission-context
+         :schema "missiond.permission-context.v1"
+         :class support-context
+         :authority auth-permission-subpayload)
+       (surface conversation-analysis-context
+         :schema "missiond.conversation.analysis_context.v1"
+         :class support-context
+         :authority conversation-query-subpayload)
+       (surface deployment-events-context
+         :schema "missiond.deployment-events-context.v1"
+         :class support-context
+         :authority context-gather-subpayload)
+       (surface runtime-environment-context
+         :schema "missiond.runtime-environment-context.v1"
+         :class support-context
+         :authority context-gather-subpayload)
+       (surface context-gather-evidence-lanes
+         :schema "missiond.context-gather-evidence-lanes.v1"
+         :class support-context
+         :authority context-gather-subpayload)
+       (surface context-noise-diagnostics
+         :schema "missiond.context-noise-diagnostics.v1"
+         :class support-context
+         :authority context-gather-subpayload)
+       (surface context-noise-metrics
+         :schema "missiond.context-noise-metrics.v1"
+         :class support-context
+         :authority context-gather-subpayload)
+       (surface context-pack-run-wave
+         :schema "missiond.context-pack-run-wave.v0"
+         :class support-context
+         :authority context-pack-runner-output))
+    :invariants
+      ["mission_context_gather is the only runtime surface allowed to aggregate evidence lanes, raw-source policy, support_catalog, and context_noise_metrics."
+       "Context surfaces outside class runtime-gather MUST point at an existing source context, task scope, or support payload; they MUST NOT independently reimplement source-profile policy."
+       "Codex App bootstrap context is fallback hints only: when MissionD runtime is reachable, it MUST call mission_context_boot / mission_context_gather rather than maintain an independent rule set."
+       "New missiond.*context*.v* schemas must be declared in context-surface-registry with class, authority, producer, and source/consumer semantics before checker approval."
+       "Master-control and swarm context packs are worker sidecars; they must converge toward consuming registry/boot/gather facts instead of embedding full prompt policy prose."]
+    :checker "node scripts/check-v3-context-surface-registry.mjs --json")
+
   (evidence-lane-policy
     :schema "missiond.evidence-lane-policy.v1"
     :purpose "Typed evidence lanes govern MissionD retrieval, context injection, raw-source access, privacy, freshness, and promotion. Search is profile-first and filter-before-vector; source-group calls are compatibility adapters into compact EvidenceItem projections."

@@ -18,3 +18,25 @@ checkers before making architecture recommendations.
 
 Runtime hot paths should consume compiled JSON/runtime ABI rather than raw Lisp
 unless an explicit dev/fallback path is being inspected.
+
+## Codex App Context Pack Bootstrap
+
+When working in the Codex App without MissionD-controlled prompt/tool injection,
+start every non-trivial MissionD design, debug, frontend, provider, Codex,
+conversation, or architecture task by pulling a compact context pack:
+
+```bash
+node scripts/mission-context-pack.mjs --json --message "$CODEX_USER_REQUEST"
+```
+
+If the latest user message is not available in `CODEX_USER_REQUEST`, pass it
+directly with `--message`. Use the returned `intent_candidates`,
+`suggested_first_reads`, `evidence_lanes`, and `avoid_first_reads` before broad
+repository search. This bootstrap is deterministic and intentionally compact; it
+does not preload raw conversation history, provider logs, cold runtime archives,
+or unreviewed KB dumps.
+
+When MissionD MCP/runtime tools are available, the bootstrap may point to
+`mission_context_boot` or `mission_context_gather` for live evidence. Treat those
+as scoped follow-up retrieval surfaces, not as a replacement for the V3 SSOT read
+order above.

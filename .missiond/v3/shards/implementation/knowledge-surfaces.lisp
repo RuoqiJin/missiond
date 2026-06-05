@@ -41,6 +41,19 @@
       :note "Context-pack is the V3 high-density planning surface for two-stage parallel work: context investigators append claim/observation/anchor/shard-proposal/conflict entries to .missiond/tasks/<wave>/context-pack.lisp without code edits, then an orchestrator/integrator appends integration-plan with accepted-shards and dispatch-groups. Mapped dispatch groups use (group :id <id> :shards [...]) so scripts/context-pack-compile-shards.mjs can project the Lisp plan into dispatchable_groups for code workers; legacy bare group ids remain names_only for older packs. mission_swarm_run materializes a lightweight missiond.swarm-context-pack.v1 sidecar before publishing worker BoardTasks so provider workers can read the declared context_pack_path."
       :evidence-sidecar ".missiond/v3/evidence/blueprint-notes.lisp#note-011")
 
+(surface context-surface-registry
+      :status "code-aligned"
+      :implements [context-surface-registry context-schema-dedupe context-authority-classification]
+      :code [".missiond/v3/shards/memory-knowledge-runtime.lisp"
+             "scripts/check-v3-context-surface-registry.mjs"
+             "scripts/mission-context-pack.mjs"
+             "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/context_capsule.rs"
+             "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
+             "crates/missiond-daemon/src/engine/master_control.rs"]
+      :acceptance ["node scripts/check-v3-context-surface-registry.mjs --json"]
+      :note "context-surface-registry is the guardrail that stops MissionD from growing another independent context-pack implementation. It classifies context-like schemas into planning ledger, runtime gather, derived binding, startup contract, worker sidecar, or support payload. mission_context_gather is the only runtime evidence-lane aggregator; context-capsule, codex boot context, Codex App bootstrap hints, master-control context packs, and swarm context packs must point back to their source instead of copying source-profile policy.")
+
 (surface memory-kb
       :status "code-aligned"
       :implements [knowledge-memory kb-manager memory insight intent-snapshot]

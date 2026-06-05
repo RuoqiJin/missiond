@@ -30,7 +30,7 @@
     :domain memory-knowledge-runtime
     :path "shards/memory-knowledge-runtime.lisp"
     :root-include "(include \"shards/memory-knowledge-runtime.lisp\")"
-    :surfaces [memory-kb memory-provider-boundary skill-runtime conversation-ingestion conversation-session-management interaction-ledger conversation-control-plane capability-governance incident-governance evidence-governance-view])
+    :surfaces [memory-kb memory-provider-boundary context-surface-registry skill-runtime conversation-ingestion conversation-session-management interaction-ledger conversation-control-plane capability-governance incident-governance evidence-governance-view])
 
   (shard agent-navigation
     :status compiler-active
@@ -142,7 +142,7 @@
     :domain implementation-map
     :path "shards/implementation/knowledge-surfaces.lisp"
     :root-include "(include \"shards/implementation/knowledge-surfaces.lisp\")"
-    :surfaces [context-pack memory-kb codex-boot-context project-registry data-residency-universe memory-provider-boundary eventhub-service-boundary skill-runtime cascade-governance router-policy incident-governance decision-inbox-revalidation capability-governance mission-shared-memory evidence-governance-view])
+    :surfaces [context-pack context-surface-registry memory-kb codex-boot-context project-registry data-residency-universe memory-provider-boundary eventhub-service-boundary skill-runtime cascade-governance router-policy incident-governance decision-inbox-revalidation capability-governance mission-shared-memory evidence-governance-view])
 
   (shard implementation-ops-surfaces
     :status compiler-active

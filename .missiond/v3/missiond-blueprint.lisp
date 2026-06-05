@@ -622,6 +622,7 @@
              "node scripts/check-v3-incident-governance-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
+             "node scripts/check-v3-context-surface-registry.mjs"
              "node scripts/check-v3-interactive-provider-box.mjs"
 	             "node scripts/check-v3-workstation-config-isomorphism.mjs"
 	             "node scripts/check-v3-workstation-pool-isomorphism.mjs"
