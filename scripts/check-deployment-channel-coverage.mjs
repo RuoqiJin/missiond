@@ -44,6 +44,7 @@ function main() {
   checkUniverseProjection(diagnostics, universe);
   checkWiring(diagnostics);
   checkCodebaseDeployClosureBoundaries(diagnostics);
+  checkDeployCenterMigrationAuthority(diagnostics);
   finish(diagnostics, opts);
 }
 
@@ -431,6 +432,132 @@ function checkCodebaseDeployClosureBoundaries(diagnostics) {
     ':canonical-api-prefix "/api/codebase"',
     ':deploy-center-legacy-prefix "/api/deploy/codebase"',
     ':legacy-migration-expiry "2026-06-30"',
+  ]);
+}
+
+function checkDeployCenterMigrationAuthority(diagnostics) {
+  const manifestPath = path.join(XJP_BACKEND_ROOT, 'services/deploy-center/service.manifest.toml');
+  requireText(diagnostics, manifestPath, [
+    '[env.optional.MIGRATION_MODE]',
+    '/app/migrations',
+    '_sqlx_migrations',
+    'migration_authority evidence',
+  ]);
+
+  const projectPath = path.join(XJP_BACKEND_ROOT, 'services/deploy-center/deploy/deploy-center/project.json');
+  let project;
+  try {
+    project = JSON.parse(fs.readFileSync(projectPath, 'utf8'));
+  } catch (err) {
+    diagnostics.push({
+      file: projectPath,
+      service: 'xjp-deploy-center',
+      message: `deploy-center project config is not valid JSON: ${err.message}`,
+    });
+    return;
+  }
+  const authority = project?.stages?.deploy?.config?.migration_authority;
+  if (!authority || typeof authority !== 'object') {
+    diagnostics.push({
+      file: projectPath,
+      service: 'xjp-deploy-center',
+      message: 'deploy-center deploy stage must declare config.migration_authority',
+    });
+  } else {
+    const expected = {
+      schema: 'xjp.deploy-center.migration-authority.v1',
+      mode_env: 'MIGRATION_MODE',
+      source_migrations_root: '/app/migrations',
+      source_migrations_repo_path: 'services/deploy-center/migrations',
+      live_ledger_table: '_sqlx_migrations',
+    };
+    for (const [key, value] of Object.entries(expected)) {
+      if (authority[key] !== value) {
+        diagnostics.push({
+          file: projectPath,
+          service: 'xjp-deploy-center',
+          message: `migration_authority.${key} must be ${JSON.stringify(value)}; got ${JSON.stringify(authority[key])}`,
+        });
+      }
+    }
+    for (const key of ['startup_skip_allowed', 'skip_mode_requires_ledger_reconciliation', 'closure_required']) {
+      if (authority[key] !== true) {
+        diagnostics.push({
+          file: projectPath,
+          service: 'xjp-deploy-center',
+          message: `migration_authority.${key} must be true`,
+        });
+      }
+    }
+    for (const diagnostic of [
+      'migration_mode_skip_without_reconciliation',
+      'migration_ledger_unavailable',
+      'migration_source_unavailable',
+      'migration_latest_version_behind',
+      'migration_checksum_mismatch',
+    ]) {
+      if (!arrayStrings(authority.drift_diagnostics).includes(diagnostic)) {
+        diagnostics.push({
+          file: projectPath,
+          service: 'xjp-deploy-center',
+          message: `migration_authority.drift_diagnostics must include ${diagnostic}`,
+        });
+      }
+    }
+  }
+
+  const migrationsDir = path.join(XJP_BACKEND_ROOT, 'services/deploy-center/migrations');
+  let entries = [];
+  try {
+    entries = fs.readdirSync(migrationsDir).filter((entry) => /^\d{4}_.+\.sql$/.test(entry));
+  } catch (err) {
+    diagnostics.push({
+      file: migrationsDir,
+      service: 'xjp-deploy-center',
+      message: `deploy-center migrations directory must be readable: ${err.message}`,
+    });
+    return;
+  }
+  const versions = new Map();
+  for (const entry of entries) {
+    const version = Number.parseInt(entry.slice(0, 4), 10);
+    if (!versions.has(version)) versions.set(version, []);
+    versions.get(version).push(entry);
+  }
+  for (const [version, files] of [...versions.entries()].sort((a, b) => a[0] - b[0])) {
+    if (files.length > 1) {
+      diagnostics.push({
+        file: migrationsDir,
+        service: 'xjp-deploy-center',
+        message: `deploy-center migration version ${version} has duplicate files: ${files.join(', ')}`,
+      });
+    }
+  }
+  const maxVersion = Math.max(...versions.keys());
+  if (!Number.isFinite(maxVersion) || maxVersion < 50) {
+    diagnostics.push({
+      file: migrationsDir,
+      service: 'xjp-deploy-center',
+      message: `deploy-center migrations must include the executor readiness migration version 50 or later; max=${Number.isFinite(maxVersion) ? maxVersion : '<none>'}`,
+    });
+  }
+  requireText(diagnostics, path.join(migrationsDir, '0050_executor_instance_readiness.sql'), [
+    'readiness_status',
+    'deploy_executor_instances',
+    'idx_deploy_executor_instances_readiness',
+  ]);
+
+  requireText(diagnostics, '.missiond/v3/shards/deployment-closure-plane.lisp', [
+    'DbMigrationAuthority',
+    'migration_authority migration_adoption',
+    'migration_mode_skip_without_reconciliation',
+    'migration_latest_version_behind',
+    'migration_checksum_mismatch',
+  ]);
+  requireText(diagnostics, 'scripts/compile-v3-runtime.mjs', [
+    'migration_ledger_required',
+    'requiresMigrationLedger',
+    'migration_mode_skip_without_reconciliation',
   ]);
 }
 

@@ -1279,6 +1279,13 @@ function buildDeploymentPolicy(universeJson) {
     const targetSideBuildAllowed = deployment.target_side_build_allowed
       ?? deployment.targetSideBuildAllowed
       ?? defaultTargetSideBuildAllowed(deployment, strict);
+    const migrationLedgerRequired = requiresMigrationLedger({
+      serviceId,
+      projectId,
+      deployment,
+      supportCatalog,
+      strict,
+    });
     rows.push({
       project_id: projectId,
       service_id: serviceId,
@@ -1293,6 +1300,7 @@ function buildDeploymentPolicy(universeJson) {
       runtime_digest_required: strict,
       smoke_required: strict,
       db_adoption_required: serviceId.includes('payments') || projectId.includes('payments'),
+      migration_ledger_required: migrationLedgerRequired,
       release_lease_required: strict,
       artifact_lane: artifactLane,
       target_side_build_allowed: targetSideBuildAllowed,
@@ -1306,7 +1314,15 @@ function buildDeploymentPolicy(universeJson) {
         ? ['ReleasePlan', 'RunnerBinding', 'SecretRequirement', 'ReleaseLease', 'RuntimeObservation', 'ReleaseEvidence', 'ClosureVerdict']
         : ['ReleasePlan', 'ReleaseEvidence', 'ClosureVerdict'],
       fail_closed_blockers: strict
-        ? failClosedBlockersFor({ serviceId, projectId, deployment, supportCatalog, runtimeTarget, substrate })
+        ? failClosedBlockersFor({
+            serviceId,
+            projectId,
+            deployment,
+            supportCatalog,
+            runtimeTarget,
+            substrate,
+            migrationLedgerRequired,
+          })
         : [],
     });
   }
@@ -1325,6 +1341,7 @@ function buildDeploymentPolicy(universeJson) {
           immutable_image_required: true,
           runtime_digest_required: true,
           smoke_required: true,
+          migration_ledger_required: true,
           release_lease_required: true,
           target_side_build_allowed: false,
           approval_policy: 'deploy-center-policy-or-explicit-board-approval',
@@ -1348,6 +1365,12 @@ function buildDeploymentPolicy(universeJson) {
         'runtime_digest_mismatch',
         'provenance_partial',
         'db_adoption_required',
+        'migration_ledger_required',
+        'migration_mode_skip_without_reconciliation',
+        'migration_ledger_unavailable',
+        'migration_source_unavailable',
+        'migration_latest_version_behind',
+        'migration_checksum_mismatch',
         'abi_freshness_mismatch',
         'release_lease_conflict',
         'deployment_lane_mismatch',
@@ -1389,7 +1412,38 @@ function defaultTargetSideBuildAllowed(deployment, strict) {
   return !strict;
 }
 
-function failClosedBlockersFor({ serviceId, projectId, deployment, supportCatalog, runtimeTarget, substrate }) {
+function requiresMigrationLedger({ serviceId, projectId, deployment, supportCatalog, strict }) {
+  if (!strict) return false;
+  const explicit = deployment?.migration_ledger_required
+    ?? deployment?.migrationLedgerRequired
+    ?? supportCatalog?.migration_ledger_required
+    ?? supportCatalog?.migrationLedgerRequired;
+  if (explicit !== undefined && explicit !== null) return Boolean(explicit);
+  const id = `${serviceId} ${projectId}`.toLowerCase();
+  return [
+    'auth',
+    'deploy-center',
+    'domain',
+    'mail',
+    'object-storage',
+    'payments',
+    'project-universe',
+    'router',
+    'search-center',
+    'secret-store',
+    'timeline',
+  ].some((needle) => id.includes(needle));
+}
+
+function failClosedBlockersFor({
+  serviceId,
+  projectId,
+  deployment,
+  supportCatalog,
+  runtimeTarget,
+  substrate,
+  migrationLedgerRequired,
+}) {
   const blockers = [];
   const deployCenterSlug = deployment?.dc_slug ?? supportCatalog?.deploy_center_slug ?? (substrate === 'deploy-center' ? serviceId : null);
   if (substrate === 'deploy-center' && !deployCenterSlug) blockers.push('deploy_center_slug_missing');
@@ -1397,6 +1451,7 @@ function failClosedBlockersFor({ serviceId, projectId, deployment, supportCatalo
     blockers.push('runtime_target_missing');
   }
   if (serviceId.includes('payments') || projectId.includes('payments')) blockers.push('db_adoption_plan_required');
+  if (migrationLedgerRequired) blockers.push('migration_ledger_required');
   return blockers;
 }
 
