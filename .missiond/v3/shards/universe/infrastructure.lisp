@@ -110,14 +110,16 @@
       :rule "Deploy Center trigger dispatch must understand native_workflow as a first-class build stage; product-service Rust backends must not keep docker_build solely to reach the native runner lane. Native workflow builds must never publish an artifact from a stale cached checkout when the requested branch or commit cannot be fetched and verified.")
     (codebase-runner-capacity-priority-policy
       :entry [deploy-center.workflow-job claim-next-workflow-job runner-labels build-capacity]
-      :priority_order [privatecloud-10900kf windows-12900kf-linux-vm rickyhq-macmini-m4]
-      :core ((step s1 :logic "default Linux product-service image builds stay on privatecloud-agent instances: privatecloud-10900kf first, windows-12900kf-linux-vm second")
-             (step s2 :logic "rickyhq-macmini-m4 is priority 3 and should claim only macmini-compatible native jobs such as MissionD local build/self-update or explicit Darwin/local Rust build lanes")
-             (step s3 :logic "Deploy Center matches native workflow runners by runner_labels containing executor_name and supports explicit metadata native_workflow.runner_agent_id to pin a job to a physical runner inside a shared executor label")
-             (step s4 :logic "do not rely on implicit priority inside a shared executor label; product-service Rust build stages that require privatecloud-10900kf must set runner_agent_id=privatecloud")
-             (step s5 :logic "do not add macmini to generic Linux docker build labels until Docker/buildx/platform and scheduler-priority support are present"))
+      :parallel_linux_build_pool [privatecloud-10900kf windows-12900kf-linux-vm]
+      :reserve_runners [rickyhq-macmini-m4]
+      :core ((step s1 :logic "default Linux product-service image builds use the shared privatecloud-agent label plus required_capabilities so privatecloud-10900kf and windows-12900kf-linux-vm can claim independent queued jobs in parallel")
+             (step s2 :logic "rickyhq-macmini-m4 is reserve capacity and should claim only macmini-compatible native jobs such as MissionD local build/self-update or explicit Darwin/local Rust build lanes")
+             (step s3 :logic "Deploy Center matches native workflow runners by runner_labels containing executor_name; native_workflow.runner_agent_id is a singleton affinity override, not the default scheduling mechanism")
+             (step s4 :logic "generic Linux build stages MUST NOT set runner_agent_id unless they also declare runner_pin_rationale explaining a temporary single-host affinity; normal 10900KF/12900KF capacity uses labels/capabilities")
+             (step s5 :logic "do not add macmini to generic Linux docker build labels until Docker/buildx/platform and scheduler-priority support are present")
+             (step s6 :logic "artifact evidence builder_id must reflect the runtime claiming agent when available; config builder_id is only the default/fallback label"))
       :surfaces ["deploy-center/src/db/codebase_runner.rs#claim_next_workflow_job_for_runner" "deploy-center/migrations/0044_missiond_macmini_executor.sql" ".missiond/workflows/missiond-macmini-self-update.lisp"]
-      :rule "MissionD must not claim that runner priority fallback is automatic unless deploy-center scheduler code or explicit runner_agent_id/runner labels implement that ordering.")
+      :rule "MissionD must not claim that runner priority fallback is automatic. Generic Linux build parallelism is implemented through runner_labels plus required_capabilities and multiple live agent instances; runner_agent_id is allowed only with explicit runner_pin_rationale evidence.")
     (agent-offline-response-policy
       :entry [deploy-center.agent_heartbeat deploy-center.agent_update_failed deployment-event-response mission_infra_query.skill_evidence mission_infra_query.diagnostic_profiles]
       :core ((step s1 :logic "when deploy-center emits agent_offline or repeated heartbeat/update failure, MissionD creates or updates one deploy-ops incident keyed by target_id/service_id/root_cause_key")

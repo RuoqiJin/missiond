@@ -71,9 +71,11 @@
         :options
           ((option privatecloud-rust-build
              :builder privatecloud-10900kf
-             :runner_agent_id privatecloud
+             :parallel_linux_build_pool [privatecloud-10900kf windows-12900kf-linux-vm]
+             :runner_labels [privatecloud-agent]
+             :runner_agent_id none
              :authority deploy-center
-             :use-when "Default for every Rust product-service backend build, including services that run later on GCP VM, ECS, or another container host. deploy-center native_workflow must carry runner_agent_id=privatecloud when multiple runner instances share privatecloud-agent.")
+             :use-when "Default for every Rust product-service backend build, including services that run later on GCP VM, ECS, or another container host. deploy-center native_workflow should use runner_labels plus required_capabilities so 10900KF and 12900KF Linux VM runners can claim jobs in parallel; runner_agent_id is reserved for explicit single-host affinity with runner_pin_rationale.")
            (option nextjs-route-handler-no-rust-build
              :use-when "Thin Next.js BFF with no Rust backend.")
            (option explicit-vercel-rust-exception
@@ -190,11 +192,12 @@
     (rust-build-lane-standard
       :schema "missiond.service-layer-rust-build-lane.v1"
       :default privatecloud-rust-build
-      :builder privatecloud-10900kf
-      :runner_agent_id privatecloud
+      :builder_pool [privatecloud-10900kf windows-12900kf-linux-vm]
+      :runner_labels [privatecloud-agent]
+      :runner_agent_id none
       :authority deploy-center
       :deployment-channel-summary [build-lane runtime-target frontend-hosting deployment-channel-plane]
-      :rule "Rust product-service backend builds MUST run through deploy-center approved privatecloud/codebase build lane with deploy_project_stage_configs.build.config.deploy_type=native_workflow and explicit native_workflow.runner_agent_id when an executor label has multiple live runner instances. Vercel and production runtime targets such as gcp-runtime/GCP VM are deploy targets, not Rust builders; docker_build plus source_strategy=xjp_native_codebase_runner is migration compatibility only."
+      :rule "Rust product-service backend builds MUST run through deploy-center approved privatecloud/codebase build lane with deploy_project_stage_configs.build.config.deploy_type=native_workflow, runner_labels/required_capabilities for the generic 10900KF plus 12900KF Linux VM build pool, and no native_workflow.runner_agent_id unless an explicit runner_pin_rationale documents temporary single-host affinity. Vercel and production runtime targets such as gcp-runtime/GCP VM are deploy targets, not Rust builders; docker_build plus source_strategy=xjp_native_codebase_runner is migration compatibility only."
       :pipeline
         ((step s1 :id source-sync :logic "Sync the release commit through deploy-center/codebase source synchronization; GitHub Actions may be a control-plane trigger only.")
          (step s2 :id native-stage-dispatch :logic "Normal deploy-center trigger dispatch creates xjp_workflow_runs/xjp_workflow_jobs for the build stage when deploy_type=native_workflow.")

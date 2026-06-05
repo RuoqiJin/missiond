@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const ROOT = process.cwd();
+const XJP_BACKEND_ROOT = '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend';
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -42,6 +43,7 @@ function main() {
   const universe = JSON.parse(fs.readFileSync(universePath, 'utf8'));
   checkUniverseProjection(diagnostics, universe);
   checkWiring(diagnostics);
+  checkCodebaseDeployClosureBoundaries(diagnostics);
   finish(diagnostics, opts);
 }
 
@@ -244,6 +246,89 @@ function checkNativeWorkflowProjectConfig(diagnostics, service, channel) {
       message: `${serviceId} deploy-center native build config must mark trigger_adapter_status`,
     });
   }
+  checkNativeWorkflowRunnerPin(diagnostics, configPath, serviceId, build?.config ?? {}, native);
+  checkCodebaseAuthorityConfig(diagnostics, configPath, serviceId, build?.config ?? {}, native);
+  checkFrontendBuildRunnerPin(diagnostics, configPath, serviceId, config);
+}
+
+function checkFrontendBuildRunnerPin(diagnostics, configPath, serviceId, config) {
+  const frontend = config?.stages?.frontend;
+  if (!frontend || frontend.enabled === false) return;
+  const frontendConfig = frontend.config ?? {};
+  if (stringValue(frontendConfig.deploy_type) !== 'cn_frontend') return;
+  checkNativeWorkflowRunnerPin(
+    diagnostics,
+    configPath,
+    `${serviceId}:frontend`,
+    frontendConfig,
+    frontendConfig.native_workflow ?? {},
+  );
+}
+
+function checkNativeWorkflowRunnerPin(diagnostics, configPath, serviceId, buildConfig, native) {
+  const runnerPin = stringValue(native.runner_agent_id)
+    ?? stringValue(native.build_runner_agent_id)
+    ?? stringValue(buildConfig.runner_agent_id)
+    ?? stringValue(buildConfig.build_runner_agent_id);
+  if (!runnerPin) return;
+  const rationale = stringValue(native.runner_pin_rationale)
+    ?? stringValue(buildConfig.runner_pin_rationale)
+    ?? stringValue(native.runner_pin_scope)
+    ?? stringValue(buildConfig.runner_pin_scope);
+  if (rationale) return;
+  diagnostics.push({
+    file: configPath,
+    service: serviceId,
+    message: `${serviceId} generic native Linux build must not pin runner_agent_id=${runnerPin}; use runner_labels/required_capabilities for the 10900KF+12900KF pool or add runner_pin_rationale`,
+  });
+}
+
+function checkCodebaseAuthorityConfig(diagnostics, configPath, serviceId, buildConfig, native) {
+  if (stringValue(buildConfig.source_provider) !== 'xjp-codebase') return;
+  const canonical = stringValue(buildConfig.canonical_remote);
+  const repoUrl = stringValue(buildConfig.repo_url);
+  const mirror = stringValue(buildConfig.mirror_remote);
+  if (!canonical || !canonical.startsWith('ssh://git@codebase.xiaojins.com:2222/')) {
+    diagnostics.push({
+      file: configPath,
+      service: serviceId,
+      message: `${serviceId} xjp-codebase build must declare canonical_remote under codebase.xiaojins.com:2222`,
+    });
+  }
+  if (!repoUrl || repoUrl !== canonical) {
+    diagnostics.push({
+      file: configPath,
+      service: serviceId,
+      message: `${serviceId} xjp-codebase build repo_url must equal canonical_remote`,
+    });
+  }
+  if (!mirror || !mirror.includes('github.com/')) {
+    diagnostics.push({
+      file: configPath,
+      service: serviceId,
+      message: `${serviceId} xjp-codebase build must keep GitHub only as mirror_remote evidence`,
+    });
+  }
+  const requiredEnv = new Set(arrayStrings(native.runner_required_env));
+  for (const envName of ['CODEBASE_SSH_PRIVATE_KEY', 'CODEBASE_KNOWN_HOSTS']) {
+    if (!requiredEnv.has(envName)) {
+      diagnostics.push({
+        file: configPath,
+        service: serviceId,
+        message: `${serviceId} xjp-codebase build must require runner env ${envName}`,
+      });
+    }
+  }
+  const secretEnv = native.secret_env && typeof native.secret_env === 'object' ? native.secret_env : {};
+  for (const envName of ['CODEBASE_SSH_PRIVATE_KEY', 'CODEBASE_KNOWN_HOSTS']) {
+    if (!stringValue(secretEnv[envName])) {
+      diagnostics.push({
+        file: configPath,
+        service: serviceId,
+        message: `${serviceId} xjp-codebase build must map secret_env.${envName}`,
+      });
+    }
+  }
 }
 
 function resolveDeployCenterProjectConfig(root, serviceId) {
@@ -263,6 +348,7 @@ function checkWiring(diagnostics) {
     '(deployment-channel-plane',
     ':schema "missiond.deployment-channel-plane.v1"',
     ':merge-precedence [explicit-v3-deployment-channels project-local-deploy-center-config repo-workflow-inference live-observed-annotation]',
+    'runner_agent_id is a singleton affinity override and requires runner_pin_rationale evidence',
   ]);
   requireText(diagnostics, 'crates/missiond-daemon/src/handlers/knowledge/project.rs', [
     'deployment_channels::handle_deployment_channels',
@@ -284,6 +370,67 @@ function checkWiring(diagnostics) {
     'Native Runner',
     'obs ',
     'drift ',
+  ]);
+}
+
+function checkCodebaseDeployClosureBoundaries(diagnostics) {
+  const deployCenterApiMod = path.join(XJP_BACKEND_ROOT, 'services/deploy-center/src/api/mod.rs');
+  requireText(diagnostics, deployCenterApiMod, [
+    '.route("/closure/:project", get(get_project_closure))',
+    '.route("/evidence/:release_id", get(get_release_evidence))',
+    '.route("/releases/:id/evidence", post(append_release_evidence))',
+    '.route("/releases/:id/close", post(close_release))',
+    '"/codebase/overview"',
+    'native_control_plane_overview',
+  ]);
+  requireText(diagnostics, path.join(XJP_BACKEND_ROOT, 'services/deploy-center/src/api/release_closure.rs'), [
+    'deploy-center.project-closure.v1',
+    'ReleaseEvidence+ClosureVerdict',
+    'deploy-center.release-evidence.v1',
+    'deploy-center.closure-verdict.v1',
+  ]);
+  requireText(diagnostics, path.join(XJP_BACKEND_ROOT, 'services/deploy-center/src/api/codebase_runner.rs'), [
+    'deploy-center.codebase-compatibility-boundary.v1',
+    'legacy-read-through',
+    'https://code.xiaojins.com/api/codebase',
+    'migration_expiry',
+    'source-authority',
+    'push-success-online-semantics',
+  ]);
+  requireText(diagnostics, path.join(XJP_BACKEND_ROOT, 'services/code-center/src/lib.rs'), [
+    '.nest("/api/code", api::routes())',
+    '.nest("/api/codebase", codebase::api::routes())',
+  ]);
+  requireText(diagnostics, path.join(XJP_BACKEND_ROOT, 'services/code-center/src/codebase/api.rs'), [
+    'xjp-codebase.overview.v1',
+    'source_authority',
+    'legacy_code_api_prefix',
+    'git_ssh_endpoint_template',
+    'ReleasePlan+ReleaseEvidence+ClosureVerdict',
+  ]);
+  requireText(diagnostics, path.join(XJP_BACKEND_ROOT, 'services/code-center/src/codebase/deploy.rs'), [
+    'trigger_source: "codebase-push"',
+    '"source_authority": "xjp-codebase"',
+    '"canonical_remote": repository.canonical_remote',
+    '"changed_paths": event.changed_paths',
+    '"deploy_project_slug": binding.deploy_project_slug',
+  ]);
+  requireText(diagnostics, path.join(XJP_BACKEND_ROOT, 'services/code-center/service.manifest.toml'), [
+    'path = "/api/code/health"',
+    'path = "/api/codebase/health"',
+    '[env.optional.CODEBASE_SERVICE_TOKEN_KEY]',
+    '[env.optional.SECRET_STORE_API_KEY]',
+  ]);
+  requireText(diagnostics, '.missiond/v3/shards/deployment-closure-plane.lisp', [
+    'POST /api/deploy/releases/:release_id/evidence',
+    'POST /api/deploy/releases/:release_id/close',
+    'Deploy Center /api/deploy/codebase/* is legacy-read-through',
+  ]);
+  requireText(diagnostics, '.missiond/v3/shards/universe/service-runtime.lisp', [
+    ':codebase-boundary (:schema "missiond.codebase-boundary.v1"',
+    ':canonical-api-prefix "/api/codebase"',
+    ':deploy-center-legacy-prefix "/api/deploy/codebase"',
+    ':legacy-migration-expiry "2026-06-30"',
   ]);
 }
 
@@ -315,7 +462,7 @@ function requireChannel(diagnostics, channels, serviceId, surface, kind) {
 }
 
 function requireText(diagnostics, file, needles) {
-  const full = path.join(ROOT, file);
+  const full = path.isAbsolute(file) ? file : path.join(ROOT, file);
   const text = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : '';
   for (const needle of needles) {
     if (!text.includes(needle)) {
@@ -326,6 +473,11 @@ function requireText(diagnostics, file, needles) {
 
 function stringValue(value) {
   return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function arrayStrings(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim());
 }
 
 function parseArgs(argv) {
