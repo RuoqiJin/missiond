@@ -34,6 +34,7 @@
                      "scripts/generated/v3_contracts.mjs"
                      "scripts/generated/v3_runtime_defaults.mjs"
                      "scripts/mission-context-pack.mjs"
+                     "scripts/smoke-jarvis-intent-plan-dispatch.mjs"
                      ".missiond/work-orders/wo-20260605210005-Harden-Jarvis-provider-chain-gov/plan.lisp"]
        :acceptance ["node scripts/check-project-ssot-universe.mjs --json"
                     "node scripts/check-v3-interaction-gateway-isomorphism.mjs --json"

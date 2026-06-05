@@ -292,6 +292,15 @@ function hasTerminalDirectAnswer(response) {
     && eventNames(response).includes('answer_delta');
 }
 
+function hasArchiveOnlyDirectAnswer(response) {
+  const names = eventNames(response);
+  return names.includes('intent_archived')
+    && names.includes('grounding')
+    && names.includes('key_judgment_draft')
+    && names.includes('plan_archived')
+    && hasTerminalDirectAnswer(response);
+}
+
 function hasNonTerminalFinal(response) {
   return (response?.events || []).some((event) => {
     if (event?.event !== 'final') return false;
@@ -397,7 +406,49 @@ async function main() {
   const diagnostics = [];
   const first = await postInteraction(buildBody());
   validateHttp('intent', first, diagnostics);
-  if (first.ok) {
+  const archiveOnlyDirectAnswer = first.ok && hasArchiveOnlyDirectAnswer(first);
+  if (archiveOnlyDirectAnswer) {
+    for (const required of [
+      'received',
+      'authenticated',
+      'grounding',
+      'intent_archived',
+      'key_judgment_draft',
+      'plan_archived',
+      'answer_delta',
+      'result_artifact',
+      'final',
+    ]) {
+      if (!hasEvent(first, required)) {
+        diagnostics.push({
+          code: 'ARCHIVE_ONLY_EVENT_MISSING',
+          message: `archive-only direct answer missing ${required}`,
+          events: eventNames(first),
+        });
+      }
+    }
+    if (hasEvent(first, 'confirm_required')) {
+      diagnostics.push({
+        code: 'ARCHIVE_ONLY_CONFIRM_REQUIRED',
+        message: 'default Jarvis flow must archive intent/plan without requiring user confirmation',
+        events: eventNames(first),
+      });
+    }
+    if (hasEvent(first, 'board_task_created') || hasEvent(first, 'worker_dispatched')) {
+      diagnostics.push({
+        code: 'ARCHIVE_ONLY_UNEXPECTED_DISPATCH',
+        message: 'grounded direct-answer archive-only flow must not create or dispatch a BoardTask',
+        events: eventNames(first),
+      });
+    }
+    if (!hasVisibleProgress(first, 'intent_authoring')) {
+      diagnostics.push({
+        code: 'VISIBLE_PROGRESS_MISSING',
+        message: 'intent authoring must emit missiond.jarvis-progress.v1 and OpenAI-compatible progress deltas while waiting.',
+        events: eventNames(first),
+      });
+    }
+  } else if (first.ok) {
     for (const required of ['received', 'authenticated', 'grounding', 'intent_draft', 'confirm_required']) {
       if (!hasEvent(first, required)) {
         diagnostics.push({ code: 'INTENT_EVENT_MISSING', message: `intent phase missing ${required}`, events: eventNames(first) });
@@ -432,7 +483,7 @@ async function main() {
 
   let second = null;
   let planConfirm = null;
-  if (intentConfirm) {
+  if (!archiveOnlyDirectAnswer && intentConfirm) {
     second = await postInteraction(buildBody({ missiond_intent_confirmed: true, missiond_confirm: { confirm_payload: intentConfirm } }));
     validateHttp('plan', second, diagnostics);
     if (second.ok) {
@@ -467,13 +518,13 @@ async function main() {
       }
     }
     planConfirm = findConfirmPayload(second);
-  } else {
+  } else if (!archiveOnlyDirectAnswer) {
     diagnostics.push({ code: 'INTENT_CONFIRM_PAYLOAD_MISSING', message: 'intent phase did not return a confirm payload' });
   }
 
   let third = null;
   let follow = null;
-  if (allowCreate && planConfirm) {
+  if (!archiveOnlyDirectAnswer && allowCreate && planConfirm) {
     third = await postInteraction(buildBody({ missiond_plan_confirmed: true, missiond_confirm: { confirm_payload: planConfirm } }));
     validateHttp('dispatch', third, diagnostics);
     if (third.ok) {
@@ -511,7 +562,11 @@ async function main() {
     ok: diagnostics.length === 0,
     schema: 'missiond.jarvis-intent-plan-dispatch-smoke.v1',
     base_url: baseUrl,
-    mode: allowCreate ? 'confirm-plan-and-create-task' : 'confirm-through-plan-only',
+    mode: archiveOnlyDirectAnswer
+      ? 'archive-only-direct-answer'
+      : allowCreate
+        ? 'confirm-plan-and-create-task'
+        : 'confirm-through-plan-only',
     phases: {
       intent: summarize(first),
       plan: summarize(second),
