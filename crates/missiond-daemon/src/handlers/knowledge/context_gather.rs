@@ -1644,6 +1644,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         &deployment_events_summary,
     );
     let next_action = context_gather_next_action(profile, &deployment_events_summary, &unresolved);
+    let navigation_profile = build_navigation_profile(
+        &query,
+        profile,
+        &source_summaries,
+        &support_catalog,
+        effective_project_id.as_deref(),
+    );
     let requested_unknowns = args.unknowns.clone();
 
     let sources_used = sources.keys().cloned().collect::<Vec<_>>();
@@ -1713,6 +1720,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "authority_order": authority_order,
         "noise_diagnostics": noise_diagnostics,
         "context_noise_metrics": context_noise_metrics,
+        "navigation_profile": navigation_profile,
         "evidence_refs": evidence_refs,
         "unresolved": unresolved,
         "diagnostics": diagnostics,
@@ -1955,6 +1963,1038 @@ fn authority_order() -> Value {
         "conversation_audit",
         "cold_archive"
     ])
+}
+
+fn build_navigation_profile(
+    query: &str,
+    source_profile: SourceProfile,
+    source_summaries: &Value,
+    support_catalog: &Value,
+    project_id: Option<&str>,
+) -> Value {
+    let text = normalize_navigation_text(query);
+    let mentions_frontend = nav_has_any(
+        &text,
+        &[
+            "frontend",
+            "front-end",
+            "ui",
+            "page",
+            "panel",
+            "tab",
+            "browser",
+            "web",
+            "前端",
+            "页面",
+            "网页",
+            "面板",
+            "选项卡",
+            "标签页",
+        ],
+    );
+    let mentions_provider = nav_has_any(
+        &text,
+        &[
+            "provider",
+            "model",
+            "chat",
+            "completions",
+            "xjpcode",
+            "xjp code",
+            "codex",
+            "claude",
+            "gemini",
+            "llm",
+            "模型",
+            "对话",
+            "聊天",
+            "使用",
+        ],
+    );
+    let mentions_worker = nav_has_any(
+        &text,
+        &[
+            "worker",
+            "dispatch",
+            "delegate",
+            "boardtask",
+            "work order",
+            "read_scope",
+            "write_scope",
+            "工位",
+            "派发",
+            "分发",
+            "任务",
+            "四路",
+            "并行",
+        ],
+    );
+    let mentions_conversation = nav_has_any(
+        &text,
+        &[
+            "conversation",
+            "jsonl",
+            "rollout",
+            "message",
+            "tool call",
+            "tool-call",
+            "对话",
+            "会话",
+            "消息",
+            "工具调用",
+            "记录",
+        ],
+    );
+    let mentions_deploy = nav_has_any(
+        &text,
+        &[
+            "deploy",
+            "deployment",
+            "runtime",
+            "health",
+            "monitor",
+            "domain",
+            "url",
+            "port",
+            "proxy",
+            "部署",
+            "运行时",
+            "健康",
+            "域名",
+            "端口",
+            "代理",
+        ],
+    );
+    let mentions_router = nav_has_any(&text, &["xjp-router", "xjp router", "router", "路由"]);
+    let mentions_gemini = nav_has_any(
+        &text,
+        &[
+            "gemini",
+            "gemini 3.1",
+            "gemini-3.1",
+            "gemini 3.1 pro",
+            "gemini-3.1-pro",
+        ],
+    );
+    let mentions_translation =
+        nav_has_any(&text, &["translate", "translation", "translator", "翻译"]);
+    let mentions_workflow = nav_has_any(
+        &text,
+        &[
+            "workflow",
+            "workflows",
+            "multi-round",
+            "multi round",
+            "multi_turn",
+            "多轮",
+            "渠道",
+            "生成结果",
+        ],
+    );
+    let mentions_provider_runtime = nav_has_any(
+        &text,
+        &[
+            "provider",
+            "model",
+            "模型",
+            "workflow",
+            "workflows",
+            "渠道",
+            "调用",
+            "生成结果",
+        ],
+    );
+    let asks_runtime_probe = nav_has_any(
+        &text,
+        &[
+            "能不能",
+            "能否",
+            "调用",
+            "生成结果",
+            "smoke",
+            "health",
+            "/v1/models",
+            "线上",
+            "生产",
+            "runtime",
+            "运行时",
+        ],
+    );
+    let xjp_router_provider_workflow = mentions_router
+        && (mentions_gemini
+            || mentions_translation
+            || mentions_workflow
+            || mentions_provider_runtime);
+    let xjp_router_runtime_probe = mentions_router && asks_runtime_probe;
+    let asks_analysis = nav_has_any(
+        &text,
+        &[
+            "analyze",
+            "analysis",
+            "architecture",
+            "review",
+            "audit",
+            "why",
+            "how",
+            "调查",
+            "调研",
+            "分析",
+            "架构",
+            "为什么",
+            "怎么",
+            "如何",
+        ],
+    );
+
+    let mut selected_profiles = Vec::new();
+    let mut next_reads = Vec::<String>::new();
+    let mut verification_plan = Vec::<String>::new();
+    let mut required_questions = Vec::<String>::new();
+
+    if xjp_router_provider_workflow {
+        push_navigation_candidate(
+            &mut selected_profiles,
+            "router_provider_workflow",
+            0.9,
+            "The request names router/provider/model/workflow behavior; resolve xjp-router and inspect workflow/model mapping first.",
+            &[
+                "Which resolved xjp-router project root owns the router workflow source?",
+                "Which workflow file maps the requested provider behavior to Gemini or another model?",
+                "Which model/provider mapping is current before runtime smoke?",
+            ],
+            &[
+                ".missiond/v3/shards/universe/project-registry.lisp",
+                ".missiond/v3/shards/deployment-closure-plane.lisp",
+                ".missiond/v3/shards/universe/service-runtime.lisp",
+                ".missiond/v3/shards/control-plane-runtime.lisp",
+            ],
+            &[
+                "mission_project resolve query=xjp-router",
+                "mission_context_gather source_profile=deploy_ops project_id=xjp-router",
+                "workflow source and model/provider mapping inspection",
+            ],
+        );
+        extend_unique_strings(
+            &mut next_reads,
+            &[
+                ".missiond/v3/shards/universe/project-registry.lisp",
+                ".missiond/v3/shards/deployment-closure-plane.lisp",
+                ".missiond/v3/shards/universe/service-runtime.lisp",
+                ".missiond/v3/shards/control-plane-runtime.lisp",
+            ],
+        );
+        extend_unique_strings(
+            &mut verification_plan,
+            &[
+                "mission_project resolve query=xjp-router",
+                "mission_context_gather source_profile=deploy_ops project_id=xjp-router",
+                "verify workflow source and model/provider mapping before judging availability",
+            ],
+        );
+        extend_unique_strings(
+            &mut required_questions,
+            &[
+                "Which resolved xjp-router project root owns the router workflow source?",
+                "Which workflow file maps the requested provider behavior to Gemini or another model?",
+            ],
+        );
+    }
+
+    if xjp_router_runtime_probe {
+        push_navigation_candidate(
+            &mut selected_profiles,
+            "runtime_smoke_probe",
+            0.86,
+            "The request asks whether a routed behavior can be invoked now, so deploy/runtime evidence and a scoped smoke come after source verification.",
+            &[
+                "Which runtime/deployment endpoint proves xjp-router can be called now?",
+                "What scoped credential or proxy can smoke the workflow without exposing secrets?",
+            ],
+            &[
+                ".missiond/v3/shards/universe/project-registry.lisp",
+                ".missiond/v3/shards/deployment-closure-plane.lisp",
+                ".missiond/v3/shards/universe/service-runtime.lisp",
+            ],
+            &[
+                "mission_context_gather source_profile=deploy_ops project_id=xjp-router",
+                "xjp-router health/models probe",
+                "secret-safe workflow smoke",
+            ],
+        );
+        extend_unique_strings(
+            &mut verification_plan,
+            &[
+                "mission_context_gather source_profile=deploy_ops project_id=xjp-router",
+                "xjp-router health/models probe",
+                "secret-safe workflow smoke",
+            ],
+        );
+        extend_unique_strings(
+            &mut required_questions,
+            &[
+                "Which runtime/deployment endpoint proves xjp-router can be called now?",
+                "What scoped credential or proxy can smoke the workflow without exposing secrets?",
+            ],
+        );
+    }
+
+    if mentions_frontend {
+        push_navigation_candidate(
+            &mut selected_profiles,
+            "frontend_surface_change",
+            0.82,
+            "The request asks for a Board/browser/page/panel/tab experience.",
+            &[
+                "Which V3/frontend surface owns this UI?",
+                "Which component/API/generated config paths implement the declared surface?",
+                "Which typecheck or browser probe proves the page still opens?",
+            ],
+            &[
+                ".missiond/frontend/board-blueprint.lisp",
+                "packages/board/src/App.tsx",
+                "packages/board/src/components",
+                "packages/board/src/app/api",
+            ],
+            &[
+                "node scripts/project-frontend-board-config.mjs --check",
+                "node scripts/check-frontend-board-code-isomorphism.mjs",
+                "pnpm --dir packages/board typecheck",
+                "browser route smoke for the relevant tab/page",
+            ],
+        );
+        extend_unique_strings(
+            &mut next_reads,
+            &[
+                ".missiond/frontend/board-blueprint.lisp",
+                "packages/board/src/App.tsx",
+                "packages/board/src/components",
+                "packages/board/src/app/api",
+            ],
+        );
+        extend_unique_strings(
+            &mut verification_plan,
+            &[
+                "node scripts/project-frontend-board-config.mjs --check",
+                "pnpm --dir packages/board typecheck",
+                "browser route smoke for the relevant tab/page",
+            ],
+        );
+        extend_unique_strings(
+            &mut required_questions,
+            &[
+                "Which V3/frontend surface owns this UI?",
+                "Which component/API/generated config paths implement the declared surface?",
+            ],
+        );
+    }
+
+    if mentions_provider && (mentions_frontend || nav_has_any(&text, &["chat", "对话", "聊天"]))
+    {
+        push_navigation_candidate(
+            &mut selected_profiles,
+            "provider_chat_cockpit",
+            0.86,
+            "The request points at a user-facing provider/chat cockpit, not automatically at MissionD worker dispatch.",
+            &[
+                "Is the user asking to talk to a provider directly, or to delegate a scoped MissionD worker turn?",
+                "Which HTTP/provider/session protocol does the cockpit call?",
+                "Which status/model/session probes prove the provider runtime is reachable?",
+            ],
+            &[
+                ".missiond/v3/shards/workstation-runtime.lisp",
+                ".missiond/frontend/board-blueprint.lisp",
+                "packages/board/src/app/api",
+            ],
+            &[
+                "provider health/status endpoint",
+                "provider model/catalog endpoint",
+                "Board Next API proxy status endpoint",
+                "one SSE/chat protocol smoke when safe",
+            ],
+        );
+        extend_unique_strings(
+            &mut next_reads,
+            &[
+                ".missiond/v3/shards/workstation-runtime.lisp",
+                ".missiond/frontend/board-blueprint.lisp",
+                "packages/board/src/app/api",
+            ],
+        );
+        extend_unique_strings(
+            &mut verification_plan,
+            &[
+                "provider health/status endpoint",
+                "provider model/catalog endpoint",
+                "Board Next API proxy status endpoint",
+            ],
+        );
+        extend_unique_strings(
+            &mut required_questions,
+            &[
+                "Is the user asking to talk to a provider directly, or to delegate a scoped MissionD worker turn?",
+                "Which HTTP/provider/session protocol does the cockpit call?",
+            ],
+        );
+    }
+
+    if mentions_worker {
+        push_navigation_candidate(
+            &mut selected_profiles,
+            "worker_dispatch_request",
+            0.78,
+            "The request uses worker/delegation/task language; verify exact shard and work-order boundaries before code execution.",
+            &[
+                "Does this request require MissionD to own a worker turn?",
+                "Are context_pack_path, accepted_shard_id, read_scope, write_scope, and acceptance present?",
+                "Which worker pool and completion artifact are authoritative?",
+            ],
+            &[
+                ".missiond/v3/shards/workstation-runtime.lisp",
+                ".missiond/workflows/work-order-lifecycle.lisp",
+                "crates/missiond-daemon/src/handlers/compute/task_delegate.rs",
+            ],
+            &[
+                "work-order gate/checker",
+                "task contract verification",
+                "task-result-artifact closure check",
+            ],
+        );
+        extend_unique_strings(
+            &mut next_reads,
+            &[
+                ".missiond/v3/shards/workstation-runtime.lisp",
+                ".missiond/workflows/work-order-lifecycle.lisp",
+            ],
+        );
+        extend_unique_strings(
+            &mut required_questions,
+            &[
+                "Does this request require MissionD to own a worker turn?",
+                "Are context_pack_path, accepted_shard_id, read_scope, write_scope, and acceptance present?",
+            ],
+        );
+    }
+
+    if mentions_conversation || source_profile == SourceProfile::ConversationAudit {
+        push_navigation_candidate(
+            &mut selected_profiles,
+            "conversation_audit_request",
+            0.84,
+            "The request asks for durable conversation/message/tool-call evidence.",
+            &[
+                "Which conversation id/session id/raw JSONL source is authoritative?",
+                "Does metadata search suffice, or is raw JSONL/full content required?",
+                "Which UI/API route renders the conversation evidence?",
+            ],
+            &[
+                ".missiond/v3/shards/memory-knowledge-runtime.lisp",
+                "packages/board/src/app/api/conversations/route.ts",
+                "packages/board/src/components/Conversations.tsx",
+            ],
+            &[
+                "mission_conversation_query metadata search",
+                "mission_conversation_get full content retrieval",
+                "raw JSONL fallback only for explicit audit/debug",
+            ],
+        );
+        extend_unique_strings(
+            &mut next_reads,
+            &[
+                ".missiond/v3/shards/memory-knowledge-runtime.lisp",
+                "packages/board/src/app/api/conversations/route.ts",
+                "packages/board/src/components/Conversations.tsx",
+            ],
+        );
+    }
+
+    if mentions_deploy || source_profile == SourceProfile::DeployOps {
+        push_navigation_candidate(
+            &mut selected_profiles,
+            "deploy_runtime_diagnosis",
+            0.82,
+            "The request needs runtime/deployment truth before repo-local assumptions.",
+            &[
+                "Which service/runtime target is authoritative?",
+                "Which deploy-center release evidence and closure verdict apply?",
+                "Which monitor/health endpoint proves the live state?",
+            ],
+            &[
+                ".missiond/v3/shards/deployment-closure-plane.lisp",
+                ".missiond/v3/shards/universe/service-runtime.lisp",
+            ],
+            &[
+                "mission_context_gather source_profile=deploy_ops",
+                "deploy-center release evidence lookup",
+                "canonical monitor/health smoke",
+            ],
+        );
+        extend_unique_strings(
+            &mut verification_plan,
+            &[
+                "mission_context_gather source_profile=deploy_ops",
+                "deploy-center release evidence lookup",
+                "canonical monitor/health smoke",
+            ],
+        );
+    }
+
+    if asks_analysis {
+        push_navigation_candidate(
+            &mut selected_profiles,
+            "architecture_analysis",
+            0.7,
+            "The request asks for investigation or causal analysis, so SSOT and typed evidence should precede implementation claims.",
+            &[
+                "Which SSOT contract is authoritative?",
+                "Which implementation surface claims code-aligned status?",
+                "Which checker proves Lisp/code/runtime isomorphism?",
+            ],
+            &[
+                ".missiond/v3/missiond-blueprint.lisp",
+                ".missiond/v3/shards/index.lisp",
+                ".missiond/v3/shards/implementation",
+            ],
+            &[
+                "surface-specific V3 checker",
+                "implementation typecheck/test",
+            ],
+        );
+        extend_unique_strings(
+            &mut next_reads,
+            &[
+                ".missiond/v3/missiond-blueprint.lisp",
+                ".missiond/v3/shards/index.lisp",
+            ],
+        );
+    }
+
+    if selected_profiles.is_empty() {
+        push_navigation_candidate(
+            &mut selected_profiles,
+            "general_grounded_intent",
+            0.55,
+            "No narrow navigation profile matched; keep the default unknowns-first MissionD grounding path.",
+            &[
+                "Which project/service/repo does the request name?",
+                "Which SSOT surface owns the requested behavior?",
+                "Which evidence lane must be queried next?",
+            ],
+            &[
+                ".missiond/v3/missiond-blueprint.lisp",
+                ".missiond/v3/shards/index.lisp",
+            ],
+            &["mission_context_gather with explicit unknowns"],
+        );
+        extend_unique_strings(
+            &mut next_reads,
+            &[
+                ".missiond/v3/missiond-blueprint.lisp",
+                ".missiond/v3/shards/index.lisp",
+            ],
+        );
+    }
+
+    let known_surfaces = matched_navigation_surfaces(&text);
+    for surface in known_surfaces.iter().filter_map(Value::as_object) {
+        if let Some(reads) = surface.get("implementation_refs").and_then(Value::as_array) {
+            for item in reads.iter().filter_map(Value::as_str) {
+                push_unique_string(&mut next_reads, item);
+            }
+        }
+        if let Some(reads) = surface.get("authority_refs").and_then(Value::as_array) {
+            for item in reads.iter().filter_map(Value::as_str) {
+                push_unique_string(&mut next_reads, item);
+            }
+        }
+        if let Some(probes) = surface.get("verification_probes").and_then(Value::as_array) {
+            for item in probes.iter().filter_map(Value::as_str) {
+                push_unique_string(&mut verification_plan, item);
+            }
+        }
+    }
+
+    let rejected_profiles = rejected_navigation_profiles(
+        mentions_provider,
+        mentions_frontend,
+        mentions_worker,
+        xjp_router_provider_workflow,
+        &text,
+    );
+    let evidence_status = json!({
+        "project_id": project_id,
+        "has_runtime_truth": source_summaries.get("runtime_environment").is_some(),
+        "has_project_registry": source_summaries.get("project_registry").is_some()
+            || source_summaries.get("project_resolution").is_some(),
+        "has_project_ssot": source_summaries.get("ssot").is_some(),
+        "has_active_board": source_summaries.get("board_tasks").is_some(),
+        "has_support_catalog": support_catalog_has_content(support_catalog),
+    });
+    let risk_flags = navigation_risk_flags(
+        mentions_provider,
+        mentions_worker,
+        mentions_conversation,
+        source_profile,
+        xjp_router_provider_workflow,
+        xjp_router_runtime_probe,
+        project_id,
+    );
+    let recommended_tool_sequence = build_navigation_tool_sequence(
+        query,
+        source_profile,
+        project_id,
+        xjp_router_provider_workflow,
+        xjp_router_runtime_probe,
+        mentions_frontend,
+        mentions_provider,
+        mentions_worker,
+        mentions_conversation,
+        asks_analysis,
+    );
+
+    json!({
+        "schema": "missiond.context-navigation-profile.v1",
+        "source": "mission_context_gather",
+        "source_profile": source_profile.as_str(),
+        "selected_profiles": selected_profiles,
+        "rejected_profiles": rejected_profiles,
+        "known_surfaces": known_surfaces,
+        "recommended_tool_sequence": recommended_tool_sequence,
+        "required_questions": required_questions,
+        "next_reads": next_reads,
+        "verification_plan": verification_plan,
+        "evidence_status": evidence_status,
+        "risk_flags": risk_flags,
+        "rule": "Navigation profiles guide bounded evidence collection; they do not replace SSOT, evidence_lanes, or runtime closure authority."
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_navigation_tool_sequence(
+    query: &str,
+    source_profile: SourceProfile,
+    project_id: Option<&str>,
+    xjp_router_provider_workflow: bool,
+    xjp_router_runtime_probe: bool,
+    mentions_frontend: bool,
+    mentions_provider: bool,
+    mentions_worker: bool,
+    mentions_conversation: bool,
+    asks_analysis: bool,
+) -> Vec<Value> {
+    let target_project_id = if xjp_router_provider_workflow || xjp_router_runtime_probe {
+        "xjp-router"
+    } else {
+        project_id.unwrap_or("missiond")
+    };
+    let target_profile = if xjp_router_provider_workflow || xjp_router_runtime_probe {
+        SourceProfile::DeployOps
+    } else {
+        source_profile
+    };
+    let mut sequence = Vec::new();
+    if project_id != Some(target_project_id) {
+        sequence.push(json!({
+            "order": 0,
+            "phase": "project_resolution",
+            "tool": "mission_project",
+            "action": "resolve",
+            "required": true,
+            "purpose": "Resolve the named project/service before KB, Board, conversation, runtime, or repo lookup.",
+            "tool_args": {
+                "action": "resolve",
+                "query": target_project_id
+            }
+        }));
+    }
+
+    sequence.push(json!({
+        "order": 0,
+        "phase": "live_context_first",
+        "tool": "mission_context_gather",
+        "required": true,
+        "status": "current_tool_or_first_bootstrap_step",
+        "purpose": "Pull bounded live MissionD evidence lanes before manual file search.",
+        "tool_args": {
+            "query": query,
+            "source_profile": target_profile.as_str(),
+            "project_id": target_project_id,
+            "limit": 8
+        }
+    }));
+
+    sequence.push(json!({
+        "order": 0,
+        "phase": "reviewed_memory_evidence",
+        "tool": "mission_memory",
+        "action": "evidence_search",
+        "required": false,
+        "condition": "Use when prior MissionD decisions, reviewed memory, or compact evidence may affect the answer; do not preload raw provider logs.",
+        "purpose": "Search MissionD local authority evidence lanes through the memory facade.",
+        "tool_args": {
+            "action": "evidence_search",
+            "query": query,
+            "projectId": target_project_id,
+            "lanes": default_allowed_lanes_for_profile(target_profile),
+            "limit": 8
+        }
+    }));
+
+    let wants_repo_search = xjp_router_provider_workflow
+        || xjp_router_runtime_probe
+        || mentions_frontend
+        || mentions_provider
+        || mentions_worker
+        || mentions_conversation
+        || asks_analysis;
+    if wants_repo_search {
+        sequence.push(json!({
+            "order": 0,
+            "phase": "profile_aware_repo_text",
+            "tool": "mission_repo_search",
+            "required": true,
+            "purpose": "Use the MissionD profile/lane-gated repo search facade before broad shell rg.",
+            "tool_args": {
+                "query": navigation_repo_search_query(
+                    query,
+                    xjp_router_provider_workflow,
+                    mentions_provider,
+                    mentions_frontend,
+                    mentions_conversation
+                ),
+                "source_profile": target_profile.as_str(),
+                "project_id": target_project_id,
+                "limit": 12
+            }
+        }));
+    }
+
+    sequence
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut step)| {
+            if let Some(object) = step.as_object_mut() {
+                object.insert("order".to_string(), json!(index + 1));
+            }
+            step
+        })
+        .collect()
+}
+
+fn navigation_repo_search_query(
+    query: &str,
+    xjp_router_provider_workflow: bool,
+    mentions_provider: bool,
+    mentions_frontend: bool,
+    mentions_conversation: bool,
+) -> String {
+    if xjp_router_provider_workflow {
+        return "gemini translation workflow router provider model".to_string();
+    }
+    if mentions_provider && mentions_frontend {
+        return "provider chat cockpit proxy frontend".to_string();
+    }
+    if mentions_conversation {
+        return "conversation jsonl tool call codex ingestion".to_string();
+    }
+    query.chars().take(240).collect()
+}
+
+fn push_navigation_candidate(
+    candidates: &mut Vec<Value>,
+    id: &str,
+    confidence: f64,
+    why: &str,
+    required_questions: &[&str],
+    first_reads: &[&str],
+    verification_probes: &[&str],
+) {
+    candidates.push(json!({
+        "id": id,
+        "confidence": confidence,
+        "why": why,
+        "required_questions": required_questions,
+        "first_reads": first_reads,
+        "verification_probes": verification_probes,
+    }));
+}
+
+fn rejected_navigation_profiles(
+    mentions_provider: bool,
+    mentions_frontend: bool,
+    mentions_worker: bool,
+    xjp_router_provider_workflow: bool,
+    text: &str,
+) -> Vec<Value> {
+    let mut rejected = Vec::new();
+    if xjp_router_provider_workflow {
+        rejected.push(json!({
+            "id": "missiond_internal_router_policy_only",
+            "reason": "A router provider/workflow request must resolve the xjp-router project/runtime; a MissionD router-policy hit alone is not enough.",
+        }));
+    }
+    if mentions_provider && mentions_frontend && !mentions_worker {
+        rejected.push(json!({
+            "id": "worker_dispatch_request",
+            "reason": "Provider/frontend wording points at a user-facing cockpit. Do not collapse it into BoardTask/worker dispatch unless the request names worker, delegation, read_scope/write_scope, or task fanout.",
+        }));
+    }
+    if mentions_worker && !mentions_provider {
+        rejected.push(json!({
+            "id": "provider_chat_cockpit",
+            "reason": "Worker/delegation wording points at MissionD-owned execution. Verify task contract fields before treating this as a free chat cockpit.",
+        }));
+    }
+    if !nav_has_any(
+        text,
+        &["jsonl", "conversation", "对话记录", "工具调用", "会话记录"],
+    ) {
+        rejected.push(json!({
+            "id": "conversation_audit_request",
+            "reason": "Raw conversation/provider logs stay cold evidence unless the request explicitly asks for transcript, JSONL, tool-call, or audit records.",
+        }));
+    }
+    rejected
+}
+
+fn matched_navigation_surfaces(text: &str) -> Vec<Value> {
+    let mut surfaces = Vec::new();
+    let mentions_router = nav_has_any(text, &["xjp-router", "xjp router", "router", "路由"]);
+    let mentions_router_provider_workflow = mentions_router
+        && nav_has_any(
+            text,
+            &[
+                "gemini",
+                "translate",
+                "translation",
+                "translator",
+                "翻译",
+                "workflow",
+                "workflows",
+                "多轮",
+                "渠道",
+                "provider",
+                "model",
+                "模型",
+            ],
+        );
+    let mentions_router_runtime_probe = mentions_router
+        && nav_has_any(
+            text,
+            &[
+                "能不能",
+                "能否",
+                "调用",
+                "生成结果",
+                "smoke",
+                "health",
+                "/v1/models",
+                "runtime",
+                "运行时",
+            ],
+        );
+    if mentions_router_provider_workflow {
+        surfaces.push(json!({
+            "id": "xjp-router-provider-workflow",
+            "profile_ids": ["router_provider_workflow"],
+            "matched_terms": ["router", "provider", "workflow", "gemini", "translation"],
+            "authority_refs": [
+                ".missiond/v3/shards/universe/project-registry.lisp",
+                ".missiond/v3/shards/deployment-closure-plane.lisp",
+                ".missiond/v3/shards/universe/service-runtime.lisp",
+                ".missiond/v3/shards/control-plane-runtime.lisp"
+            ],
+            "implementation_refs": [
+                "mission_project resolve query=xjp-router",
+                "resolved xjp-router root/.missiond/intent.lisp",
+                "resolved xjp-router root/.missiond/backend/router-workflow-blueprint.lisp",
+                "resolved xjp-router root/src/extra/workflows",
+                "resolved xjp-router root/config/xjp.toml"
+            ],
+            "verification_probes": [
+                "mission_project resolve query=xjp-router",
+                "mission_context_gather source_profile=deploy_ops project_id=xjp-router",
+                "verify workflow source and model/provider mapping before judging availability"
+            ],
+            "rejected_interpretation": "MissionD router-policy or model-name memory alone is not proof that the external xjp-router workflow is currently callable."
+        }));
+    }
+    if mentions_router_runtime_probe {
+        surfaces.push(json!({
+            "id": "xjp-router-runtime",
+            "profile_ids": ["runtime_smoke_probe", "deploy_runtime_diagnosis"],
+            "matched_terms": ["router", "runtime", "call", "smoke"],
+            "authority_refs": [
+                ".missiond/v3/shards/universe/project-registry.lisp",
+                ".missiond/v3/shards/deployment-closure-plane.lisp"
+            ],
+            "implementation_refs": [
+                "mission_context_gather source_profile=deploy_ops project_id=xjp-router",
+                "Deploy Center service slug xjp-router"
+            ],
+            "verification_probes": [
+                "resolve xjp-router deployment identity before health/model probes",
+                "check deploy evidence and runtime health before a workflow call",
+                "run a scoped smoke without printing credentials or prompt secrets"
+            ]
+        }));
+    }
+    if nav_has_any(text, &["xjpcode", "xjp code", "xjp-code", "xjp_code"]) {
+        surfaces.push(json!({
+            "id": "xjpcode-chat-cockpit",
+            "profile_ids": ["frontend_surface_change", "provider_chat_cockpit"],
+            "matched_terms": ["xjpcode"],
+            "authority_refs": [
+                ".missiond/frontend/board-blueprint.lisp#projection xjpcode-chat-cockpit",
+                ".missiond/frontend/board-blueprint.lisp#function xjpcode-chat-cockpit"
+            ],
+            "implementation_refs": [
+                "packages/board/src/components/XjpcodePanel.tsx",
+                "packages/board/src/app/api/xjpcode/chat/route.ts",
+                "packages/board/src/app/api/xjpcode/status/route.ts",
+                "packages/board/src/app/api/xjpcode/session/route.ts",
+                "packages/board/src/lib/xjpcodeProxy.ts",
+                "packages/board/src/App.tsx"
+            ],
+            "verification_probes": [
+                "curl /api/xjpcode/status through Board proxy",
+                "curl xjpcode /worker/v1/health",
+                "curl xjpcode /v1/models",
+                "pnpm --dir packages/board typecheck"
+            ],
+            "rejected_interpretation": "MissionD BoardTask worker dispatch is not the primary shape unless the user asks for scoped task execution."
+        }));
+    }
+    if nav_has_any(
+        text,
+        &[
+            "codex",
+            "conversation",
+            "jsonl",
+            "rollout",
+            "工具调用",
+            "对话记录",
+            "会话",
+        ],
+    ) {
+        surfaces.push(json!({
+            "id": "codex-conversation-audit",
+            "profile_ids": ["conversation_audit_request"],
+            "matched_terms": ["codex", "conversation", "jsonl"],
+            "authority_refs": [
+                ".missiond/v3/shards/memory-knowledge-runtime.lisp#conversation-ingestion",
+                ".missiond/frontend/board-blueprint.lisp#timeline-log-ui"
+            ],
+            "implementation_refs": [
+                "packages/board/src/app/api/conversations/route.ts",
+                "packages/board/src/components/Conversations.tsx",
+                "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs"
+            ],
+            "verification_probes": [
+                "mission_conversation_query metadata search",
+                "mission_conversation_get full content retrieval",
+                "raw JSONL fallback only for explicit audit/debug"
+            ]
+        }));
+    }
+    if nav_has_any(
+        text,
+        &[
+            "deploy",
+            "deployment",
+            "部署",
+            "runtime",
+            "运行时",
+            "health",
+            "monitor",
+        ],
+    ) {
+        surfaces.push(json!({
+            "id": "deploy-runtime-diagnosis",
+            "profile_ids": ["deploy_runtime_diagnosis"],
+            "matched_terms": ["deploy", "runtime", "monitor"],
+            "authority_refs": [
+                ".missiond/v3/shards/deployment-closure-plane.lisp",
+                ".missiond/v3/shards/universe/service-runtime.lisp"
+            ],
+            "implementation_refs": [
+                "crates/missiond-daemon/src/handlers/knowledge/context_gather.rs",
+                "crates/missiond-daemon/src/handlers/knowledge/project/deployment_channels.rs"
+            ],
+            "verification_probes": [
+                "mission_context_gather source_profile=deploy_ops",
+                "deploy-center release evidence lookup",
+                "canonical monitor/health smoke"
+            ]
+        }));
+    }
+    surfaces
+}
+
+fn navigation_risk_flags(
+    mentions_provider: bool,
+    mentions_worker: bool,
+    mentions_conversation: bool,
+    source_profile: SourceProfile,
+    xjp_router_provider_workflow: bool,
+    xjp_router_runtime_probe: bool,
+    project_id: Option<&str>,
+) -> Vec<Value> {
+    let mut flags = Vec::new();
+    if mentions_provider && !mentions_worker {
+        flags.push(json!({
+            "id": "provider_chat_not_worker_by_default",
+            "severity": "medium",
+            "message": "Provider/chat UI requests should not be implemented as worker dispatch unless explicit task ownership appears."
+        }));
+    }
+    if !mentions_conversation && source_profile != SourceProfile::ConversationAudit {
+        flags.push(json!({
+            "id": "raw_history_cold_by_default",
+            "severity": "low",
+            "message": "Conversation/provider logs are intentionally excluded from startup context without audit/debug opt-in."
+        }));
+    }
+    if source_profile == SourceProfile::IntentDefault {
+        flags.push(json!({
+            "id": "runtime_probes_after_contract",
+            "severity": "low",
+            "message": "Use runtime probes after the SSOT/implementation surface is known; avoid guessing ports from repo-local files."
+        }));
+    }
+    if (xjp_router_provider_workflow || xjp_router_runtime_probe)
+        && project_id != Some("xjp-router")
+    {
+        flags.push(json!({
+            "id": "external_project_resolution_required",
+            "severity": "medium",
+            "message": "The request names xjp-router behavior; gather live context against project_id=xjp-router before broad MissionD repo search."
+        }));
+    }
+    flags
+}
+
+fn normalize_navigation_text(text: &str) -> String {
+    text.to_lowercase()
+}
+
+fn nav_has_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !values.iter().any(|existing| existing == trimmed) {
+        values.push(trimmed.to_string());
+    }
+}
+
+fn extend_unique_strings(values: &mut Vec<String>, items: &[&str]) {
+    for item in items {
+        push_unique_string(values, item);
+    }
 }
 
 fn build_evidence_lanes(sources: &serde_json::Map<String, Value>) -> Value {
@@ -6510,16 +7550,17 @@ mod tests {
     use super::{
         attach_conversation_search_context, attach_infra_os_disabled_support_fallback,
         build_evidence_items, build_evidence_items_with_options, build_evidence_lanes,
-        build_evidence_lanes_from_policy_with_support_catalog, build_source_summaries,
-        build_support_catalog, collect_evidence_refs_from_value, compiled_service_matches_lookup,
-        compiled_service_matches_query, context_gather_next_action,
-        context_gather_persist_artifact, context_gather_persist_read_model,
-        context_gather_worker_visible_dir_for, context_noise_metrics,
-        context_pack_artifact_payload, dedupe_evidence_items, dedupe_evidence_search_items,
-        deployment_event_drop_reason_is_sample_worthy, deployment_event_filter_timeline_row,
-        deployment_event_item_from_timeline_row, deployment_event_observed_candidate_summary,
-        deployment_event_relay_diagnostics, deployment_event_relay_local_config_probe,
-        deployment_event_relay_next_actions, diagnostics_have_hard_failures, evidence_item_id,
+        build_evidence_lanes_from_policy_with_support_catalog, build_navigation_profile,
+        build_source_summaries, build_support_catalog, collect_evidence_refs_from_value,
+        compiled_service_matches_lookup, compiled_service_matches_query,
+        context_gather_next_action, context_gather_persist_artifact,
+        context_gather_persist_read_model, context_gather_worker_visible_dir_for,
+        context_noise_metrics, context_pack_artifact_payload, dedupe_evidence_items,
+        dedupe_evidence_search_items, deployment_event_drop_reason_is_sample_worthy,
+        deployment_event_filter_timeline_row, deployment_event_item_from_timeline_row,
+        deployment_event_observed_candidate_summary, deployment_event_relay_diagnostics,
+        deployment_event_relay_local_config_probe, deployment_event_relay_next_actions,
+        diagnostics_have_hard_failures, evidence_item_id,
         evidence_item_read_model_scope_allows_search, evidence_item_uses_stable_projection_id,
         filter_deployment_closure_policy_evidence_items,
         filter_incomplete_deployment_closure_evidence_items,
@@ -6565,6 +7606,94 @@ mod tests {
 
         assert!(!context_gather_persist_artifact(&args));
         assert!(context_gather_persist_read_model(&args));
+    }
+
+    #[test]
+    fn navigation_profile_guides_frontend_provider_cockpit_without_worker_dispatch() {
+        let source_summaries = json!({
+            "runtime_environment": {"kind": "runtime_environment"},
+            "project_registry": {"id": "missiond"},
+            "ssot": {"kind": "ssot"}
+        });
+        let profile = build_navigation_profile(
+            "你要帮我在 missonD 的前端做一个面板，让我在这里使用 xjpcode。对，没错，在网页里使用 xjpcode.帮我调查然后看看这个事儿怎么实现",
+            SourceProfile::IntentDefault,
+            &source_summaries,
+            &Value::Null,
+            Some("missiond"),
+        );
+
+        let selected = profile
+            .get("selected_profiles")
+            .and_then(Value::as_array)
+            .expect("selected profiles");
+        assert!(selected
+            .iter()
+            .any(|item| item.get("id").and_then(Value::as_str) == Some("frontend_surface_change")));
+        assert!(selected
+            .iter()
+            .any(|item| item.get("id").and_then(Value::as_str) == Some("provider_chat_cockpit")));
+
+        let rejected = profile
+            .get("rejected_profiles")
+            .and_then(Value::as_array)
+            .expect("rejected profiles");
+        assert!(rejected
+            .iter()
+            .any(|item| item.get("id").and_then(Value::as_str) == Some("worker_dispatch_request")));
+
+        let rendered = serde_json::to_string(&profile).unwrap();
+        assert!(rendered.contains("xjpcode-chat-cockpit"));
+        assert!(rendered.contains("packages/board/src/components/XjpcodePanel.tsx"));
+        assert!(rendered.contains("curl /api/xjpcode/status through Board proxy"));
+        assert!(rendered.contains("recommended_tool_sequence"));
+        assert!(rendered.contains("mission_memory"));
+        assert!(rendered.contains("evidence_search"));
+        assert!(rendered.contains("mission_repo_search"));
+    }
+
+    #[test]
+    fn navigation_profile_guides_xjp_router_translation_runtime_probe() {
+        let source_summaries = json!({
+            "runtime_environment": {"kind": "runtime_environment"},
+            "project_registry": {"id": "missiond"},
+            "ssot": {"kind": "ssot"}
+        });
+        let profile = build_navigation_profile(
+            "查一下，我们的 router 里应该有一个多轮的基于 gemini 3.1 pro 的翻译渠道，看看我们现在能不能调用它生成结果",
+            SourceProfile::IntentDefault,
+            &source_summaries,
+            &Value::Null,
+            Some("missiond"),
+        );
+
+        let selected = profile
+            .get("selected_profiles")
+            .and_then(Value::as_array)
+            .expect("selected profiles");
+        assert!(
+            selected
+                .iter()
+                .any(|item| item.get("id").and_then(Value::as_str)
+                    == Some("router_provider_workflow"))
+        );
+        assert!(selected
+            .iter()
+            .any(|item| item.get("id").and_then(Value::as_str) == Some("runtime_smoke_probe")));
+
+        let rendered = serde_json::to_string(&profile).unwrap();
+        assert!(rendered.contains("xjp-router-provider-workflow"));
+        assert!(rendered.contains("xjp-router-runtime"));
+        assert!(rendered
+            .contains("mission_context_gather source_profile=deploy_ops project_id=xjp-router"));
+        assert!(rendered.contains("mission_project resolve query=xjp-router"));
+        assert!(rendered.contains("missiond_internal_router_policy_only"));
+        assert!(rendered.contains("external_project_resolution_required"));
+        assert!(rendered.contains("recommended_tool_sequence"));
+        assert!(rendered.contains("mission_project"));
+        assert!(rendered.contains("mission_memory"));
+        assert!(rendered.contains("mission_repo_search"));
+        assert!(rendered.contains("gemini translation workflow router provider model"));
     }
 
     #[test]
@@ -8470,10 +9599,15 @@ mod tests {
         let payload = json!({
             "schema": "missiond.context-gather.v1",
             "sources": {"conversation_logs": [{"sessionId": "abc"}]},
-            "evidence_lanes": {"lanes": {}}
+            "evidence_lanes": {"lanes": {}},
+            "navigation_profile": {
+                "schema": "missiond.context-navigation-profile.v1",
+                "selected_profiles": [{"id": "conversation_audit_request"}]
+            }
         });
         let compact = context_pack_artifact_payload(&payload, false);
         assert!(compact.get("sources").is_none());
+        assert!(compact.get("navigation_profile").is_some());
         assert_eq!(
             compact.get("raw_sources_omitted").and_then(|v| v.as_bool()),
             Some(true)

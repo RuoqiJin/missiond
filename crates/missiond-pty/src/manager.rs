@@ -33,6 +33,10 @@ pub struct PTYAgentInfo {
     pub role: String,
     /// CLI engine running in this slot
     pub engine: missiond_shared::CliEngine,
+    /// Spawn working directory for the slot. This is used by higher-level
+    /// orchestration to authorize provider workspace-trust prompts narrowly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub state: SessionState,
@@ -212,6 +216,7 @@ impl PTYManager {
             slot_id: slot.id.clone(),
             role: slot.role.clone(),
             engine: slot.engine,
+            cwd: slot.cwd.clone(),
             pid: None,
             state: SessionState::Exited,
             status_text: None,
@@ -349,6 +354,13 @@ impl PTYManager {
             .cwd
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+
+        {
+            let mut agent_info = self.agent_info.write().await;
+            if let Some(entry) = agent_info.get_mut(&slot.id) {
+                entry.cwd = Some(cwd.clone());
+            }
+        }
 
         let mut session = PTYSession::new(PTYSessionOptions {
             slot_id: slot.id.clone(),
@@ -1729,6 +1741,7 @@ mod tests {
             slot_id: "slot-codex-master-control".to_string(),
             role: "orchestrator".to_string(),
             engine: CliEngine::Codex,
+            cwd: None,
             pid: Some(947),
             state: SessionState::Exited,
             status_text: Some("Updating Codex".to_string()),
@@ -1766,6 +1779,7 @@ mod tests {
             slot_id: "slot-claude-code-default".to_string(),
             role: "coder".to_string(),
             engine: CliEngine::ClaudeCode,
+            cwd: None,
             pid: Some(947),
             state: SessionState::Exited,
             status_text: Some("Starting Claude Code".to_string()),

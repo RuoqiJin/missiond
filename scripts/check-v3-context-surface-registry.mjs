@@ -127,16 +127,26 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.codexAppBootstrap, sources.codexAppBootstrap, [
     "schema: 'missiond.codex-app-context-pack.v1'",
-    "context_authority: 'fallback-hints-only'",
-    '--live',
+    'live-delegated-with-fallback-hints',
+    "'fallback-hints-only'",
+    '--offline',
+    'required_tool_sequence',
+    'recommended_tool_sequence',
     'mission_context_boot',
     'mission_context_gather',
-    'deterministic Codex App bootstrap fallback',
+    'mission_memory',
+    'evidence_search',
+    'mission_repo_search',
+    'deterministic pack as fallback hints',
   ]);
 
   requireAll(diagnostics, files.contextGather, sources.contextGather, [
     '"schema": "missiond.context-gather.v1"',
     '"schema": "missiond.context-gather-artifact.v1"',
+    '"schema": "missiond.context-navigation-profile.v1"',
+    'build_navigation_profile',
+    'selected_profiles',
+    'verification_plan',
     'context_pack_artifact_payload',
     'materialize_context_pack_file',
     'super::context_capsule::generate_lisp_capsule',

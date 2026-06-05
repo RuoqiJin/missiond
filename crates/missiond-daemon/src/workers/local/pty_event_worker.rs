@@ -7,6 +7,7 @@
 //! - ConfirmRequired: auto-approve tools for worker slots
 //! - McpToolError: incident creation for MCP failures
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -605,6 +606,24 @@ async fn handle_confirm_required(
             if is_ask_user {
                 info!(slot_id = %slot_id, "AskUserQuestion detected, forwarding to user");
                 false
+            } else if no_tool_workspace_trust_is_allowlisted(s, slot_id).await {
+                info!(
+                    slot_id = %slot_id,
+                    "Auto-confirming allowlisted provider workspace trust prompt"
+                );
+                true
+            } else if no_tool_confirmation_is_authorization_blocked(s, slot_id).await {
+                warn!(
+                    slot_id = %slot_id,
+                    "No-tool confirmation is a provider control/quota/auth surface; leaving it to provider-box driver"
+                );
+                false
+            } else if !allow_legacy_no_tool_auto_confirm() {
+                warn!(
+                    slot_id = %slot_id,
+                    "No-tool confirmation is not auto-approved without an explicit compatibility flag"
+                );
+                false
             } else {
                 warn!(slot_id = %slot_id, "Auto-confirming with no tool info");
                 true
@@ -766,6 +785,167 @@ async fn handle_confirm_required(
                 }
             }
         });
+    }
+}
+
+fn allow_legacy_no_tool_auto_confirm() -> bool {
+    std::env::var("MISSIOND_PROVIDER_BOX_ALLOW_NO_TOOL_AUTO_CONFIRM")
+        .ok()
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+async fn no_tool_confirmation_is_authorization_blocked(s: &AppState, slot_id: &str) -> bool {
+    let Some(status) = s.pty.get_status(slot_id).await else {
+        return true;
+    };
+    let Some(recognition) = status.recognition.as_ref() else {
+        return slot_id.starts_with("slot-codex-") || slot_id.starts_with("slot-agy-");
+    };
+    if matches!(
+        recognition.blocked_kind.as_deref(),
+        Some(
+            "usage_limit"
+                | "model_switch_prompt"
+                | "model_picker"
+                | "permission_picker"
+                | "workspace_trust"
+                | "auth_missing"
+                | "auth_code_required"
+                | "billing_or_account"
+                | "startup_config"
+                | "startup_continue"
+        )
+    ) {
+        return true;
+    }
+    let reason = recognition.reason.to_ascii_lowercase();
+    reason.contains("usage_limit")
+        || reason.contains("rate_limit")
+        || reason.contains("model_switch")
+        || reason.contains("model_picker")
+        || reason.contains("auth")
+        || reason.contains("billing")
+        || slot_id.starts_with("slot-codex-")
+        || slot_id.starts_with("slot-agy-")
+}
+
+async fn no_tool_workspace_trust_is_allowlisted(s: &AppState, slot_id: &str) -> bool {
+    let Some(status) = s.pty.get_status(slot_id).await else {
+        return false;
+    };
+    let Some(recognition) = status.recognition.as_ref() else {
+        return false;
+    };
+    if recognition.blocked_kind.as_deref() != Some("workspace_trust") {
+        return false;
+    }
+    if recognition.phase.as_deref() != Some("startup_trust") {
+        return false;
+    }
+
+    let status_cwd_allowed = status
+        .cwd
+        .as_deref()
+        .is_some_and(is_allowlisted_provider_workspace_path);
+    if status_cwd_allowed {
+        return true;
+    }
+
+    recognition
+        .screen_identity
+        .as_ref()
+        .and_then(|identity| identity.cwd.as_deref())
+        .and_then(expand_provider_workspace_path)
+        .as_deref()
+        .is_some_and(is_allowlisted_provider_workspace_path)
+}
+
+fn expand_provider_workspace_path(path: &str) -> Option<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed.contains('…') || trimmed.contains("...") {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest));
+    }
+    Some(PathBuf::from(trimmed))
+}
+
+fn is_allowlisted_provider_workspace_path(path: &Path) -> bool {
+    let path = normalize_path_for_prefix_check(path);
+    if std::env::var_os("MISSIOND_PROJECT_ROOT")
+        .map(PathBuf::from)
+        .map(|root| normalize_path_for_prefix_check(&root))
+        .is_some_and(|root| path.starts_with(root))
+    {
+        return true;
+    }
+
+    let releases_dir = std::env::var_os("MISSIOND_RELEASES_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".xjp-mission/releases"))
+        });
+    releases_dir
+        .as_deref()
+        .map(normalize_path_for_prefix_check)
+        .as_deref()
+        .is_some_and(|releases_dir| is_release_source_workspace(&path, releases_dir))
+}
+
+fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_release_source_workspace(path: &Path, releases_dir: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix(releases_dir) else {
+        return false;
+    };
+    let mut components = rest.components();
+    let Some(release) = components.next() else {
+        return false;
+    };
+    let release = release.as_os_str().to_string_lossy();
+    if !release.ends_with("-release") {
+        return false;
+    }
+    matches!(
+        components.next().map(|component| component.as_os_str()),
+        Some(component) if component == "source"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_source_workspace_is_allowlisted() {
+        let releases_dir = Path::new("/Users/test/.xjp-mission/releases");
+        let workspace =
+            Path::new("/Users/test/.xjp-mission/releases/20260605T195413Z-abc-release/source");
+        assert!(is_release_source_workspace(workspace, releases_dir));
+    }
+
+    #[test]
+    fn non_source_release_workspace_is_not_allowlisted() {
+        let releases_dir = Path::new("/Users/test/.xjp-mission/releases");
+        let workspace =
+            Path::new("/Users/test/.xjp-mission/releases/20260605T195413Z-abc-release/tmp");
+        assert!(!is_release_source_workspace(workspace, releases_dir));
+    }
+
+    #[test]
+    fn arbitrary_project_workspace_is_not_release_allowlisted() {
+        let releases_dir = Path::new("/Users/test/.xjp-mission/releases");
+        let workspace = Path::new("/Users/test/Downloads/unknown-project");
+        assert!(!is_release_source_workspace(workspace, releases_dir));
     }
 }
 

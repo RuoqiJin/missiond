@@ -202,6 +202,13 @@
          :producer mission_context_gather
          :consumers [mission_interaction Jarvis mission_task_delegate resident-master Codex-App-bootstrap]
          :owns [evidence-lanes source-profile-policy raw-source-policy support-catalog materialized-context-pack-file context-gather-runs-read-model])
+       (surface context-navigation-profile
+         :schema "missiond.context-navigation-profile.v1"
+         :class support-context
+         :authority runtime-context-gather-subpayload
+         :producer mission_context_gather
+         :source [query source_profile source_summaries support_catalog]
+         :rule "Profile-aware evidence navigation sub-payload with selected_profiles, rejected_profiles, known_surfaces, required_questions, next_reads, verification_plan, evidence_status, and risk_flags. It guides agents toward bounded evidence collection but does not replace SSOT, evidence_lanes, or runtime closure authority.")
        (surface interaction-context-capsule
          :schema "missiond.context-capsule.v1"
          :class derived-binding
@@ -225,7 +232,7 @@
          :authority fallback-hints-only
          :producer "scripts/mission-context-pack.mjs"
          :source [mission_context_boot mission_context_gather]
-         :rule "When MissionD runtime/MCP is available this script MUST delegate to mission_context_boot and mission_context_gather; deterministic local heuristics are fallback hints only and must not become a second context authority.")
+         :rule "When MissionD runtime/MCP is available this script MUST delegate to mission_context_boot and mission_context_gather by default; --offline is deterministic fallback only. The pack MUST expose required_tool_sequence plus navigation_profile.recommended_tool_sequence, and those sequences MUST route compact evidence through mission_context_gather, mission_memory evidence_search, and mission_repo_search before ad-hoc shell rg.")
        (surface swarm-context-pack
          :schema "missiond.swarm-context-pack.v1"
          :class worker-sidecar

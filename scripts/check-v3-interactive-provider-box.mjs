@@ -230,6 +230,8 @@ function main() {
       'missiond.provider-model-catalog.v1',
       'provider-router-export',
       'missiond.provider-router-export.v1',
+      'provider-agent-source',
+      'missiond.provider-agent-source.v1',
       '(function provider-interaction-box-turn',
       '(function provider-box-model-control',
       '(function provider-box-usage-and-catalog-export',
@@ -266,6 +268,10 @@ function main() {
       'text=true/tools=false/vision=false',
       'self-built proxy deployment program',
       'codex_exec_text',
+      'provider_agent_sources[]',
+      'MissionDProviderBox',
+      'missiond-codex-agent-gpt-55-xhigh',
+      'missiond-claude-code-agent-opus-4-8-xhigh',
       'output-last-message alone is never treated as proof that no tools ran',
     ]);
     requireAll(diagnostics, FILES.requestSurfaces, sources.requestSurfaces, [
@@ -425,6 +431,11 @@ function main() {
       '"model_launch_selector"',
       '"supported": true',
       '"flag": "--model"',
+      'provider_agent_sources',
+      'missiond.provider-agent-source.v1',
+      'missiond-codex-agent-gpt-55-xhigh',
+      'missiond-claude-code-agent-opus-4-8-xhigh',
+      'MissionDProviderBox',
     ]);
     requireAll(diagnostics, FILES.aggregate, sources.aggregate, [
       'scripts/check-v3-interactive-provider-box.mjs',

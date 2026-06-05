@@ -31,10 +31,13 @@ node scripts/mission-context-pack.mjs --json --message "$CODEX_USER_REQUEST"
 
 If the latest user message is not available in `CODEX_USER_REQUEST`, pass it
 directly with `--message`. Use the returned `intent_candidates`,
-`suggested_first_reads`, `evidence_lanes`, and `avoid_first_reads` before broad
-repository search. This bootstrap is deterministic and intentionally compact; it
-does not preload raw conversation history, provider logs, cold runtime archives,
-or unreviewed KB dumps.
+`suggested_first_reads`, `evidence_lanes`, `navigation_profile`, and
+`avoid_first_reads` before broad repository search. The `navigation_profile`
+names selected/rejected investigation lanes, known surfaces, first reads, and
+verification steps so the first Codex turn does not rediscover the same routing
+facts. This bootstrap is deterministic and intentionally compact; it does not
+preload raw conversation history, provider logs, cold runtime archives, or
+unreviewed KB dumps.
 
 When MissionD MCP/runtime tools are available, the bootstrap may point to
 `mission_context_boot` or `mission_context_gather` for live evidence. Treat those

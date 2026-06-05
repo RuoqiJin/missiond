@@ -5,7 +5,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition::new(
             "mission_context_gather",
-            "高频上下文聚合入口：profile-first 查询 runtime_truth、project_ssot、reviewed_kb、active_board、support_refs，以及可选 skill_evidence / conversation_audit / cold_archive，并返回 compact evidence_lanes、evidence_items、support_catalog 和 context_noise_metrics。",
+            "高频上下文聚合入口：profile-first 查询 runtime_truth、project_ssot、reviewed_kb、active_board、support_refs，以及可选 skill_evidence / conversation_audit / cold_archive，并返回 compact evidence_lanes、evidence_items、support_catalog、context_noise_metrics 和 navigation_profile。",
             json!({
                 "type": "object",
                 "properties": {

@@ -3444,7 +3444,11 @@ impl PTYWebSocketServer {
         .await;
         let provider_slot_failures = provider_box_slots_after
             .get("summary")
-            .and_then(|value| value.get("critical_failures"))
+            .and_then(|value| {
+                value
+                    .get("blocking_failures")
+                    .or_else(|| value.get("critical_failures"))
+            })
             .and_then(|value| value.as_u64())
             .unwrap_or(0);
         let ok = after_status == "ready" && provider_slot_failures == 0;
@@ -4143,11 +4147,21 @@ impl PTYWebSocketServer {
                 "Provider slot is waiting on an interactive surface or approval prompt."
                     .to_string(),
             ),
-            SessionState::Error | SessionState::Exited => (
-                "unavailable",
-                false,
-                "Provider slot is exited or errored.".to_string(),
-            ),
+            SessionState::Error | SessionState::Exited => {
+                if spec.required_ready {
+                    (
+                        "unavailable",
+                        false,
+                        "Provider slot is exited or errored.".to_string(),
+                    )
+                } else {
+                    (
+                        "not_observed_spawnable",
+                        true,
+                        "On-demand provider-box slot is exited; provider-box may respawn it when requested.".to_string(),
+                    )
+                }
+            }
         }
     }
 
@@ -4215,7 +4229,9 @@ impl PTYWebSocketServer {
             slots.push(Self::jarvis_provider_slot_row(spec, info.as_ref()));
         }
         let mut by_status = std::collections::BTreeMap::<String, usize>::new();
-        let mut failing_required = 0usize;
+        let mut critical_failures = 0usize;
+        let mut blocking_failures = 0usize;
+        let mut advisory_failures = 0usize;
         for slot in &slots {
             if let Some(status) = slot.get("status").and_then(|value| value.as_str()) {
                 *by_status.entry(status.to_string()).or_insert(0) += 1;
@@ -4223,7 +4239,12 @@ impl PTYWebSocketServer {
             if slot.get("critical").and_then(|value| value.as_bool()) == Some(true)
                 && slot.get("ok").and_then(|value| value.as_bool()) == Some(false)
             {
-                failing_required += 1;
+                critical_failures += 1;
+                if slot.get("required_ready").and_then(|value| value.as_bool()) == Some(true) {
+                    blocking_failures += 1;
+                } else {
+                    advisory_failures += 1;
+                }
             }
         }
         serde_json::json!({
@@ -4232,7 +4253,9 @@ impl PTYWebSocketServer {
             "summary": {
                 "total": specs.len(),
                 "by_status": by_status,
-                "critical_failures": failing_required,
+                "critical_failures": critical_failures,
+                "blocking_failures": blocking_failures,
+                "advisory_failures": advisory_failures,
             }
         })
     }
@@ -4255,13 +4278,16 @@ impl PTYWebSocketServer {
                             "id": format!("provider-slot-{phase}"),
                             "label": format!("Jarvis provider-box slot: {phase}"),
                             "ok": slot.get("ok").and_then(|value| value.as_bool()).unwrap_or(false),
-                            "critical": slot.get("critical").and_then(|value| value.as_bool()).unwrap_or(true),
+                            "critical": slot.get("critical").and_then(|value| value.as_bool()).unwrap_or(true)
+                                && slot.get("required_ready").and_then(|value| value.as_bool()).unwrap_or(false),
+                            "phase_critical": slot.get("critical"),
                             "status": slot.get("status"),
                             "slot_id": slot.get("slot_id"),
                             "provider": slot.get("provider"),
                             "engine": slot.get("engine"),
                             "role": slot.get("role"),
                             "residency": slot.get("residency"),
+                            "required_ready": slot.get("required_ready"),
                             "reason": slot.get("reason"),
                             "blocked_kind": slot
                                 .get("recognition")
@@ -4500,6 +4526,7 @@ impl PTYWebSocketServer {
             })
             .filter(|check| check.get("ok").and_then(|v| v.as_bool()) == Some(false))
             .filter(|check| check.get("critical").and_then(|v| v.as_bool()) == Some(true))
+            .filter(|check| check.get("required_ready").and_then(|v| v.as_bool()) == Some(true))
             .count();
         let critical_failures = checks
             .iter()
@@ -5312,24 +5339,19 @@ impl PTYWebSocketServer {
             {
                 Ok(draft) => draft,
                 Err(error) => {
-                    let diagnostic = serde_json::json!({
-                        "phase": "intent_authoring_failed",
-                        "error": {
-                            "code": "JARVIS_INTENT_AUTHOR_FAILED",
-                            "message": error.to_string()
-                        }
-                    });
-                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                    Self::write_sse_openai_text_and_persist(
+                    Self::fail_jarvis_gate_visible(
                         &mut stream,
+                        &jarvis_progress_bus,
                         &chat_id,
-                        "intent.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的意图识别。",
-                        Some("stop"),
+                        Some(&interaction_id),
+                        format!(
+                            "intent.lisp 生成失败：{error}。不会用 Rust fallback 代替你的意图识别。"
+                        ),
+                        "intent_authoring_failed",
                         db.as_ref(),
                         jarvis_conv_id.as_deref(),
                     )
                     .await?;
-                    Self::finish_sse(&mut stream).await?;
                     return Ok(());
                 }
             };
@@ -5730,24 +5752,17 @@ impl PTYWebSocketServer {
             {
                 Ok(draft) => draft,
                 Err(error) => {
-                    let diagnostic = serde_json::json!({
-                        "phase": "key_judgment_authoring_failed",
-                        "error": {
-                            "code": "JARVIS_KEY_JUDGMENT_AUTHOR_FAILED",
-                            "message": error.to_string()
-                        }
-                    });
-                    Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                    Self::write_sse_openai_text_and_persist(
+                    Self::fail_jarvis_gate_visible(
                         &mut stream,
+                        &jarvis_progress_bus,
                         &chat_id,
-                        "关键判断需要 Codex CLI GPT-5.5 xhigh 工位基于 grounding report 生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替判断。",
-                        Some("stop"),
+                        Some(&interaction_id),
+                        format!("关键判断生成失败：{error}。不会用 Rust fallback 代替判断。"),
+                        "key_judgment_authoring_failed",
                         db.as_ref(),
                         jarvis_conv_id.as_deref(),
                     )
                     .await?;
-                    Self::finish_sse(&mut stream).await?;
                     return Ok(());
                 }
             };
@@ -9920,10 +9935,11 @@ JSON 字段必须是：\n\
         match stage {
             "intent" | "intent_artifact" | "intent_authoring_failed" => "intent",
             "grounding" | "confirmation_grounding" => "grounding",
-            "key_judgment" | "key_judgment_artifact" | "confirmation_key_judgment" => {
-                "key_judgment"
-            }
-            "plan" | "plan_artifact" | "execution_mode" => "plan",
+            "key_judgment"
+            | "key_judgment_artifact"
+            | "key_judgment_authoring_failed"
+            | "confirmation_key_judgment" => "key_judgment",
+            "plan" | "plan_artifact" | "plan_authoring_failed" | "execution_mode" => "plan",
             "communicator" | "plan_dispatched" | "result_terminal" => "communicator",
             "direct_answer" | "grounded_direct_answer" => "direct_answer",
             "board_dispatch" | "board_task_create" => "board_dispatch",
@@ -9933,6 +9949,12 @@ JSON 字段必须是：\n\
     }
 
     fn jarvis_phase_error_code(stage: &str) -> &'static str {
+        match stage {
+            "intent_authoring_failed" => return "JARVIS_INTENT_AUTHOR_FAILED",
+            "key_judgment_authoring_failed" => return "JARVIS_KEY_JUDGMENT_AUTHOR_FAILED",
+            "plan_authoring_failed" => return "JARVIS_PLAN_AUTHOR_FAILED",
+            _ => {}
+        }
         match Self::jarvis_phase_code(stage) {
             "intent" => "JARVIS_INTENT_FAILED",
             "grounding" => "JARVIS_GROUNDING_FAILED",
@@ -13364,24 +13386,19 @@ JSON 字段必须是：\n\
                 {
                     Ok(draft) => draft,
                     Err(error) => {
-                        let diagnostic = serde_json::json!({
-                            "phase": "intent_authoring_failed",
-                            "error": {
-                                "code": "JARVIS_INTENT_AUTHOR_FAILED",
-                                "message": error.to_string()
-                            }
-                        });
-                        Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                        Self::write_sse_openai_text_and_persist(
+                        Self::fail_jarvis_gate_visible(
                             &mut stream,
+                            &jarvis_progress_bus,
                             &chat_id,
-                            "intent.lisp 需要 Codex CLI GPT-5.5 xhigh 工位生成；当前工位不可用或输出未通过校验，已停止，不会用 Rust fallback 代替你的意图识别。",
-                            Some("stop"),
+                            None,
+                            format!(
+                                "intent.lisp 生成失败：{error}。不会用 Rust fallback 代替你的意图识别。"
+                            ),
+                            "intent_authoring_failed",
                             db.as_ref(),
                             jarvis_conv_id.as_deref(),
                         )
                         .await?;
-                        Self::finish_sse(&mut stream).await?;
                         return Ok(());
                     }
                 };
@@ -13676,24 +13693,19 @@ JSON 字段必须是：\n\
                     {
                         Ok(draft) => draft,
                         Err(error) => {
-                            let diagnostic = serde_json::json!({
-                                "phase": "key_judgment_authoring_failed",
-                                "error": {
-                                    "code": "JARVIS_KEY_JUDGMENT_AUTHOR_FAILED",
-                                    "message": error.to_string()
-                                }
-                            });
-                            Self::write_sse_event(&mut stream, "diagnostic", &diagnostic).await?;
-                            Self::write_sse_openai_text_and_persist(
+                            Self::fail_jarvis_gate_visible(
                                 &mut stream,
+                                &jarvis_progress_bus,
                                 &chat_id,
-                                "关键判断需要 Codex CLI GPT-5.5 xhigh 工位基于 grounding report 生成；当前工位不可用或输出未通过校验，已停止。",
-                                Some("stop"),
+                                None,
+                                format!(
+                                    "关键判断生成失败：{error}。不会用 Rust fallback 代替判断。"
+                                ),
+                                "key_judgment_authoring_failed",
                                 db.as_ref(),
                                 jarvis_conv_id.as_deref(),
                             )
                             .await?;
-                            Self::finish_sse(&mut stream).await?;
                             return Ok(());
                         }
                     };
@@ -17007,6 +17019,14 @@ mod tests {
         assert_eq!(
             PTYWebSocketServer::jarvis_phase_error_code("confirmation_key_judgment"),
             "JARVIS_KEY_JUDGMENT_FAILED"
+        );
+        assert_eq!(
+            PTYWebSocketServer::jarvis_phase_error_code("key_judgment_authoring_failed"),
+            "JARVIS_KEY_JUDGMENT_AUTHOR_FAILED"
+        );
+        assert_eq!(
+            PTYWebSocketServer::jarvis_phase_error_code("plan_authoring_failed"),
+            "JARVIS_PLAN_AUTHOR_FAILED"
         );
         assert_eq!(
             PTYWebSocketServer::jarvis_phase_error_code("grounded_direct_answer"),

@@ -5,6 +5,8 @@ import {
   Activity,
   AlertTriangle,
   Bot,
+  ChevronDown,
+  ChevronUp,
   Gauge,
   Loader2,
   Plus,
@@ -74,6 +76,14 @@ type ModelOption = {
   id: string;
   ownedBy?: string;
   root?: string;
+  provider?: string;
+  sourceId?: string;
+  displayName?: string;
+  providerModelId?: string;
+  modelName?: string;
+  modelProfile?: string;
+  mode?: string;
+  completionEndpoint?: string;
 };
 
 type LatencySample = {
@@ -88,6 +98,8 @@ type LatencyRow = {
   attempts: Array<LatencySample | null>;
   status: 'idle' | 'running' | 'done' | 'error' | 'stopped';
 };
+
+type LatencySortMode = 'source' | 'asc' | 'desc';
 
 type LatencyResponse = {
   ok?: boolean;
@@ -158,7 +170,16 @@ function readStringField(value: unknown, key: string): string {
 
 function modelProviderLabel(model: ModelOption): string {
   const ownedBy = model.ownedBy?.toLowerCase().replace(/[_\s-]/g, '') || '';
+  const provider = model.provider?.toLowerCase().replace(/[_\s-]/g, '') || '';
   const id = model.id.toLowerCase();
+
+  if (provider === 'codexagent') return 'MissionD-Codex Agent';
+  if (provider === 'claudecodeagent') return 'MissionD-ClaudeCode Agent';
+  if (ownedBy === 'missiondproviderbox') {
+    if (id.startsWith('missiond-codex-agent-')) return 'MissionD-Codex Agent';
+    if (id.startsWith('missiond-claude-code-agent-')) return 'MissionD-ClaudeCode Agent';
+    return 'MissionD-Agent';
+  }
 
   if (ownedBy === 'missiondagy') {
     if (id.startsWith('claude-code-')) return 'MissionD-ClaudeCode';
@@ -178,6 +199,8 @@ function modelProviderLabel(model: ModelOption): string {
   if (ownedBy === 'meow61') return 'Meow61';
 
   if (id.startsWith('agy-')) return 'MissionD-AGY';
+  if (id.startsWith('missiond-codex-agent-')) return 'MissionD-Codex Agent';
+  if (id.startsWith('missiond-claude-code-agent-')) return 'MissionD-ClaudeCode Agent';
   if (id.startsWith('claude-code-')) return 'MissionD-ClaudeCode';
   if (id.startsWith('codex-')) return 'MissionD-Codex';
   if (id.startsWith('gemini-')) return 'Google-Vertex';
@@ -188,7 +211,16 @@ function modelProviderLabel(model: ModelOption): string {
 }
 
 function modelDisplayLabel(model: ModelOption): string {
-  return `${modelProviderLabel(model)} - ${model.id}`;
+  return `${modelProviderLabel(model)} - ${model.displayName || model.id}`;
+}
+
+function modelDetailLabel(model: ModelOption): string {
+  const details = [
+    model.providerModelId || model.modelName,
+    model.modelProfile,
+    model.mode === 'interactive_agent_session' ? 'agent session' : undefined,
+  ].filter(Boolean);
+  return details.length > 0 ? details.join(' · ') : model.root || '';
 }
 
 function emptyLatencyAttempts(): Array<LatencySample | null> {
@@ -215,7 +247,7 @@ function statusModels(payload: StatusPayload): { current: string; models: ModelO
   const body = payload.models?.body as { current?: unknown; models?: unknown } | undefined;
   const models = Array.isArray(body?.models)
     ? body.models
-        .map((item) => {
+        .map((item): ModelOption | null => {
           if (typeof item === 'string') return { id: item };
           const id = readStringField(item, 'id');
           if (!id) return null;
@@ -223,10 +255,17 @@ function statusModels(payload: StatusPayload): { current: string; models: ModelO
             id,
             ownedBy: readStringField(item, 'owned_by') || readStringField(item, 'provider') || undefined,
             root: readStringField(item, 'root') || undefined,
-          } satisfies ModelOption;
+            provider: readStringField(item, 'provider') || undefined,
+            sourceId: readStringField(item, 'source_id') || undefined,
+            displayName: readStringField(item, 'display_name') || undefined,
+            providerModelId: readStringField(item, 'provider_model_id') || undefined,
+            modelName: readStringField(item, 'model') || undefined,
+            modelProfile: readStringField(item, 'model_profile') || undefined,
+            mode: readStringField(item, 'mode') || undefined,
+            completionEndpoint: readStringField(item, 'completion_endpoint') || undefined,
+          };
         })
-        .filter(Boolean)
-        .filter((item): item is ModelOption => Boolean(item && !NON_CHAT_MODEL_IDS.has(item.id)))
+        .filter((item): item is ModelOption => item !== null && !NON_CHAT_MODEL_IDS.has(item.id))
     : [];
   return {
     current: typeof body?.current === 'string' && !NON_CHAT_MODEL_IDS.has(body.current) ? body.current : '',
@@ -247,11 +286,15 @@ export function XjpcodePanel() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [latencyRows, setLatencyRows] = useState<Record<string, LatencyRow>>({});
+  const [latencySortMode, setLatencySortMode] = useState<LatencySortMode>('source');
+  const [selectedLatencyModelIds, setSelectedLatencyModelIds] = useState<Set<string>>(() => new Set());
+  const [isLatencyCollapsed, setIsLatencyCollapsed] = useState(false);
   const [isTestingLatency, setIsTestingLatency] = useState(false);
   const [testingModelId, setTestingModelId] = useState('');
   const [testingAttempt, setTestingAttempt] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const latencyAbortRef = useRef<AbortController | null>(null);
+  const knownLatencyModelIdsRef = useRef<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const online = status?.ok === true;
@@ -263,6 +306,10 @@ export function XjpcodePanel() {
     () => models.find((item) => item.id === currentModel) || (currentModel ? { id: currentModel } : null),
     [currentModel, models],
   );
+  const selectedLatencyModels = useMemo(
+    () => models.filter((item) => selectedLatencyModelIds.has(item.id)),
+    [models, selectedLatencyModelIds],
+  );
   const latencyRowsForDisplay = useMemo(() => {
     const modelIds = new Set(models.map((item) => item.id));
     const modelOrder = new Map(models.map((item, index) => [item.id, index]));
@@ -270,7 +317,19 @@ export function XjpcodePanel() {
       latencyRows[item.id] ? { ...latencyRows[item.id], model: item } : makeLatencyRow(item)
     ));
     const staleRows = Object.values(latencyRows).filter((row) => !modelIds.has(row.model.id));
-    return [...liveRows, ...staleRows].sort((a, b) => {
+    const rows = [...liveRows, ...staleRows];
+
+    if (latencySortMode !== 'source') {
+      return rows.sort((a, b) => {
+        const delta = modelDisplayLabel(a.model).localeCompare(modelDisplayLabel(b.model), undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        });
+        return latencySortMode === 'asc' ? delta : -delta;
+      });
+    }
+
+    return rows.sort((a, b) => {
       const rank = (row: LatencyRow) => {
         if (row.model.id === testingModelId) return 0;
         if (row.attempts.some(Boolean)) return 1;
@@ -281,7 +340,7 @@ export function XjpcodePanel() {
       return (modelOrder.get(a.model.id) ?? Number.MAX_SAFE_INTEGER)
         - (modelOrder.get(b.model.id) ?? Number.MAX_SAFE_INTEGER);
     });
-  }, [latencyRows, models, testingModelId]);
+  }, [latencyRows, latencySortMode, models, testingModelId]);
 
   useEffect(() => {
     localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
@@ -294,6 +353,19 @@ export function XjpcodePanel() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, isStreaming]);
+
+  useEffect(() => {
+    const nextKnownIds = new Set(models.map((item) => item.id));
+    const previousKnownIds = knownLatencyModelIdsRef.current;
+    setSelectedLatencyModelIds((prev) => {
+      const next = new Set([...prev].filter((id) => nextKnownIds.has(id)));
+      for (const id of nextKnownIds) {
+        if (!previousKnownIds.has(id)) next.add(id);
+      }
+      return next;
+    });
+    knownLatencyModelIdsRef.current = nextKnownIds;
+  }, [models]);
 
   const refreshStatus = useCallback(async () => {
     setIsRefreshing(true);
@@ -442,6 +514,32 @@ export function XjpcodePanel() {
       }
     }
   }, []);
+
+  function toggleLatencySortMode() {
+    setLatencySortMode((value) => (
+      value === 'source' ? 'asc' : value === 'asc' ? 'desc' : 'source'
+    ));
+  }
+
+  function toggleLatencyModel(modelId: string, selected: boolean) {
+    setSelectedLatencyModelIds((prev) => {
+      const next = new Set(prev);
+      if (selected) {
+        next.add(modelId);
+      } else {
+        next.delete(modelId);
+      }
+      return next;
+    });
+  }
+
+  function selectAllLatencyModels() {
+    setSelectedLatencyModelIds(new Set(models.map((item) => item.id)));
+  }
+
+  function clearLatencyModelSelection() {
+    setSelectedLatencyModelIds(new Set());
+  }
 
   function resetLatencyRows(targetModels: ModelOption[]) {
     setLatencyRows((prev) => {
@@ -738,7 +836,7 @@ export function XjpcodePanel() {
                 <SelectItem key={item.id} value={item.id} className="font-mono text-xs text-stone-100 focus:bg-teal-400/15 focus:text-teal-100">
                   <span className="flex min-w-0 flex-col">
                     <span className="truncate">{modelDisplayLabel(item)}</span>
-                    {item.root ? <span className="truncate text-[10px] text-stone-500">{item.root}</span> : null}
+                    {modelDetailLabel(item) ? <span className="truncate text-[10px] text-stone-500">{modelDetailLabel(item)}</span> : null}
                   </span>
                 </SelectItem>
               ))}
@@ -795,16 +893,25 @@ export function XjpcodePanel() {
           <LatencyTestPanel
             rows={latencyRowsForDisplay}
             modelCount={models.length}
+            selectedCount={selectedLatencyModels.length}
+            selectedModelIds={selectedLatencyModelIds}
+            sortMode={latencySortMode}
+            collapsed={isLatencyCollapsed}
             isTesting={isTestingLatency}
             testingModelId={testingModelId}
             testingAttempt={testingAttempt}
-            onTestAll={() => startLatencyTests(models)}
+            onTestAll={() => startLatencyTests(selectedLatencyModels)}
             onTestCurrent={() => {
               if (currentModelOption) startLatencyTests([currentModelOption]);
             }}
             onStop={() => latencyAbortRef.current?.abort()}
             onClear={() => setLatencyRows({})}
-            canTestAll={models.length > 0}
+            onToggleSort={toggleLatencySortMode}
+            onToggleCollapsed={() => setIsLatencyCollapsed((value) => !value)}
+            onToggleModel={toggleLatencyModel}
+            onSelectAll={selectAllLatencyModels}
+            onSelectNone={clearLatencyModelSelection}
+            canTestAll={selectedLatencyModels.length > 0}
             canTestCurrent={Boolean(currentModelOption)}
           />
           <div className="shrink-0 border-b border-white/[0.07] px-3 py-2.5">
@@ -833,6 +940,10 @@ export function XjpcodePanel() {
 function LatencyTestPanel({
   rows,
   modelCount,
+  selectedCount,
+  selectedModelIds,
+  sortMode,
+  collapsed,
   isTesting,
   testingModelId,
   testingAttempt,
@@ -840,11 +951,20 @@ function LatencyTestPanel({
   onTestCurrent,
   onStop,
   onClear,
+  onToggleSort,
+  onToggleCollapsed,
+  onToggleModel,
+  onSelectAll,
+  onSelectNone,
   canTestAll,
   canTestCurrent,
 }: {
   rows: LatencyRow[];
   modelCount: number;
+  selectedCount: number;
+  selectedModelIds: Set<string>;
+  sortMode: LatencySortMode;
+  collapsed: boolean;
   isTesting: boolean;
   testingModelId: string;
   testingAttempt: number | null;
@@ -852,22 +972,44 @@ function LatencyTestPanel({
   onTestCurrent: () => void;
   onStop: () => void;
   onClear: () => void;
+  onToggleSort: () => void;
+  onToggleCollapsed: () => void;
+  onToggleModel: (modelId: string, selected: boolean) => void;
+  onSelectAll: () => void;
+  onSelectNone: () => void;
   canTestAll: boolean;
   canTestCurrent: boolean;
 }) {
   const testedCount = rows.filter((row) => row.attempts.some(Boolean)).length;
   const activeRow = rows.find((row) => row.model.id === testingModelId);
+  const sortLabel = sortMode === 'source' ? 'Source order' : sortMode === 'asc' ? 'Name A-Z' : 'Name Z-A';
 
   return (
-    <section className="shrink-0 border-b border-white/[0.07] p-3">
+    <section className={cn('shrink-0 border-b border-white/[0.07] p-3', collapsed ? 'py-2.5' : '')}>
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <Gauge className="h-3.5 w-3.5 shrink-0 text-teal-300" />
           <div className="truncate text-xs font-medium text-stone-200">Model Latency</div>
         </div>
-        <div className="font-mono text-[10px] text-stone-500">{testedCount}/{modelCount}</div>
+        <div className="flex shrink-0 items-center gap-2">
+          {isTesting && collapsed ? <Loader2 className="h-3 w-3 animate-spin text-amber-200" /> : null}
+          <div className="font-mono text-[10px] text-stone-500">{testedCount}/{selectedCount}/{modelCount}</div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={onToggleCollapsed}
+            className="h-7 px-2 text-xs"
+            aria-label={collapsed ? 'Show latency test panel' : 'Hide latency test panel'}
+          >
+            {collapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+            {collapsed ? 'Show' : 'Hide'}
+          </Button>
+        </div>
       </div>
 
+      {collapsed ? null : (
+        <>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <Button
           type="button"
@@ -878,7 +1020,7 @@ function LatencyTestPanel({
           className="h-7 px-2 text-xs"
         >
           {isTesting ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-          {isTesting ? 'Stop' : 'Test All'}
+          {isTesting ? 'Stop' : selectedCount === modelCount ? 'Test All' : 'Test Selected'}
         </Button>
         <Button
           type="button"
@@ -890,6 +1032,36 @@ function LatencyTestPanel({
         >
           <Gauge className="h-3.5 w-3.5" />
           Current
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onToggleSort}
+          disabled={isTesting}
+          className="h-7 px-2 text-xs"
+        >
+          {sortLabel}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onSelectAll}
+          disabled={isTesting || selectedCount === modelCount}
+          className="h-7 px-2 text-xs"
+        >
+          All
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onSelectNone}
+          disabled={isTesting || selectedCount === 0}
+          className="h-7 px-2 text-xs"
+        >
+          None
         </Button>
         <Button
           type="button"
@@ -917,7 +1089,8 @@ function LatencyTestPanel({
           <div className="p-3 text-xs text-stone-600">No models loaded.</div>
         ) : (
           <div className="min-w-[560px]">
-            <div className="grid grid-cols-[minmax(220px,1fr)_58px_58px_58px_72px] gap-2 border-b border-white/[0.07] px-2 py-1.5 font-mono text-[10px] uppercase text-stone-600">
+            <div className="grid grid-cols-[24px_minmax(220px,1fr)_58px_58px_58px_72px] gap-2 border-b border-white/[0.07] px-2 py-1.5 font-mono text-[10px] uppercase text-stone-600">
+              <div />
               <div>model</div>
               <div>1st</div>
               <div>2nd</div>
@@ -928,23 +1101,51 @@ function LatencyTestPanel({
               <LatencyRowView
                 key={row.model.id}
                 row={row}
+                selected={selectedModelIds.has(row.model.id)}
                 activeAttempt={row.model.id === testingModelId ? testingAttempt : null}
+                disabled={isTesting}
+                onToggleModel={onToggleModel}
               />
             ))}
           </div>
         )}
       </div>
+        </>
+      )}
     </section>
   );
 }
 
-function LatencyRowView({ row, activeAttempt }: { row: LatencyRow; activeAttempt: number | null }) {
+function LatencyRowView({
+  row,
+  selected,
+  activeAttempt,
+  disabled,
+  onToggleModel,
+}: {
+  row: LatencyRow;
+  selected: boolean;
+  activeAttempt: number | null;
+  disabled: boolean;
+  onToggleModel: (modelId: string, selected: boolean) => void;
+}) {
   const average = averageLatencyMs(row.attempts);
   const hasError = row.attempts.some((sample) => sample?.error);
   const averageText = typeof average === 'number' ? durationLabel(average) : '';
 
   return (
-    <div className="grid grid-cols-[minmax(220px,1fr)_58px_58px_58px_72px] items-center gap-2 border-b border-white/[0.04] px-2 py-1.5 last:border-b-0">
+    <div className={cn('grid grid-cols-[24px_minmax(220px,1fr)_58px_58px_58px_72px] items-center gap-2 border-b border-white/[0.04] px-2 py-1.5 last:border-b-0',
+      selected ? '' : 'opacity-50')}>
+      <div className="flex items-center justify-center">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(event) => onToggleModel(row.model.id, event.target.checked)}
+          disabled={disabled}
+          aria-label={`Select ${modelDisplayLabel(row.model)}`}
+          className="h-3.5 w-3.5 rounded border-stone-600 bg-black/20 accent-teal-300 disabled:cursor-not-allowed"
+        />
+      </div>
       <div className="min-w-0">
         <div className="truncate font-mono text-[10px] text-stone-300" title={modelDisplayLabel(row.model)}>
           {modelDisplayLabel(row.model)}

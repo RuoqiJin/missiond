@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -27,7 +27,7 @@ use super::types::{
     DIAG_PROVIDER_DURABLE_FINAL_MISSING, DIAG_PROVIDER_MCP_RECONNECT_UNSUPPORTED,
     DIAG_PROVIDER_MCP_STATUS_UNAVAILABLE, DIAG_PROVIDER_SESSION_ID_UNKNOWN,
     DIAG_PROVIDER_TEXT_ONLY_VIOLATION, DIAG_PROVIDER_TURN_TIMEOUT_CANCELLED,
-    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, DIAG_USAGE_UNKNOWN,
+    DIAG_PROVIDER_TURN_TIMEOUT_CANCEL_FAILED, DIAG_PROVIDER_USAGE_LIMIT, DIAG_USAGE_UNKNOWN,
 };
 
 const DEFAULT_CODEX_SLOT: &str = "slot-codex-provider-box";
@@ -46,8 +46,8 @@ const CODEX_STARTUP_READY_WAIT_SECS: u64 = 60;
 const CODEX_TRUST_READY_WAIT_SECS: u64 = 12;
 const CODEX_PROMPT_SEND_READY_WAIT_SECS: u64 = 12;
 const CODEX_PROMPT_ROLLOUT_ACK_WAIT_SECS: u64 = 15;
-const CODEX_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS: u64 = 45;
-const CODEX_DURABLE_FINAL_IDLE_GRACE_MIN_SECS: u64 = 10;
+const CODEX_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS: u64 = 90;
+const CODEX_DURABLE_FINAL_IDLE_GRACE_MIN_SECS: u64 = 30;
 const CODEX_DURABLE_FINAL_IDLE_GRACE_MAX_SECS: u64 = 300;
 const CODEX_MANUAL_TEXT_LIMIT: usize = 4096;
 const CODEX_MANUAL_KEY_NAMES: &[&str] = &[
@@ -88,6 +88,13 @@ struct CodexObservation {
     text: String,
     session_state: SessionState,
     snapshot: missiond_core::pty::PtyRecognitionSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodexPromptSubmissionOutcome {
+    Verified(String),
+    SubmittedUnconfirmed,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -1144,11 +1151,17 @@ impl CodexProviderDriver {
                     is_ready_for_codex_text(obs)
                         || is_codex_workspace_trust_prompt(obs)
                         || is_codex_rate_limit_model_switch_prompt(obs)
+                        || is_codex_usage_limit_block(obs)
                 },
             )
             .await;
 
         loop {
+            if is_codex_usage_limit_block(&observation) {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(codex_usage_limit_diagnostic(slot_id, &observation));
+                return CodexStartupOutcome::Failed;
+            }
             if is_codex_workspace_trust_prompt(&observation) {
                 observation = match self
                     .accept_workspace_trust_locked(result, slot_id, observation)
@@ -1391,6 +1404,11 @@ impl CodexProviderDriver {
         let started = Instant::now();
         loop {
             let mut observation = self.observe(slot_id).await;
+            if is_codex_usage_limit_block(&observation) {
+                result.status = ProviderBoxStatus::Blocked;
+                result.add_diagnostic(codex_usage_limit_diagnostic(slot_id, &observation));
+                return false;
+            }
             if is_codex_workspace_trust_prompt(&observation) {
                 observation = match self
                     .accept_workspace_trust_locked(result, slot_id, observation)
@@ -1524,7 +1542,7 @@ impl CodexProviderDriver {
         request: &ProviderInteractionRequest,
         slot_id: &str,
         prompt: &str,
-    ) -> Option<String> {
+    ) -> CodexPromptSubmissionOutcome {
         let before = self.observe(slot_id).await;
         let send_result = self.pty.send_fire_and_forget(slot_id, prompt).await;
         let after = self.observe_after_action(slot_id).await;
@@ -1557,7 +1575,8 @@ impl CodexProviderDriver {
             Some("Codex accepts prompt and starts a provider turn".to_string()),
             status,
         );
-        if let Err(err) = send_result {
+        let send_failed = send_result.is_err();
+        if let Err(err) = &send_result {
             step.diagnostics.push(ProviderBoxDiagnostic::error(
                 DIAG_PROVIDER_BOX_SLOT_UNAVAILABLE,
                 "Codex provider-box prompt submission failed",
@@ -1567,21 +1586,26 @@ impl CodexProviderDriver {
                 }),
             ));
         } else if rollout_ack.is_none() {
-            step.diagnostics.push(ProviderBoxDiagnostic::error(
+            step.diagnostics.push(ProviderBoxDiagnostic::warning(
                 DIAG_PROVIDER_DURABLE_FINAL_MISSING,
-                "Codex prompt submission did not produce a correlated durable rollout user message",
+                "Codex prompt submission has no correlated durable rollout ack yet; provider-box will continue scanning durable rollouts",
                 json!({
                     "slot_id": slot_id,
                     "correlation_id": request.correlation_id,
                     "codex_home": self.codex_home.display().to_string(),
                     "ack_wait_secs": CODEX_PROMPT_ROLLOUT_ACK_WAIT_SECS,
-                    "rule": "provider-box requires durable Codex rollout evidence before treating a prompt submission as verified"
+                    "rule": "prompt send success is allowed to proceed as unconfirmed; durable final extraction remains the canonical completion authority"
                 }),
             ));
         }
-        let ok = step.verification_status == PtyStepVerificationStatus::Verified;
         result.record_step(step);
-        ok.then(|| rollout_ack).flatten()
+        if send_failed {
+            CodexPromptSubmissionOutcome::Failed
+        } else {
+            rollout_ack
+                .map(CodexPromptSubmissionOutcome::Verified)
+                .unwrap_or(CodexPromptSubmissionOutcome::SubmittedUnconfirmed)
+        }
     }
 
     async fn monitor_turn(
@@ -1596,7 +1620,8 @@ impl CodexProviderDriver {
         let durable_final_idle_grace_secs = codex_durable_final_idle_grace_secs();
         let mut idle_seen_at: Option<Instant> = None;
         let mut unconfirmed_idle_seen_at: Option<Instant> = None;
-        let mut prompt_submission_confirmed = false;
+        let mut prompt_submission_confirmed = rollout_path_hint.is_some();
+        let mut last_rollout_modified_at: Option<SystemTime> = None;
 
         loop {
             if let Some(final_turn) = self
@@ -1623,8 +1648,24 @@ impl CodexProviderDriver {
                 return result.clone();
             }
 
+            if note_codex_rollout_activity(
+                rollout_path_hint,
+                &mut last_rollout_modified_at,
+                &mut idle_seen_at,
+                &mut unconfirmed_idle_seen_at,
+            ) {
+                prompt_submission_confirmed = true;
+            }
+
             let observation = self.observe(slot_id).await;
             prompt_submission_confirmed |= codex_prompt_submission_observed(request, &observation);
+            if is_codex_usage_limit_block(&observation) {
+                let mut failed = ProviderBoxResult::base(request, ProviderBoxStatus::Blocked);
+                failed.slot_id = Some(slot_id.to_string());
+                failed.step_records = result.step_records.clone();
+                failed.add_diagnostic(codex_usage_limit_diagnostic(slot_id, &observation));
+                return failed;
+            }
             if is_codex_rate_limit_model_switch_prompt(&observation) {
                 if self
                     .dismiss_rate_limit_model_switch_prompt_locked(result, slot_id, observation)
@@ -1725,6 +1766,9 @@ impl CodexProviderDriver {
                                 "correlation_id": request.correlation_id,
                                 "codex_home": self.codex_home.display().to_string(),
                                 "prompt_submission_confirmed": prompt_submission_confirmed,
+                                "durable_final_idle_grace_secs": durable_final_idle_grace_secs,
+                                "rollout_path_hint": rollout_path_hint,
+                                "rollout_modified_at_ms": last_rollout_modified_at.map(system_time_ms),
                                 "last_user_message": last_user_message,
                                 "placeholder_visible": placeholder_visible,
                                 "placeholder_text": placeholder_text,
@@ -3495,20 +3539,19 @@ impl ProviderDriver for CodexProviderDriver {
             return result;
         }
         let prompt = correlate_prompt(request);
-        let Some(rollout_path_hint) = self
+        let rollout_path_hint = match self
             .submit_prompt_step(&mut result, request, &slot_id, prompt.as_str())
             .await
-        else {
-            result.status = ProviderBoxStatus::Failed;
-            return result;
+        {
+            CodexPromptSubmissionOutcome::Verified(path) => Some(path),
+            CodexPromptSubmissionOutcome::SubmittedUnconfirmed => None,
+            CodexPromptSubmissionOutcome::Failed => {
+                result.status = ProviderBoxStatus::Failed;
+                return result;
+            }
         };
-        self.monitor_turn(
-            request,
-            &mut result,
-            &slot_id,
-            Some(rollout_path_hint.as_str()),
-        )
-        .await
+        self.monitor_turn(request, &mut result, &slot_id, rollout_path_hint.as_deref())
+            .await
     }
 
     async fn control_action(&self, request: &ProviderInteractionRequest) -> ProviderBoxResult {
@@ -4067,6 +4110,35 @@ fn is_codex_rate_limit_model_switch_prompt(observation: &CodexObservation) -> bo
         }
 }
 
+fn is_codex_usage_limit_block(observation: &CodexObservation) -> bool {
+    observation.snapshot.blocked_kind.as_deref() == Some("usage_limit") || {
+        let lower = observation.text.to_ascii_lowercase();
+        lower.contains("you've hit your usage limit")
+            || lower.contains("you’ve hit your usage limit")
+            || lower.contains("usage limit")
+            || lower.contains("rate limit exceeded")
+            || lower.contains("quota exceeded")
+            || lower.contains("too many requests")
+    }
+}
+
+fn codex_usage_limit_diagnostic(
+    slot_id: &str,
+    observation: &CodexObservation,
+) -> ProviderBoxDiagnostic {
+    ProviderBoxDiagnostic::error(
+        DIAG_PROVIDER_USAGE_LIMIT,
+        "Codex provider is blocked by a visible usage limit or quota surface",
+        json!({
+            "slot_id": slot_id,
+            "state": observation.snapshot.state,
+            "reason": observation.snapshot.reason,
+            "blocked_kind": observation.snapshot.blocked_kind,
+            "rule": "usage/quota surfaces are not authorization prompts and must not be auto-confirmed"
+        }),
+    )
+}
+
 fn codex_rate_limit_prompt_selection(
     observation: &CodexObservation,
 ) -> Option<CodexRateLimitPromptSelection> {
@@ -4296,6 +4368,33 @@ fn default_codex_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".codex"))
 }
 
+fn codex_rollout_hint_modified_at(rollout_path_hint: Option<&str>) -> Option<SystemTime> {
+    rollout_path_hint
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(Path::new)
+        .map(modified_at)
+        .filter(|modified| *modified != SystemTime::UNIX_EPOCH)
+}
+
+fn note_codex_rollout_activity(
+    rollout_path_hint: Option<&str>,
+    last_rollout_modified_at: &mut Option<SystemTime>,
+    idle_seen_at: &mut Option<Instant>,
+    unconfirmed_idle_seen_at: &mut Option<Instant>,
+) -> bool {
+    let Some(modified_at) = codex_rollout_hint_modified_at(rollout_path_hint) else {
+        return false;
+    };
+    if last_rollout_modified_at.is_some_and(|last| modified_at <= last) {
+        return false;
+    }
+    *last_rollout_modified_at = Some(modified_at);
+    *idle_seen_at = None;
+    *unconfirmed_idle_seen_at = None;
+    true
+}
+
 fn clamp_codex_durable_final_idle_grace_secs(value: Option<u64>) -> u64 {
     value
         .unwrap_or(CODEX_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS)
@@ -4379,6 +4478,12 @@ fn codex_exec_args_for_kind(
     match kind {
         CodexExecTaskKind::TextOnly => {
             args.extend([
+                "--disable".to_string(),
+                "enable_mcp_apps".to_string(),
+                "--disable".to_string(),
+                "apps".to_string(),
+                "--disable".to_string(),
+                "tool_search".to_string(),
                 "-c".to_string(),
                 "web_search=\"disabled\"".to_string(),
                 "-c".to_string(),
@@ -5470,6 +5575,37 @@ mod tests {
     }
 
     #[test]
+    fn rollout_extractor_accepts_event_msg_agent_message_final() {
+        let dir = std::env::temp_dir().join(format!(
+            "missiond-codex-provider-box-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("rollout.jsonl");
+        let corr = "corr-agent-message";
+        let user = json!({
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": format!("hello {corr}")}
+        });
+        let final_event = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "{\"recognized_objective\":\"confirm deployment mode\"}"
+            }
+        });
+        fs::write(&path, format!("{user}\n{final_event}\n")).expect("write");
+
+        let turn = extract_correlated_rollout(&path, corr).expect("turn");
+
+        assert_eq!(
+            turn.final_text,
+            "{\"recognized_objective\":\"confirm deployment mode\"}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn rollout_extractor_preserves_final_when_slot_is_reused() {
         let dir = std::env::temp_dir().join(format!(
             "missiond-codex-provider-box-test-{}",
@@ -5658,6 +5794,15 @@ mod tests {
         assert!(args.contains(&"features.shell_tool=false".to_string()));
         assert!(args.contains(&"web_search=\"disabled\"".to_string()));
         assert!(args.contains(&"tools.web_search=false".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "enable_mcp_apps"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "apps"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "tool_search"));
         assert!(args.contains(&"apps._default.enabled=false".to_string()));
         assert!(args.contains(&"apps._default.default_tools_enabled=false".to_string()));
         assert!(args.contains(&"tools.view_image=false".to_string()));
@@ -6224,6 +6369,83 @@ Weekly limit:                [████████████████�
                 target_index: 2,
             })
         );
+    }
+
+    #[test]
+    fn codex_usage_limit_block_is_not_model_switch_prompt() {
+        let lines = vec![
+            "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to view limits.".to_string(),
+            "Please try again after 4:04 AM.".to_string(),
+        ];
+        let snapshot = recognize_screen(CliEngine::Codex, &lines, SessionState::Confirming);
+        let observation = CodexObservation {
+            text: lines.join("\n"),
+            lines,
+            session_state: SessionState::Confirming,
+            snapshot,
+        };
+
+        assert!(is_codex_usage_limit_block(&observation));
+        assert!(!is_codex_rate_limit_model_switch_prompt(&observation));
+        assert_eq!(
+            observation.snapshot.blocked_kind.as_deref(),
+            Some("usage_limit")
+        );
+    }
+
+    #[test]
+    fn codex_durable_final_idle_grace_has_safe_floor() {
+        assert_eq!(
+            clamp_codex_durable_final_idle_grace_secs(None),
+            CODEX_DURABLE_FINAL_IDLE_GRACE_DEFAULT_SECS
+        );
+        assert_eq!(
+            clamp_codex_durable_final_idle_grace_secs(Some(1)),
+            CODEX_DURABLE_FINAL_IDLE_GRACE_MIN_SECS
+        );
+        assert_eq!(
+            clamp_codex_durable_final_idle_grace_secs(Some(999)),
+            CODEX_DURABLE_FINAL_IDLE_GRACE_MAX_SECS
+        );
+    }
+
+    #[test]
+    fn codex_rollout_activity_resets_idle_clock() {
+        let dir = std::env::temp_dir().join(format!(
+            "missiond-codex-rollout-activity-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("rollout.jsonl");
+        fs::write(&path, "{}\n").expect("rollout");
+        let path_string = path.display().to_string();
+
+        let mut last_modified = None;
+        let mut idle_seen_at = Some(Instant::now());
+        let mut unconfirmed_idle_seen_at = Some(Instant::now());
+
+        assert!(note_codex_rollout_activity(
+            Some(&path_string),
+            &mut last_modified,
+            &mut idle_seen_at,
+            &mut unconfirmed_idle_seen_at,
+        ));
+        assert!(last_modified.is_some());
+        assert!(idle_seen_at.is_none());
+        assert!(unconfirmed_idle_seen_at.is_none());
+
+        idle_seen_at = Some(Instant::now());
+        unconfirmed_idle_seen_at = Some(Instant::now());
+        assert!(!note_codex_rollout_activity(
+            Some(&path_string),
+            &mut last_modified,
+            &mut idle_seen_at,
+            &mut unconfirmed_idle_seen_at,
+        ));
+        assert!(idle_seen_at.is_some());
+        assert!(unconfirmed_idle_seen_at.is_some());
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

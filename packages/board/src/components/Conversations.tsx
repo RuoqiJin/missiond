@@ -138,6 +138,16 @@ interface CodexToolCall {
   outputLineNo?: number | null;
 }
 
+interface CodexToolCallGroup {
+  id: string;
+  calls: CodexToolCall[];
+  timestamp: string;
+  title: string;
+  subtitle: string | null;
+  previewLines: string[];
+  status: "success" | "error" | "mixed" | "pending";
+}
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -905,7 +915,162 @@ function formatRawPayload(value: string | null): string {
   }
 }
 
-function CodexToolCallBubble({
+function parseRawPayload(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function compactToolText(value: string | null | undefined, maxLength = 90): string | null {
+  const compact = (value || "").replace(/\s+/g, " ").trim();
+  if (!compact) return null;
+  return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
+}
+
+function basename(value: string): string {
+  return value.split(/[\\/]/).filter(Boolean).pop() || value;
+}
+
+function stripShellQuotes(value: string): string {
+  return value.replace(/^['"]|['"]$/g, "");
+}
+
+function shellTokens(command: string): string[] {
+  return (command.match(/"[^"]*"|'[^']*'|\S+/g) || []).map(stripShellQuotes);
+}
+
+function commandFromToolCall(call: CodexToolCall): string | null {
+  const args = parseRawPayload(call.rawInput);
+  const cmd = args?.cmd ?? args?.command;
+  return typeof cmd === "string" ? cmd : null;
+}
+
+function extractReadTarget(command: string): string | null {
+  const firstCommand = command.split(/[|;]/)[0]?.trim() || "";
+  const tokens = shellTokens(firstCommand);
+  const binary = basename(tokens[0] || "");
+  if (!["nl", "cat", "sed"].includes(binary)) return null;
+
+  for (let i = tokens.length - 1; i >= 1; i--) {
+    const token = tokens[i];
+    if (!token || token.startsWith("-") || token === "{}") continue;
+    if (binary === "sed" && /^[$,./0-9]+[a-z]*$/i.test(token)) continue;
+    return token;
+  }
+  return null;
+}
+
+function commandVerb(command: string): string {
+  return command.trim().split(/\s+/)[0] || "command";
+}
+
+function describeCodexToolCall(call: CodexToolCall): {
+  kind: "read" | "search" | "edit" | "plan" | "browser" | "command" | "tool";
+  line: string;
+  target: string | null;
+} {
+  const toolName = call.toolName;
+  const command = commandFromToolCall(call);
+  const inputSummary = compactToolText(call.inputSummary, 110);
+
+  if (toolName === "exec_command" && command) {
+    const readTarget = extractReadTarget(command);
+    if (readTarget) {
+      return { kind: "read", line: `Read ${basename(readTarget)}`, target: readTarget };
+    }
+    if (/^\s*(rg|grep)\b/.test(command)) {
+      return { kind: "search", line: compactToolText(`Searched ${command}`, 120) || "Searched repository", target: null };
+    }
+    if (/^\s*(find|ls)\b/.test(command)) {
+      return { kind: "search", line: compactToolText(`Listed ${command}`, 120) || "Listed files", target: null };
+    }
+    if (/^\s*git\s+(diff|show|status|log)\b/.test(command)) {
+      return { kind: "search", line: compactToolText(`Inspected ${command}`, 120) || "Inspected git state", target: null };
+    }
+    return {
+      kind: "command",
+      line: compactToolText(`Ran ${command}`, 120) || `Ran ${commandVerb(command)}`,
+      target: null,
+    };
+  }
+
+  if (toolName === "apply_patch") {
+    return { kind: "edit", line: inputSummary || "Edited files", target: null };
+  }
+  if (toolName === "update_plan") {
+    return { kind: "plan", line: "Updated plan", target: null };
+  }
+  if (toolName.includes("browser") || call.namespace === "browser") {
+    return { kind: "browser", line: inputSummary || `Used ${toolName}`, target: null };
+  }
+
+  return {
+    kind: "tool",
+    line: inputSummary || call.displayTitle || toolName || "Used tool",
+    target: null,
+  };
+}
+
+function codexToolGroupStatus(calls: CodexToolCall[]): CodexToolCallGroup["status"] {
+  const statuses = new Set(calls.map((call) => call.status));
+  if (statuses.has("error")) return statuses.size === 1 ? "error" : "mixed";
+  if (statuses.has("pending")) return "pending";
+  if (statuses.size === 1 && statuses.has("success")) return "success";
+  return statuses.size > 1 ? "mixed" : "pending";
+}
+
+function buildCodexToolCallGroup(calls: CodexToolCall[]): CodexToolCallGroup {
+  const descriptions = calls.map(describeCodexToolCall);
+  const counts = descriptions.reduce(
+    (acc, item) => {
+      acc[item.kind] = (acc[item.kind] || 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+  const readCount = counts.read || 0;
+  const searchCount = counts.search || 0;
+  const editCount = counts.edit || 0;
+  const commandCount = counts.command || 0;
+  const planCount = counts.plan || 0;
+
+  let title = `已使用 ${calls.length} 个工具`;
+  if (readCount >= Math.max(2, calls.length - 1)) {
+    title = `已探索 ${readCount} 个文件`;
+  } else if (searchCount >= Math.max(2, calls.length - 1)) {
+    title = `已搜索 ${searchCount} 次`;
+  } else if (editCount >= Math.max(1, calls.length - 1)) {
+    title = `已编辑 ${editCount} 个文件`;
+  } else if (commandCount >= Math.max(2, calls.length - 1)) {
+    title = `已运行 ${commandCount} 条命令`;
+  }
+
+  const extras = [
+    planCount > 0 ? `${planCount} 次计划更新` : null,
+    editCount > 0 && !title.includes("编辑") ? `${editCount} 次编辑` : null,
+    searchCount > 0 && !title.includes("搜索") ? `${searchCount} 次搜索` : null,
+    commandCount > 0 && !title.includes("运行") ? `${commandCount} 条命令` : null,
+  ].filter((item): item is string => Boolean(item));
+
+  const previewLines = descriptions.map((item) => item.line);
+  return {
+    id: calls.map((call) => call.callId).join(":"),
+    calls,
+    timestamp: calls[0]?.timestamp || new Date(0).toISOString(),
+    title,
+    subtitle: extras.length > 0 ? extras.join(" · ") : null,
+    previewLines,
+    status: codexToolGroupStatus(calls),
+  };
+}
+
+function CodexToolCallPayloadDetails({
   call,
   jsonlPath,
 }: {
@@ -914,8 +1079,200 @@ function CodexToolCallBubble({
 }) {
   const rawInput = formatRawPayload(call.rawInput);
   const rawOutput = formatRawPayload(call.rawOutput);
+  const outputImages = call.outputImages || [];
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-600">
+        <span className="font-mono">{call.callId}</span>
+        {call.messageId != null && <span>message_id:{call.messageId}</span>}
+        {call.lineNo != null && <span>call line:{call.lineNo}</span>}
+        {call.outputLineNo != null && <span>output line:{call.outputLineNo}</span>}
+        {call.outputTimestamp && <span>output:{formatTime(call.outputTimestamp)}</span>}
+        {call.source && <span>{call.source}</span>}
+      </div>
+      {call.inputSummary && (
+        <div className="mission-code-surface rounded border px-2 py-1 font-mono text-xs text-stone-400">
+          {call.inputSummary}
+        </div>
+      )}
+      {outputImages.length > 0 && jsonlPath && (
+        <div className="flex flex-wrap gap-2">
+          {outputImages.map((image) => {
+            const src = `/api/conversation-image?path=${encodeURIComponent(jsonlPath)}&toolLine=${image.lineNo}&index=${image.index}`;
+            return (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                key={`${image.lineNo}:${image.index}`}
+                src={src}
+                alt={call.displayTitle || call.toolName}
+                className="max-h-72 max-w-sm rounded-lg border border-white/10 object-contain shadow-sm"
+                loading="lazy"
+              />
+            );
+          })}
+        </div>
+      )}
+      {rawInput && (
+        <div className="mission-code-surface overflow-hidden rounded border">
+          <div className="border-b border-white/[0.06] bg-white/[0.025] px-2 py-1 font-mono text-[10px] text-stone-500">
+            raw input
+          </div>
+          <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap px-2 py-2 text-xs text-stone-300">
+            {rawInput}
+          </pre>
+        </div>
+      )}
+      {rawOutput && (
+        <div className="mission-code-surface overflow-hidden rounded border">
+          <div className="border-b border-white/[0.06] bg-white/[0.025] px-2 py-1 font-mono text-[10px] text-stone-500">
+            raw output
+          </div>
+          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap px-2 py-2 text-xs text-stone-300">
+            {rawOutput}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CodexToolCallDetailRow({
+  call,
+  jsonlPath,
+}: {
+  call: CodexToolCall;
+  jsonlPath?: string | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const description = describeCodexToolCall(call);
+  const toolLabel = call.namespace ? `${call.namespace}.${call.toolName}` : call.toolName;
+  const statusTone =
+    call.status === "success"
+      ? "text-emerald-300"
+      : call.status === "error"
+        ? "text-red-300"
+        : "text-amber-300";
+
+  return (
+    <div className="border-t border-white/[0.055] first:border-t-0">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 py-1.5 text-left"
+      >
+        <ChevronRight
+          className={cn(
+            "w-3 h-3 shrink-0 text-neutral-600 transition-transform",
+            expanded && "rotate-90",
+          )}
+        />
+        <span className="min-w-0 flex-1 truncate text-xs text-stone-400">
+          {description.line}
+        </span>
+        <span className="hidden max-w-[160px] truncate font-mono text-[10px] text-stone-700 sm:inline">
+          {toolLabel}
+        </span>
+        <span className={cn("shrink-0 font-mono text-[10px]", statusTone)}>
+          {call.status}
+        </span>
+      </button>
+      {expanded && (
+        <div className="pb-2 pl-5">
+          <CodexToolCallPayloadDetails call={call} jsonlPath={jsonlPath} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CodexToolCallGroupBubble({
+  group,
+  jsonlPath,
+}: {
+  group: CodexToolCallGroup;
+  jsonlPath?: string | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const statusTone =
+    group.status === "success"
+      ? "text-emerald-300"
+      : group.status === "error"
+        ? "text-red-300"
+        : group.status === "mixed"
+          ? "text-orange-300"
+          : "text-amber-300";
+  const preview = group.previewLines.slice(0, 4);
+
+  return (
+    <div className="px-3 py-2">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <Terminal className="w-3.5 h-3.5 shrink-0 text-stone-500" />
+        <span className="min-w-0 truncate text-sm font-semibold text-stone-200">
+          {group.title}
+        </span>
+        {group.subtitle && (
+          <span className="hidden min-w-0 truncate text-xs text-stone-600 md:inline">
+            {group.subtitle}
+          </span>
+        )}
+        <ChevronDown
+          className={cn(
+            "ml-1 w-3.5 h-3.5 shrink-0 text-stone-600 transition-transform",
+            !expanded && "-rotate-90",
+          )}
+        />
+        <span className={cn("ml-auto shrink-0 font-mono text-[10px]", statusTone)}>
+          {group.status}
+        </span>
+        <span className="shrink-0 font-mono text-[10px] text-teal-300/45">
+          {formatTime(group.timestamp)}
+        </span>
+      </button>
+      {expanded ? (
+        <div className="mt-2 pl-5">
+          <div className="border-l border-white/[0.075] pl-3">
+            {group.calls.map((call) => (
+              <CodexToolCallDetailRow
+                key={call.callId}
+                call={call}
+                jsonlPath={jsonlPath}
+              />
+            ))}
+          </div>
+        </div>
+      ) : (
+        preview.length > 0 && (
+          <div className="mt-1 space-y-0.5 pl-6">
+            {preview.map((line, index) => (
+              <div key={`${line}:${index}`} className="truncate text-xs text-stone-600">
+                {line}
+              </div>
+            ))}
+            {group.previewLines.length > preview.length && (
+              <div className="text-xs text-stone-700">
+                +{group.previewLines.length - preview.length} 条
+              </div>
+            )}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+function CodexToolCallBubble({
+  call,
+  jsonlPath,
+}: {
+  call: CodexToolCall;
+  jsonlPath?: string | null;
+}) {
   const [expanded, setExpanded] = useState(false);
   const outputImages = call.outputImages || [];
+  const rawInput = formatRawPayload(call.rawInput);
   const displayTitle = call.displayTitle || "工具调用";
   const toolLabel = call.namespace ? `${call.namespace}.${call.toolName}` : call.toolName;
   const statusTone =
@@ -977,56 +1334,7 @@ function CodexToolCallBubble({
 
       {expanded && (
         <div className="mt-2 space-y-2 pl-5">
-          <div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-600">
-            <span className="font-mono">{call.callId}</span>
-            {call.messageId != null && <span>message_id:{call.messageId}</span>}
-            {call.lineNo != null && <span>call line:{call.lineNo}</span>}
-            {call.outputLineNo != null && <span>output line:{call.outputLineNo}</span>}
-            {call.outputTimestamp && <span>output:{formatTime(call.outputTimestamp)}</span>}
-            {call.source && <span>{call.source}</span>}
-          </div>
-          {call.inputSummary && (
-            <div className="mission-code-surface rounded border px-2 py-1 font-mono text-xs text-stone-400">
-              {call.inputSummary}
-            </div>
-          )}
-          {outputImages.length > 0 && jsonlPath && (
-            <div className="flex flex-wrap gap-2">
-              {outputImages.map((image) => {
-                const src = `/api/conversation-image?path=${encodeURIComponent(jsonlPath)}&toolLine=${image.lineNo}&index=${image.index}`;
-                return (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    key={`${image.lineNo}:${image.index}`}
-                    src={src}
-                    alt={call.displayTitle || call.toolName}
-                    className="max-h-72 max-w-sm rounded-lg border border-white/10 object-contain shadow-sm"
-                    loading="lazy"
-                  />
-                );
-              })}
-            </div>
-          )}
-          {rawInput && (
-            <div className="mission-code-surface overflow-hidden rounded border">
-              <div className="border-b border-white/[0.06] bg-white/[0.025] px-2 py-1 font-mono text-[10px] text-stone-500">
-                raw input
-              </div>
-              <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap px-2 py-2 text-xs text-stone-300">
-                {rawInput}
-              </pre>
-            </div>
-          )}
-          {rawOutput && (
-            <div className="mission-code-surface overflow-hidden rounded border">
-              <div className="border-b border-white/[0.06] bg-white/[0.025] px-2 py-1 font-mono text-[10px] text-stone-500">
-                raw output
-              </div>
-              <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap px-2 py-2 text-xs text-stone-300">
-                {rawOutput}
-              </pre>
-            </div>
-          )}
+          <CodexToolCallPayloadDetails call={call} jsonlPath={jsonlPath} />
         </div>
       )}
     </div>
@@ -2096,6 +2404,7 @@ export function Conversations({
     | { type: "message"; data: ConversationMessage }
     | { type: "event"; data: ConversationEvent }
     | { type: "codex-tool-call"; data: CodexToolCall }
+    | { type: "codex-tool-call-group"; group: CodexToolCallGroup }
     | { type: "turn-header"; turn: ConversationTurn }
     | {
         type: "tool-pair";
@@ -2176,6 +2485,26 @@ export function Conversations({
           continue;
         }
       }
+
+      if (item.type === "codex-tool-call") {
+        const groupCalls = [item.data];
+        let j = i + 1;
+        while (j < sorted.length) {
+          const next = sorted[j];
+          if (next?.type !== "codex-tool-call") break;
+          if (formatDate(next.data.timestamp) !== date) break;
+          groupCalls.push(next.data);
+          j++;
+        }
+        if (groupCalls.length > 1) {
+          flat.push({
+            type: "codex-tool-call-group",
+            group: buildCodexToolCallGroup(groupCalls),
+          });
+          i = j;
+          continue;
+        }
+      }
       flat.push(item);
       i++;
     }
@@ -2201,6 +2530,17 @@ export function Conversations({
         item.data.timestamp,
         item.data.outputTimestamp || "",
         item.data.rawOutput?.length || 0,
+      ].join(":");
+    }
+    if (item.type === "codex-tool-call-group") {
+      const lastCall = item.group.calls[item.group.calls.length - 1];
+      return [
+        item.type,
+        item.group.id,
+        item.group.status,
+        lastCall?.status || "",
+        lastCall?.outputTimestamp || lastCall?.timestamp || "",
+        lastCall?.rawOutput?.length || 0,
       ].join(":");
     }
     if (item.type === "event") {
@@ -3459,6 +3799,14 @@ export function Conversations({
                       }
                       if (item.type === "codex-tool-call") {
                         return <CodexToolCallBubble call={item.data} jsonlPath={jsonlPath} />;
+                      }
+                      if (item.type === "codex-tool-call-group") {
+                        return (
+                          <CodexToolCallGroupBubble
+                            group={item.group}
+                            jsonlPath={jsonlPath}
+                          />
+                        );
                       }
                       if (item.type === "message") {
                         return (

@@ -22,6 +22,9 @@ const AGY_USAGE_PROBE_SLOT: &str = "slot-agy-usage-probe";
 const CODEX_USAGE_PROBE_SLOT: &str = "slot-codex-usage-probe";
 const CODEX_RESEARCH_PROVIDER: &str = "codex_research";
 const CODEX_IMAGE_PROVIDER: &str = "codex_image_generation";
+const CODEX_AGENT_PROVIDER: &str = "codex_agent";
+const CLAUDE_CODE_AGENT_PROVIDER: &str = "claude_code_agent";
+const PROVIDER_AGENT_COMPLETION_ENDPOINT: &str = "/provider-box/v1/turns";
 const CLAUDE_CODE_TEXT_PROVIDER: &str = "claude_code_text";
 const CLAUDE_CODE_DEEP_RESEARCH_PROVIDER: &str = "claude_code_deep_research";
 const CODEX_RESEARCH_PROMPT_PREFIX: &str = "帮我在互联网上进行详细调研以下问题：";
@@ -36,6 +39,7 @@ const CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE: &str = "xhigh";
 const CODEX_EXEC_TEXT_DEFAULT_MAX_CONCURRENT: usize = 4;
 const CODEX_EXEC_TEXT_XHIGH_MAX_CONCURRENT: usize = 2;
 const CODEX_EXEC_TASK_MAX_CONCURRENT: usize = 1;
+const PROVIDER_AGENT_SESSION_MAX_CONCURRENT: usize = 1;
 const CLAUDE_CODE_TEXT_MAX_CONCURRENT: usize = 1;
 const CLAUDE_CODE_DEEP_RESEARCH_MAX_CONCURRENT: usize = 1;
 const MODEL_CATALOG_LIVE_TIMEOUT_SECS: u64 = 20;
@@ -2015,6 +2019,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             append_codex_task_exports(&mut body);
             append_claude_code_text_exports(&mut body);
             append_claude_code_task_exports(&mut body);
+            append_provider_agent_exports(&mut body);
             body["model_export"] = json!({
                 "schema": "missiond.provider-box.model-export.v1",
                 "provider": catalog.provider.clone(),
@@ -2042,6 +2047,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
                 "codex_task_sources": "exported_guarded_static_sources",
                 "claude_code_text_sources": "exported_guarded_static_sources",
                 "claude_code_task_sources": "exported_guarded_static_sources",
+                "provider_agent_sources": "exported_interactive_agent_session_sources",
                 "pure_text_guard": {
                     "prompt_instruction": false,
                     "sidecar_correlation": true,
@@ -2066,6 +2072,7 @@ fn result_response(result: ProviderBoxResult) -> ProviderBoxHttpResponse {
             append_codex_task_router_sources(&mut body);
             append_claude_code_text_router_sources(&mut body);
             append_claude_code_task_router_sources(&mut body);
+            append_provider_agent_router_sources(&mut body);
         }
         body
     } else {
@@ -2639,6 +2646,30 @@ fn append_claude_code_task_router_sources(body: &mut Value) {
     }
 }
 
+fn append_provider_agent_exports(body: &mut Value) {
+    if let Some(data) = body.get_mut("data").and_then(Value::as_array_mut) {
+        data.extend(provider_agent_openai_model_data());
+    }
+    if body.get("provider_agent_sources").is_none() {
+        body["provider_agent_sources"] = json!([]);
+    }
+    if let Some(sources) = body
+        .get_mut("provider_agent_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(provider_agent_sources());
+    }
+}
+
+fn append_provider_agent_router_sources(body: &mut Value) {
+    if let Some(sources) = body
+        .get_mut("router_model_sources")
+        .and_then(Value::as_array_mut)
+    {
+        sources.extend(provider_agent_router_sources());
+    }
+}
+
 fn codex_exec_openai_model_data() -> Vec<Value> {
     codex_exec_text_source_defs()
         .into_iter()
@@ -2698,6 +2729,34 @@ fn codex_task_openai_model_data() -> Vec<Value> {
         .collect()
 }
 
+fn provider_agent_openai_model_data() -> Vec<Value> {
+    provider_agent_source_defs()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "id": def.model_id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "missiond/provider-box-agent",
+                "provider": def.provider,
+                "source_id": def.source_id,
+                "display_name": def.display_name,
+                "provider_model_id": def.provider_model_id,
+                "model": def.provider_model_id,
+                "model_profile": def.model_profile,
+                "mode": "interactive_agent_session",
+                "completion_endpoint": PROVIDER_AGENT_COMPLETION_ENDPOINT,
+                "capabilities": def.capabilities(),
+                "pure_text": false,
+                "agent_source": true,
+                "routeable_default": true,
+                "routeable_status": def.routeable_status,
+                "guarded": true
+            })
+        })
+        .collect()
+}
+
 fn codex_exec_text_only_sources() -> Vec<Value> {
     codex_exec_text_source_defs()
         .into_iter()
@@ -2745,6 +2804,9 @@ fn codex_exec_text_only_sources() -> Vec<Value> {
                     "ignore_rules": true,
                     "isolated_runtime_workspace": true,
                     "shell_tool_disabled": true,
+                    "mcp_apps_disabled": true,
+                    "apps_disabled": true,
+                    "tool_search_disabled": true,
                     "jsonl_tool_event_guard": true,
                     "rejects_tool_messages": true,
                     "rejects_tool_request_fields": true
@@ -2754,6 +2816,88 @@ fn codex_exec_text_only_sources() -> Vec<Value> {
                     "key": codex_export_queue_key("codex_exec_text", "gpt-5.5", def.model_profile),
                     "max_concurrent": codex_export_queue_max_concurrent("codex_exec_text", def.model_profile),
                     "policy": "per_logical_codex_exec_source"
+                }
+            })
+        })
+        .collect()
+}
+
+fn provider_agent_sources() -> Vec<Value> {
+    provider_agent_source_defs()
+        .into_iter()
+        .map(|def| {
+            let mut request_template = json!({
+                "schema": "missiond.provider-interaction-request.v1",
+                "command": "runner-one-shot",
+                "provider": def.provider,
+                "engine": def.engine,
+                "model": def.provider_model_id,
+                "prompt": "<packaged conversation prompt>",
+                "provider_box_lane": "xjpcode-web",
+                "xjp_request_stage": "chat",
+                "desired_worker": {
+                    "spawn_if_missing": true,
+                    "force_restart": false
+                },
+                "no_tools": false,
+                "no_mcp": false,
+                "no_shell": false,
+                "no_file_access": false,
+                "output_contract": {
+                    "media_type": "text/markdown",
+                    "single_turn": true
+                },
+                "timeout_secs": def.timeout_secs
+            });
+            if let Some(profile) = def.model_profile {
+                request_template["model_profile"] = json!(profile);
+                request_template["model_switch_policy"] = json!({
+                    "target_model": def.provider_model_id,
+                    "target_model_profile": profile,
+                    "allow_respawn": true,
+                    "require_verification": true
+                });
+            }
+            json!({
+                "schema": "missiond.provider-agent-source.v1",
+                "source_id": def.source_id,
+                "provider": def.provider,
+                "engine": def.engine,
+                "model_id": def.model_id,
+                "provider_model_id": def.provider_model_id,
+                "model": def.provider_model_id,
+                "display_name": def.display_name,
+                "model_profile": def.model_profile,
+                "mode": "interactive_agent_session",
+                "completion_endpoint": PROVIDER_AGENT_COMPLETION_ENDPOINT,
+                "routeable": true,
+                "routeable_status": def.routeable_status,
+                "request_template": request_template,
+                "session_policy": {
+                    "kind": "xjpcode_session_scoped_provider_box_slot",
+                    "session_key": "extra.xjpcode_session_id",
+                    "slot_id_prefix": def.slot_id_prefix,
+                    "persistent_context": true,
+                    "new_xjpcode_session_allocates_new_slot": true,
+                    "private_slot_exposed": false,
+                    "queue_owner": "provider-box"
+                },
+                "capabilities": def.capabilities(),
+                "guard": {
+                    "interactive_pty": true,
+                    "durable_provider_logs": true,
+                    "provider_box_owns_tools": true,
+                    "external_tool_schemas": false,
+                    "router_generates_provider_interaction_request": true,
+                    "correlation_id_sidecar_only": true,
+                    "private_slot_exposed": false,
+                    "rejects_external_file_attachments": true
+                },
+                "queue": {
+                    "owner": "provider-box",
+                    "key": def.queue_key(),
+                    "max_concurrent": PROVIDER_AGENT_SESSION_MAX_CONCURRENT,
+                    "policy": "per_xjpcode_session_agent_slot"
                 }
             })
         })
@@ -3139,6 +3283,35 @@ fn claude_code_task_router_sources() -> Vec<Value> {
     })]
 }
 
+fn provider_agent_router_sources() -> Vec<Value> {
+    provider_agent_source_defs()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "model_id": def.model_id,
+                "display_name": def.display_name,
+                "routeable": true,
+                "routeable_status": def.routeable_status,
+                "route": {
+                    "router_provider": "MissionDProviderBox",
+                    "provider": def.provider,
+                    "engine": def.engine,
+                    "provider_model_id": def.provider_model_id,
+                    "model_profile": def.model_profile,
+                    "mode": "interactive_agent_session",
+                    "completion_endpoint": PROVIDER_AGENT_COMPLETION_ENDPOINT,
+                    "slot_id_prefix": def.slot_id_prefix,
+                    "external_tool_schemas": false
+                },
+                "blocked_reason": Value::Null,
+                "agent_source": provider_agent_sources()
+                    .into_iter()
+                    .find(|source| source.get("model_id") == Some(&json!(def.model_id)))
+            })
+        })
+        .collect()
+}
+
 fn claude_code_deep_research_capabilities() -> Value {
     json!({
         "text": true,
@@ -3216,6 +3389,20 @@ struct ClaudeCodeTextSourceDef {
     model_profile: &'static str,
 }
 
+#[derive(Clone, Copy)]
+struct ProviderAgentSourceDef {
+    model_id: &'static str,
+    source_id: &'static str,
+    display_name: &'static str,
+    provider: &'static str,
+    engine: &'static str,
+    provider_model_id: &'static str,
+    model_profile: Option<&'static str>,
+    slot_id_prefix: &'static str,
+    routeable_status: &'static str,
+    timeout_secs: u64,
+}
+
 impl CodexTaskSourceDef {
     fn capabilities(self) -> Value {
         json!({
@@ -3232,6 +3419,32 @@ impl CodexTaskSourceDef {
             "files": false,
             "mcp": false,
             "shell": false
+        })
+    }
+}
+
+impl ProviderAgentSourceDef {
+    fn queue_key(self) -> String {
+        format!(
+            "{}:{}:{}:session",
+            self.provider,
+            self.provider_model_id,
+            self.model_profile.unwrap_or("default")
+        )
+    }
+
+    fn capabilities(self) -> Value {
+        json!({
+            "text": true,
+            "tools": true,
+            "vision": false,
+            "files": true,
+            "mcp": true,
+            "shell": true,
+            "provider_box_internal_tools": true,
+            "external_tool_schemas": false,
+            "persistent_context": true,
+            "session_scoped": true
         })
     }
 }
@@ -3310,6 +3523,47 @@ fn claude_code_text_source_defs() -> Vec<ClaudeCodeTextSourceDef> {
             display_name: "ClaudeCode Sonnet 4.6 (high)",
             provider_model_id: "claude-sonnet-4-6",
             model_profile: "high",
+        },
+    ]
+}
+
+fn provider_agent_source_defs() -> Vec<ProviderAgentSourceDef> {
+    vec![
+        ProviderAgentSourceDef {
+            model_id: "missiond-codex-agent-gpt-55-xhigh",
+            source_id: "missiond/codex-agent/gpt-55-xhigh",
+            display_name: "MissionD Codex Agent GPT-5.5 (xhigh)",
+            provider: CODEX_AGENT_PROVIDER,
+            engine: "codex",
+            provider_model_id: "gpt-5.5",
+            model_profile: Some("xhigh"),
+            slot_id_prefix: "xjpcode-codex-agent-gpt-55-xhigh",
+            routeable_status: "provider_box_turns_api",
+            timeout_secs: 600,
+        },
+        ProviderAgentSourceDef {
+            model_id: "missiond-codex-agent-gpt-55-default",
+            source_id: "missiond/codex-agent/gpt-55-default",
+            display_name: "MissionD Codex Agent GPT-5.5 (default reasoning)",
+            provider: CODEX_AGENT_PROVIDER,
+            engine: "codex",
+            provider_model_id: "gpt-5.5",
+            model_profile: None,
+            slot_id_prefix: "xjpcode-codex-agent-gpt-55-default",
+            routeable_status: "provider_box_turns_api",
+            timeout_secs: 600,
+        },
+        ProviderAgentSourceDef {
+            model_id: "missiond-claude-code-agent-opus-4-8-xhigh",
+            source_id: "missiond/claude-code-agent/opus-4-8-xhigh",
+            display_name: "MissionD ClaudeCode Agent Opus 4.8 (xhigh)",
+            provider: CLAUDE_CODE_AGENT_PROVIDER,
+            engine: "claude_code",
+            provider_model_id: "claude-opus-4-8",
+            model_profile: Some(CLAUDE_CODE_DEEP_RESEARCH_MODEL_PROFILE),
+            slot_id_prefix: "xjpcode-claude-code-agent-opus-4-8-xhigh",
+            routeable_status: "provider_box_turns_api",
+            timeout_secs: 900,
         },
     ]
 }
@@ -4109,6 +4363,8 @@ mod tests {
         append_codex_task_router_sources(&mut body);
         append_claude_code_task_exports(&mut body);
         append_claude_code_task_router_sources(&mut body);
+        append_provider_agent_exports(&mut body);
+        append_provider_agent_router_sources(&mut body);
 
         assert!(body["data"]
             .as_array()
@@ -4156,6 +4412,12 @@ mod tests {
             && entry["routeable"] == true
             && entry["routeable_status"] == "live_smoke_passed"));
         assert!(router_sources.iter().any(|entry| entry["model_id"]
+            == "missiond-codex-agent-gpt-55-xhigh"
+            && entry["routeable"] == true
+            && entry["route"]["router_provider"] == "MissionDProviderBox"
+            && entry["route"]["provider"] == CODEX_AGENT_PROVIDER
+            && entry["route"]["completion_endpoint"] == PROVIDER_AGENT_COMPLETION_ENDPOINT));
+        assert!(router_sources.iter().any(|entry| entry["model_id"]
             == CLAUDE_CODE_DEEP_RESEARCH_MODEL_ID
             && entry["routeable"] == true
             && entry["route"]["provider"] == CLAUDE_CODE_DEEP_RESEARCH_PROVIDER
@@ -4189,6 +4451,22 @@ mod tests {
                     && entry["queue"]["key"] == claude_code_deep_research_queue_key()
                     && entry["queue"]["max_concurrent"] == 1
             ));
+        let agent_sources = body["provider_agent_sources"]
+            .as_array()
+            .expect("agent sources");
+        assert!(agent_sources.iter().any(|entry| entry["model_id"]
+            == "missiond-codex-agent-gpt-55-default"
+            && entry["provider"] == CODEX_AGENT_PROVIDER
+            && entry["capabilities"]["tools"] == true
+            && entry["capabilities"]["external_tool_schemas"] == false
+            && entry["request_template"]["no_tools"] == false));
+        assert!(agent_sources.iter().any(|entry| entry["model_id"]
+            == "missiond-claude-code-agent-opus-4-8-xhigh"
+            && entry["provider"] == CLAUDE_CODE_AGENT_PROVIDER
+            && entry["provider_model_id"] == CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL
+            && entry["request_template"]["model_switch_policy"]["target_model"]
+                == CLAUDE_CODE_DEEP_RESEARCH_PROVIDER_MODEL
+            && entry["session_policy"]["private_slot_exposed"] == false));
     }
 
     #[test]
@@ -4306,6 +4584,14 @@ mod tests {
             .expect("router sources")
             .iter()
             .any(|entry| entry["model_id"] == "claude-code-opus-4-8-xhigh"));
+        assert!(response.body["provider_agent_sources"]
+            .as_array()
+            .expect("agent sources")
+            .iter()
+            .any(
+                |entry| entry["model_id"] == "missiond-claude-code-agent-opus-4-8-xhigh"
+                    && entry["completion_endpoint"] == PROVIDER_AGENT_COMPLETION_ENDPOINT
+            ));
     }
 
     #[test]
