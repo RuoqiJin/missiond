@@ -143,8 +143,8 @@ function num(value: unknown): number {
 
 function Stat({ label, value, tone }: { label: string; value: number; tone?: 'warn' | 'good' }) {
   return (
-    <div className="min-w-0 rounded-md border border-neutral-800 bg-neutral-950/70 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wide text-neutral-600">{label}</div>
+    <div className="mission-card-muted min-w-0 px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wide text-stone-500">{label}</div>
       <div className={cn('mt-1 font-mono text-lg leading-none text-neutral-100', tone === 'warn' && 'text-amber-300', tone === 'good' && 'text-emerald-300')}>
         {value}
       </div>
@@ -238,11 +238,11 @@ export function OperationsOverview() {
   };
 
   return (
-    <section className="px-4 pb-2 pt-1 sm:px-8">
-      <div className="grid gap-3 border-y border-neutral-900 bg-neutral-950/35 py-3 xl:grid-cols-[1.15fr_1fr_1fr_1fr]">
+    <section className="px-4 pb-2 pt-3 sm:px-6">
+      <div className="mission-section-band grid gap-3 px-1 py-3 xl:grid-cols-[1.15fr_1fr_1fr_1fr]">
         <div className="min-w-0">
-          <div className="mb-2 flex items-center gap-2 text-xs font-medium text-neutral-300">
-            <Activity className="h-4 w-4 text-orange-400" />
+          <div className="mb-2 flex items-center gap-2 text-xs font-medium text-stone-200">
+            <Activity className="h-4 w-4 text-amber-300" />
             Operations Overview
             {overview?.partial ? (
               <span className="rounded-sm border border-amber-900/60 px-1.5 py-0.5 font-mono text-[10px] text-amber-300">
@@ -266,9 +266,9 @@ export function OperationsOverview() {
           ) : null}
         </div>
 
-        <div className="min-w-0 rounded-md border border-neutral-800 bg-neutral-950/70 p-3">
+        <div className="mission-card min-w-0 p-3">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-medium text-neutral-300">
+            <div className="flex items-center gap-2 text-xs font-medium text-stone-200">
               <Server className="h-4 w-4 text-sky-400" />
               Workers
             </div>
@@ -294,9 +294,9 @@ export function OperationsOverview() {
           </div>
         </div>
 
-        <div className="min-w-0 rounded-md border border-neutral-800 bg-neutral-950/70 p-3">
+        <div className="mission-card min-w-0 p-3">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-medium text-neutral-300">
+            <div className="flex items-center gap-2 text-xs font-medium text-stone-200">
               <ClipboardCheck className="h-4 w-4 text-emerald-400" />
               Evidence
             </div>
@@ -317,9 +317,9 @@ export function OperationsOverview() {
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-          <div className="min-w-0 rounded-md border border-neutral-800 bg-neutral-950/70 p-3">
+          <div className="mission-card min-w-0 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-xs font-medium text-neutral-300">
+              <div className="flex items-center gap-2 text-xs font-medium text-stone-200">
                 <GitBranch className="h-4 w-4 text-violet-300" />
                 Workflow Runs
               </div>
@@ -345,8 +345,8 @@ export function OperationsOverview() {
             </div>
           </div>
 
-          <div className="min-w-0 rounded-md border border-neutral-800 bg-neutral-950/70 p-3">
-            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-neutral-300">
+          <div className="mission-card min-w-0 p-3">
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-stone-200">
               <AlertTriangle className="h-4 w-4 text-amber-400" />
               Blockers
             </div>
@@ -356,9 +356,9 @@ export function OperationsOverview() {
             </div>
           </div>
 
-          <div className="min-w-0 rounded-md border border-neutral-800 bg-neutral-950/70 p-3">
+          <div className="mission-card min-w-0 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-xs font-medium text-neutral-300">
+              <div className="flex items-center gap-2 text-xs font-medium text-stone-200">
                 <Wifi className={cn('h-4 w-4', eventTone)} />
                 Event Health
               </div>
@@ -382,9 +382,9 @@ export function OperationsOverview() {
           </div>
         </div>
 
-        <div className="min-w-0 rounded-md border border-neutral-800 bg-neutral-950/70 p-3 xl:col-span-4">
+        <div className="mission-card min-w-0 p-3 xl:col-span-4">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-medium text-neutral-300">
+            <div className="flex items-center gap-2 text-xs font-medium text-stone-200">
               <AlertTriangle className="h-4 w-4 text-amber-400" />
               Runbook
             </div>

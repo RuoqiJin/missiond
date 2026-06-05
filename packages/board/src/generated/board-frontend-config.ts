@@ -5,7 +5,7 @@
 
 import type { FlowPhase, GroupBy, TaskCategory, TaskPriority, TaskStatus } from '../types';
 
-export type BoardTabId = "jarvis" | "board" | "navigator" | "teach" | "terminal" | "exec" | "codex" | "system" | "knowledge" | "logs";
+export type BoardTabId = "jarvis" | "xjpcode" | "board" | "navigator" | "teach" | "terminal" | "exec" | "codex-conversations" | "codex" | "system" | "knowledge" | "logs";
 export type EventVersionKey = "slotVersion" | "taskVersion" | "questionVersion" | "decisionVersion" | "memoryVersion" | "deployVersion" | "engineVersion" | "timelineVersion";
 
 export interface BoardTabConfig {
@@ -72,11 +72,13 @@ export interface TimelineSwimlaneConfig {
 export const DEFAULT_TAB: BoardTabId = "jarvis";
 export const BOARD_TABS = [
   { id: "jarvis", label: "Jarvis", icon: "Sparkles" },
+  { id: "xjpcode", label: "XJPCode", icon: "Code2" },
   { id: "board", label: "Board", icon: "ClipboardList" },
   { id: "navigator", label: "Navigator", icon: "Compass" },
   { id: "teach", label: "Teach", icon: "GraduationCap" },
   { id: "terminal", label: "Terminal", icon: "MonitorUp" },
   { id: "exec", label: "Exec", icon: "Crosshair" },
+  { id: "codex-conversations", label: "Codex Chat", icon: "MessageSquareText" },
   { id: "codex", label: "Codex Loop", icon: "Repeat2" },
   { id: "system", label: "System", icon: "Gauge" },
   { id: "knowledge", label: "Knowledge", icon: "Brain" },
@@ -88,6 +90,7 @@ export const TAB_MIGRATION = {
   memory: "system",
   engine: "system",
   conversations: "logs",
+  "codex-chat": "codex-conversations",
   timeline: "logs",
   architecture: "knowledge",
   deploy: "board",

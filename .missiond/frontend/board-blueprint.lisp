@@ -69,6 +69,14 @@
               "packages/board/src/store.ts"
               "packages/board/src/app/api/tasks/route.ts"]
       :fields [status priority category assignee autoExecute promptTemplate flowTemplate dependsOn leaseExpiresAt notes])
+    (projection xjpcode-chat-cockpit
+      :source [xjpcode-http-server xjpcode-chat-completions xjpcode-models xjpcode-session]
+      :entry ["packages/board/src/components/XjpcodePanel.tsx"
+              "packages/board/src/app/api/xjpcode/chat/route.ts"
+              "packages/board/src/app/api/xjpcode/status/route.ts"
+              "packages/board/src/app/api/xjpcode/session/route.ts"]
+      :fields [baseUrl sessionId model messages statusFrames contextFrames toolCallFrames toolResultFrames errorFrames]
+      :rule "XJPCode cockpit is a browser UI for the xjpcode HTTP chat runtime, not a MissionD BoardTask worker dispatch form. The Next API proxy forwards /v1/chat/completions SSE frames, /v1/models, and session reset to a loopback xjpcode server by default; browser code never opens arbitrary remote URLs or MissionD daemon sockets directly.")
     (projection next-api-runtime-boundary
       :source [nextjs-route-handler missiond-ipc]
       :entry ["packages/board/src/app/api/master/status/route.ts"]
@@ -103,11 +111,13 @@
     (tabs
       :default jarvis
       (tab :id jarvis :label "Jarvis" :icon Sparkles)
+      (tab :id xjpcode :label "XJPCode" :icon Code2)
       (tab :id board :label "Board" :icon ClipboardList)
       (tab :id navigator :label "Navigator" :icon Compass)
       (tab :id teach :label "Teach" :icon GraduationCap)
       (tab :id terminal :label "Terminal" :icon MonitorUp)
       (tab :id exec :label "Exec" :icon Crosshair)
+      (tab :id codex-conversations :label "Codex Chat" :icon MessageSquareText)
       (tab :id codex :label "Codex Loop" :icon Repeat2)
       (tab :id system :label "System" :icon Gauge)
       (tab :id knowledge :label "Knowledge" :icon Brain)
@@ -117,6 +127,7 @@
       (migration :from memory :to system)
       (migration :from engine :to system)
       (migration :from conversations :to logs)
+      (migration :from codex-chat :to codex-conversations)
       (migration :from timeline :to logs)
       (migration :from architecture :to knowledge)
       (migration :from deploy :to board)
@@ -325,6 +336,17 @@
                (step s6 :logic "surface stale/future timestamps, stopped PTY with durable conversation fallback, and missing MCP readiness as diagnostics"))
         :egress [execution-queue execution-step-digest evidence-panel eventbus-wait-state pty-detail diagnostics]))
 
+    (pillar xjpcode-chat-ui
+      (function xjpcode-chat-cockpit
+        :surface xjpcode-chat-ui
+        :entry [XjpcodePanel xjpcode-next-api xjpcode-http-chat-sse xjpcode-models]
+        :core ((step s1 :logic "resolve loopback xjpcode base URL from UI state or server env")
+               (step s2 :logic "load /v1/models and health through the Next API proxy")
+               (step s3 :logic "submit user input to /v1/chat/completions with a stable session_id")
+               (step s4 :logic "render text frames as assistant chat and status/context/tool frames as turn events")
+               (step s5 :logic "clear xjpcode in-memory session through the proxy when the operator starts a new session"))
+        :egress [xjpcode-message-list xjpcode-turn-events xjpcode-session-control]))
+
     (pillar event-stream-ui
       (function event-stream-cache
         :surface event-stream-ui
@@ -340,7 +362,7 @@
     (pillar timeline-log-ui
       (function timeline-logs
         :surface timeline-log-ui
-        :entry [timeline-api timeline-store CognitiveTimeline LogsConsolidated Conversations]
+        :entry [timeline-api timeline-store CognitiveTimeline LogsConsolidated Conversations CodexConversations]
         :core ((step s1 :logic "fetch events, traces, conversations, transcripts, and system logs through API routes")
                (step s2 :logic "compute timeline lane layout for chat, slot, board, system, and execution events")
                (step s3 :logic "render selection, detail panels, summaries, markdown, JSON, and tool views")
@@ -423,6 +445,15 @@
              "packages/board/src/App.tsx"
              "packages/board/src/app/api/slots/route.ts"
              "packages/board/src/eventStream.ts"])
+    (surface xjpcode-chat-ui
+      :status "code-aligned"
+      :implements [xjpcode-chat-cockpit]
+      :code ["packages/board/src/components/XjpcodePanel.tsx"
+             "packages/board/src/app/api/xjpcode/chat/route.ts"
+             "packages/board/src/app/api/xjpcode/status/route.ts"
+             "packages/board/src/app/api/xjpcode/session/route.ts"
+             "packages/board/src/lib/xjpcodeProxy.ts"
+             "packages/board/src/App.tsx"])
     (surface event-stream-ui
       :status "code-aligned"
       :implements [event-stream-cache]
@@ -439,6 +470,7 @@
              "packages/board/src/components/timeline/stores/timelineStore.ts"
              "packages/board/src/components/LogsConsolidated.tsx"
              "packages/board/src/components/Conversations.tsx"
+             "packages/board/src/components/CodexConversations.tsx"
              "packages/board/src/app/api/timeline/events/route.ts"
              "packages/board/src/app/api/conversations/route.ts"
              "packages/board/src/app/api/transcripts/route.ts"])

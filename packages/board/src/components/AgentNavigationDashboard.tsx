@@ -30,6 +30,39 @@ type CatalogResponse = {
 
 const DEFAULT_INTENT = '我要修改 autopilot 的 BoardTask 完成判定';
 
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || 'Unknown error');
+}
+
+async function fetchNavigation(action: 'catalog' | 'guide', project: string, intent: string): Promise<CatalogResponse> {
+  const params = new URLSearchParams({ action, project });
+  if (intent.trim()) params.set('intent', intent.trim());
+
+  try {
+    const res = await fetch(`/api/agent-navigation?${params.toString()}`);
+    const data = (await res.json().catch((error: unknown) => ({
+      ok: false,
+      error: 'INVALID_RESPONSE',
+      diagnostic: { code: 'INVALID_RESPONSE', message: toErrorMessage(error) },
+    }))) as CatalogResponse;
+    if (!res.ok) {
+      return {
+        ...data,
+        ok: false,
+        error: data.error ?? res.statusText,
+        diagnostic: data.diagnostic ?? { code: `HTTP_${res.status}`, message: data.error ?? res.statusText },
+      };
+    }
+    return data;
+  } catch (error) {
+    return {
+      ok: false,
+      error: 'FETCH_FAILED',
+      diagnostic: { code: 'FETCH_FAILED', message: toErrorMessage(error) },
+    };
+  }
+}
+
 export function AgentNavigationDashboard() {
   const [intent, setIntent] = useState(DEFAULT_INTENT);
   const [project, setProject] = useState('missiond');
@@ -46,10 +79,7 @@ export function AgentNavigationDashboard() {
   const loadCatalog = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ action: 'catalog', project });
-      if (intent.trim()) params.set('intent', intent.trim());
-      const res = await fetch(`/api/agent-navigation?${params.toString()}`);
-      setCatalog(await res.json());
+      setCatalog(await fetchNavigation('catalog', project, intent));
     } finally {
       setLoading(false);
     }
@@ -58,10 +88,7 @@ export function AgentNavigationDashboard() {
   const loadGuide = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ action: 'guide', project });
-      if (intent.trim()) params.set('intent', intent.trim());
-      const res = await fetch(`/api/agent-navigation?${params.toString()}`);
-      setGuide(await res.json());
+      setGuide(await fetchNavigation('guide', project, intent));
     } finally {
       setLoading(false);
     }
@@ -69,17 +96,25 @@ export function AgentNavigationDashboard() {
 
   const sendFeedback = async (outcome: 'used' | 'missed') => {
     setFeedbackState(outcome);
-    await fetch('/api/agent-navigation', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        project,
-        intent,
-        entryId: selected?.id,
-        outcome,
-        agentId: 'board-navigator',
-      }),
-    });
+    try {
+      await fetch('/api/agent-navigation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project,
+          intent,
+          entryId: selected?.id,
+          outcome,
+          agentId: 'board-navigator',
+        }),
+      });
+    } catch (error) {
+      setCatalog({
+        ok: false,
+        error: 'FETCH_FAILED',
+        diagnostic: { code: 'FETCH_FAILED', message: toErrorMessage(error) },
+      });
+    }
     await loadCatalog();
     setFeedbackState('idle');
   };

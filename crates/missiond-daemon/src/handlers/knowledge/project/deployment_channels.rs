@@ -227,24 +227,22 @@ async fn observe_deploy_center(channels: &[Value], include_observed: bool) -> Ve
         for (slug, executors) in slug_executors {
             let provenance_url = format!("{base_url}/provenance/{slug}");
             let provenance_status = fetch_status_without_token(&client, &provenance_url).await;
-            rows.push(
-                json!({
-                    "deploy_center_slug": slug,
-                    "status": if provenance_status == "ok" {
-                        "observed_public_provenance"
-                    } else if base_status == "ok" {
-                        "base_reachable_token_missing"
-                    } else {
-                        "unavailable"
-                    },
-                    "reason": "read token not configured; public provenance fallback used",
-                    "base_url": base_url,
-                    "base_health": base_status,
-                    "provenance": provenance_status,
-                    "token_ref": token_ref,
-                    "executor_refs": executors.into_iter().collect::<Vec<_>>(),
-                }),
-            );
+            rows.push(json!({
+                "deploy_center_slug": slug,
+                "status": if provenance_status == "ok" {
+                    "observed_public_provenance"
+                } else if base_status == "ok" {
+                    "base_reachable_token_missing"
+                } else {
+                    "unavailable"
+                },
+                "reason": "read token not configured; public provenance fallback used",
+                "base_url": base_url,
+                "base_health": base_status,
+                "provenance": provenance_status,
+                "token_ref": token_ref,
+                "executor_refs": executors.into_iter().collect::<Vec<_>>(),
+            }));
         }
         return rows;
     };

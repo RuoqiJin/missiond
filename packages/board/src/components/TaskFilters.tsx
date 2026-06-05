@@ -30,22 +30,22 @@ export function TaskFilters() {
   return (
     <div className="flex flex-col sm:flex-row gap-2 mb-4">
       <div className="relative flex-1">
-        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-500" />
+        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-stone-500" />
         <Input
           value={filters.search}
           onChange={(e) => setFilters({ search: e.target.value })}
           placeholder="搜索..."
-          className="bg-neutral-900 border-neutral-800 text-white pl-8 h-8 text-sm"
+          className="h-8 pl-8 text-sm"
         />
       </div>
 
       <Select value={groupBy} onValueChange={(v) => setGroupBy(v as GroupBy)}>
-        <SelectTrigger className="bg-neutral-900 border-neutral-800 text-white h-8 text-sm w-full sm:w-[110px]">
+        <SelectTrigger className="h-8 w-full text-sm sm:w-[110px]">
           <SelectValue />
         </SelectTrigger>
-        <SelectContent className="bg-neutral-800 border-neutral-700">
+        <SelectContent>
           {GROUP_OPTIONS.map((opt) => (
-            <SelectItem key={opt.value} value={opt.value} className="text-white focus:bg-neutral-700 focus:text-white">
+            <SelectItem key={opt.value} value={opt.value}>
               {opt.label}
             </SelectItem>
           ))}
@@ -53,36 +53,36 @@ export function TaskFilters() {
       </Select>
 
       <Select value={filters.status || 'active'} onValueChange={(v) => setFilters({ status: v as TaskStatus | 'all' | 'active' })}>
-        <SelectTrigger className="bg-neutral-900 border-neutral-800 text-white h-8 text-sm w-full sm:w-[110px]">
+        <SelectTrigger className="h-8 w-full text-sm sm:w-[110px]">
           <SelectValue placeholder="进行中" />
         </SelectTrigger>
-        <SelectContent className="bg-neutral-800 border-neutral-700">
+        <SelectContent>
           {STATUS_OPTIONS.map((opt) => (
-            <SelectItem key={opt.value} value={opt.value} className="text-white focus:bg-neutral-700 focus:text-white">{opt.label}</SelectItem>
+            <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
           ))}
         </SelectContent>
       </Select>
 
       <Select value={filters.category} onValueChange={(v) => setFilters({ category: v as TaskCategory | 'all' })}>
-        <SelectTrigger className="bg-neutral-900 border-neutral-800 text-white h-8 text-sm w-full sm:w-[110px]">
+        <SelectTrigger className="h-8 w-full text-sm sm:w-[110px]">
           <SelectValue placeholder="全部分类" />
         </SelectTrigger>
-        <SelectContent className="bg-neutral-800 border-neutral-700">
-          <SelectItem value="all" className="text-neutral-400 focus:bg-neutral-700 focus:text-white">全部分类</SelectItem>
+        <SelectContent>
+          <SelectItem value="all" className="text-stone-400">全部分类</SelectItem>
           {(Object.entries(CATEGORY_CONFIG) as [TaskCategory, typeof CATEGORY_CONFIG.dev][]).map(([key, conf]) => (
-            <SelectItem key={key} value={key} className="text-white focus:bg-neutral-700 focus:text-white">{conf.label}</SelectItem>
+            <SelectItem key={key} value={key}>{conf.label}</SelectItem>
           ))}
         </SelectContent>
       </Select>
 
       <Select value={filters.priority} onValueChange={(v) => setFilters({ priority: v as TaskPriority | 'all' })}>
-        <SelectTrigger className="bg-neutral-900 border-neutral-800 text-white h-8 text-sm w-full sm:w-[110px]">
+        <SelectTrigger className="h-8 w-full text-sm sm:w-[110px]">
           <SelectValue placeholder="全部优先级" />
         </SelectTrigger>
-        <SelectContent className="bg-neutral-800 border-neutral-700">
-          <SelectItem value="all" className="text-neutral-400 focus:bg-neutral-700 focus:text-white">全部优先级</SelectItem>
+        <SelectContent>
+          <SelectItem value="all" className="text-stone-400">全部优先级</SelectItem>
           {(Object.entries(PRIORITY_CONFIG) as [TaskPriority, typeof PRIORITY_CONFIG.high][]).map(([key, conf]) => (
-            <SelectItem key={key} value={key} className="text-white focus:bg-neutral-700 focus:text-white">
+            <SelectItem key={key} value={key}>
               <span className="flex items-center gap-2">
                 <span className={`w-2 h-2 rounded-full ${conf.dotColor}`} />
                 {conf.label}

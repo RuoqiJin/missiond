@@ -34,6 +34,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "type": "integer",
                     "description": "Max results (default 50)",
                     "default": 50
+                },
+                "includeRaw": {
+                    "type": "boolean",
+                    "description": "[thread] Include raw tool input/output payloads"
                 }
             }
         }),

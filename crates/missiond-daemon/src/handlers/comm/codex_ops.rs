@@ -164,13 +164,17 @@ async fn handle_thread(state: &AppState, args: Value) -> Result<ToolResult> {
         tool_filter: Option<String>,
         #[serde(default, deserialize_with = "lenient::option_i64")]
         limit: Option<i64>,
+        #[serde(default, deserialize_with = "lenient::option_bool")]
+        include_raw: Option<bool>,
     }
     let Args {
         thread_id,
         tool_filter,
         limit,
+        include_raw,
     } = serde_json::from_value(args)?;
     let limit = limit.unwrap_or(500);
+    let include_raw = include_raw.unwrap_or(false);
 
     // Get conversation metadata.
     let conv = state
@@ -205,15 +209,21 @@ async fn handle_thread(state: &AppState, args: Value) -> Result<ToolResult> {
     let mut call_entries: Vec<Value> = calls
         .into_iter()
         .map(|tc| {
-            json!({
+            let mut entry = json!({
                 "call_id": tc.id,
+                "message_id": tc.message_id,
                 "tool_name": tc.tool_name,
                 "input_summary": tc.input_summary,
                 "output_summary": tc.output_summary,
                 "status": tc.status,
                 "duration_ms": tc.duration_ms,
                 "timestamp": tc.timestamp,
-            })
+            });
+            if include_raw {
+                entry["raw_input"] = json!(tc.raw_input);
+                entry["raw_output"] = json!(tc.raw_output);
+            }
+            entry
         })
         .collect();
 

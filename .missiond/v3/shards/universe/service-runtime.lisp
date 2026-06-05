@@ -719,17 +719,20 @@
       :backend ".missiond/backend/code-center-backend-blueprint.lisp"
       :environment production
       :api-base-url "https://code.xiaojins.com/api/code"
-      :domains ["code.xiaojins.com"]
+      :codebase-api-base-url "https://code.xiaojins.com/api/codebase"
+      :git-ssh-remote "ssh://git@codebase.xiaojins.com:2222/xiaojinpro-backend.git"
+      :domains ["code.xiaojins.com" "codebase.xiaojins.com"]
       :dns-provider xjp-domain-service
       :dns-record (:type A :name "code.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
+      :git-dns-record (:type A :name "codebase.xiaojins.com" :content "34.104.147.118" :proxied false :ttl 60 :authority xjp-domain-service)
       :deployment (:substrate deploy-center :dc_slug "xjp-code-center" :runtime-target gcp-runtime :executor gcp-agent :container "xjp-code-center" :default-port 8093 :host-bind "127.0.0.1:8093" :authority release-provenance)
-      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync deploy-center-codebase :dockerfile "docker/Dockerfile.code-center" :image "ghcr.io/ruoqijin/xjp-code-center" :artifact-lane cloud-registry-lane :manifest "services/code-center/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
-      :proxy (:kind caddy :domain "code.xiaojins.com" :routes ["/health" "/health/*" "/api/code" "/api/code/*"] :upstream "localhost:8093")
-      :ports (:http 8093)
-      :health ["/health/live" "/health/ready" "/api/code/health"]
-      :dependencies [xjp-auth xjp-pg-prod redis? secret-store?]
+      :build-lane (:id privatecloud-rust-build-lane :builder privatecloud-10900kf :executor privatecloud-agent :source-sync xjp-codebase :source-provider xjp-codebase :canonical-remote "ssh://git@codebase.xiaojins.com:2222/xiaojinpro-backend.git" :github-mirror "https://github.com/xiaojinpro-team/xiaojinpro-backend.git" :dockerfile "docker/Dockerfile.code-center" :image "ghcr.io/ruoqijin/xjp-code-center" :artifact-lane cloud-registry-lane :manifest "services/code-center/service.manifest.toml" :authority deploy-center :target-side-build-prohibited true)
+      :proxy (:kind caddy :domain "code.xiaojins.com" :routes ["/health" "/health/*" "/api/code" "/api/code/*" "/api/codebase" "/api/codebase/*"] :upstream "localhost:8093" :note "Caddy handles HTTP only; Git SSH is exposed directly on codebase.xiaojins.com:2222.")
+      :ports (:http 8093 :git-ssh 2222)
+      :health ["/health/live" "/health/ready" "/api/code/health" "/api/codebase/health"]
+      :dependencies [xjp-auth xjp-pg-prod redis? secret-store deploy-center]
       :ops-capability deploy-ops
-      :source-evidence [services/code-center/service.manifest.toml docker/Dockerfile.code-center deploy/gcp-vm/xjp-postgres-stack/docker-compose.yml]
+      :source-evidence [services/code-center/service.manifest.toml docker/Dockerfile.code-center services/code-center/scripts/codebase-entrypoint.sh deploy/gcp-vm/xjp-postgres-stack/docker-compose.yml]
       :surface service-runtime-universe)
     (service :id skill-store-gateway
       :project skill-store

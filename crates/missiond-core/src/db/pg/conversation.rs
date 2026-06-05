@@ -2275,7 +2275,7 @@ impl ConversationStore for PgMissionStore {
             let placeholders: Vec<String> =
                 (0..filter.len()).map(|i| format!("${}", i + 2)).collect();
             let sql = format!(
-                "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp
+                "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms::bigint, timestamp
                  FROM conversation_tool_calls WHERE session_id = $1 AND tool_name IN ({}) ORDER BY id ASC LIMIT ${}",
                 placeholders.join(","),
                 filter.len() + 2
@@ -2321,7 +2321,7 @@ impl ConversationStore for PgMissionStore {
                 .collect())
         } else {
             let rows: Vec<(String, String, Option<i64>, String, Option<String>, Option<String>, Option<String>, Option<String>, String, Option<i64>, String)> = sqlx::query_as(
-                "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp
+                "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms::bigint, timestamp
                  FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC LIMIT $2"
             )
             .bind(session_id)
@@ -2349,7 +2349,7 @@ impl ConversationStore for PgMissionStore {
 
     async fn get_tool_call_by_id(&self, tool_use_id: &str) -> DbResult<Option<ToolCallRecord>> {
         let row: Option<(String, String, Option<i64>, String, Option<String>, Option<String>, Option<String>, Option<String>, String, Option<i64>, String)> = sqlx::query_as(
-            "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp
+            "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms::bigint, timestamp
              FROM conversation_tool_calls WHERE id = $1"
         )
         .bind(tool_use_id)

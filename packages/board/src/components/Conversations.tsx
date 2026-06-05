@@ -49,11 +49,13 @@ interface Conversation {
   taskId: string | null;
   messageCount: number;
   startedAt: string;
+  updatedAt?: string | null;
   endedAt: string | null;
   status: string;
   conversationType: string;
   chatType: string | null;
   llmSummary: string | null;
+  labels?: [string, string][];
 }
 
 interface ConversationMessage {
@@ -95,6 +97,41 @@ interface ConversationTurn {
   topic: string | null;
 }
 
+type ConversationViewMode =
+  | "conversations"
+  | "workers"
+  | "gemini"
+  | "jarvis"
+  | "codex";
+
+interface ConversationsProps {
+  fixedViewMode?: ConversationViewMode;
+  storageScope?: string;
+  hideViewTabs?: boolean;
+}
+
+interface CodexToolCall {
+  callId: string;
+  messageId: number | null;
+  toolName: string;
+  namespace?: string | null;
+  displayTitle?: string | null;
+  inputSummary: string | null;
+  rawInput: string | null;
+  outputSummary: string | null;
+  rawOutput: string | null;
+  outputImages?: { lineNo: number; index: number; mediaType: string }[];
+  status: string;
+  durationMs: number | null;
+  timestamp: string;
+  outputTimestamp?: string | null;
+  source?: string | null;
+  rawCallJson?: string | null;
+  rawOutputJson?: string | null;
+  lineNo?: number | null;
+  outputLineNo?: number | null;
+}
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -114,6 +151,56 @@ function formatTime(dateStr: string): string {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+const CODEX_REQUEST_MARKER = "## My request for Codex:";
+
+function extractUserDisplayContent(content: string | null | undefined): string {
+  const text = (content || "").trim();
+  const markerIndex = text.indexOf(CODEX_REQUEST_MARKER);
+  if (markerIndex < 0) return text;
+
+  const requestText = text.slice(markerIndex + CODEX_REQUEST_MARKER.length).trim();
+  return requestText || text;
+}
+
+function makeUserPreview(content: string | null | undefined, maxLength = 120): string {
+  const preview = extractUserDisplayContent(content).replace(/\s+/g, " ").trim();
+  return preview.length > maxLength ? preview.slice(0, maxLength) : preview;
+}
+
+function isCodexPtyPlaceholder(conv: Conversation): boolean {
+  return (
+    conv.source === "codex_cli" &&
+    !conv.jsonlPath &&
+    conv.id.startsWith("pty-") &&
+    conv.messageCount === 0
+  );
+}
+
+function conversationDisplayStatus(
+  conv: Conversation,
+): "active" | "completed" | "compacted" | "placeholder" {
+  if (isCodexPtyPlaceholder(conv)) return "placeholder";
+  if (conv.status === "compacted") return "compacted";
+  if (conv.status === "active") return "active";
+  return "completed";
+}
+
+function conversationStatusLabel(conv: Conversation): string {
+  const status = conversationDisplayStatus(conv);
+  if (status === "active") return "进行中";
+  if (status === "compacted") return "已压缩";
+  if (status === "placeholder") return "占位";
+  return "已完成";
+}
+
+function conversationStatusClass(conv: Conversation): string {
+  const status = conversationDisplayStatus(conv);
+  if (status === "active") return "text-emerald-300";
+  if (status === "compacted") return "text-amber-300";
+  if (status === "placeholder") return "text-amber-300/70";
+  return "text-stone-600";
 }
 
 function formatDate(dateStr: string): string {
@@ -195,13 +282,118 @@ function ImageBlock({
         src={src}
         alt="用户截图"
         className={cn(
-          "rounded-lg border border-neutral-700 cursor-pointer transition-all hover:border-neutral-500",
+          "cursor-pointer rounded-lg border border-white/10 shadow-sm transition-all hover:border-teal-300/40",
           expanded ? "max-w-full" : "max-w-sm max-h-64 object-cover",
         )}
         onClick={() => setExpanded(!expanded)}
         loading="lazy"
       />
     </div>
+  );
+}
+
+function memoryCitationCount(block: string): number {
+  const match = block.match(/<citation_entries>\s*([\s\S]*?)\s*<\/citation_entries>/);
+  if (!match) return 0;
+  return match[1].split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length;
+}
+
+function CollapsedRuntimeBlock({
+  label,
+  raw,
+  tone,
+}: {
+  label: string;
+  raw: string;
+  tone: "memory" | "abort";
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div
+      className={cn(
+        "my-2 rounded-md border px-2 py-1 text-xs",
+        tone === "memory"
+          ? "border-cyan-500/20 bg-cyan-500/5 text-cyan-300"
+          : "border-rose-500/20 bg-rose-500/5 text-rose-300",
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full items-center gap-1 text-left font-medium"
+      >
+        <ChevronRight
+          className={cn(
+            "h-3 w-3 shrink-0 transition-transform",
+            expanded && "rotate-90",
+          )}
+        />
+        {label}
+      </button>
+      {expanded && (
+        <pre className="mission-code-surface mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded-md p-2 font-mono text-[10px] text-stone-500">
+          {raw}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function MessageTextContent({ content }: { content: string }) {
+  const blocks = useMemo(() => {
+    const parts: Array<
+      | { type: "text"; value: string }
+      | { type: "memory"; value: string; count: number }
+      | { type: "abort"; value: string }
+    > = [];
+    const pattern = /<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>|<turn_aborted>[\s\S]*?<\/turn_aborted>/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(content)) != null) {
+      if (match.index > lastIndex) {
+        parts.push({ type: "text", value: content.slice(lastIndex, match.index) });
+      }
+      const value = match[0];
+      if (value.startsWith("<oai-mem-citation>")) {
+        parts.push({ type: "memory", value, count: memoryCitationCount(value) });
+      } else {
+        parts.push({ type: "abort", value });
+      }
+      lastIndex = match.index + value.length;
+    }
+    if (lastIndex < content.length) {
+      parts.push({ type: "text", value: content.slice(lastIndex) });
+    }
+    return parts;
+  }, [content]);
+
+  if (blocks.length === 1 && blocks[0]?.type === "text") return <>{content}</>;
+
+  return (
+    <>
+      {blocks.map((block, index) => {
+        if (block.type === "text") return <span key={index}>{block.value}</span>;
+        if (block.type === "memory") {
+          const count = block.count || 0;
+          return (
+            <CollapsedRuntimeBlock
+              key={index}
+              label={`${count} 条记忆引用`}
+              raw={block.value}
+              tone="memory"
+            />
+          );
+        }
+        return (
+          <CollapsedRuntimeBlock
+            key={index}
+            label="用户终止"
+            raw={block.value}
+            tone="abort"
+          />
+        );
+      })}
+    </>
   );
 }
 
@@ -234,7 +426,9 @@ function MessageContent({
       <>
         {blocks.map((block, i) => {
           if (block.type === "text") {
-            return <span key={i}>{block.text as string}</span>;
+            return (
+              <MessageTextContent key={i} content={(block.text as string) || ""} />
+            );
           }
           if (block.type === "image") {
             const idx = imageIdx++;
@@ -261,7 +455,19 @@ function MessageContent({
   }
 
   // Fallback: plain text
-  return <>{msg.content}</>;
+  return <MessageTextContent content={msg.content} />;
+}
+
+function rawContentHasImage(rawContent: string | null | undefined): boolean {
+  if (!rawContent) return false;
+  try {
+    const blocks = JSON.parse(rawContent);
+    return Array.isArray(blocks) &&
+      blocks.some((block: Record<string, unknown>) => block?.type === "image");
+  } catch {
+    return rawContent.includes('"type":"image"') ||
+      rawContent.includes('"type": "image"');
+  }
 }
 
 const LABEL_STYLES: Record<
@@ -394,10 +600,10 @@ function FileViewer({
   const isMarkdown = lang === "markdown";
 
   return (
-    <div className="border border-neutral-800/60 rounded-md overflow-hidden my-1">
+    <div className="mission-code-surface my-1 overflow-hidden rounded-md border">
       <button
         onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 text-left bg-neutral-900/80 hover:bg-neutral-800/60 transition-colors"
+        className="flex w-full items-center gap-2 bg-white/[0.025] px-3 py-1.5 text-left transition-colors hover:bg-white/[0.05]"
       >
         <ChevronRight
           className={cn(
@@ -408,10 +614,10 @@ function FileViewer({
         <span className="text-xs font-mono text-cyan-400 truncate">
           {fileName}
         </span>
-        <span className="text-[10px] text-neutral-600 truncate hidden sm:inline">
+        <span className="hidden truncate text-[10px] text-stone-600 sm:inline">
           {filePath}
         </span>
-        <span className="text-[10px] text-neutral-600 ml-auto flex-shrink-0">
+        <span className="ml-auto flex-shrink-0 text-[10px] text-stone-600">
           {lineCount} lines · {lang}
         </span>
       </button>
@@ -421,10 +627,10 @@ function FileViewer({
             <MarkdownContent content={cleaned} />
           </div>
         ) : (
-          <pre className="px-3 py-2 text-xs font-mono overflow-auto max-h-[600px] bg-neutral-950/50 text-neutral-300">
+          <pre className="max-h-[600px] overflow-auto px-3 py-2 font-mono text-xs text-stone-300">
             {cleaned.split("\n").map((line, i) => (
               <div key={i} className="flex">
-                <span className="w-10 text-right pr-3 text-neutral-700 select-none flex-shrink-0">
+                <span className="w-10 flex-shrink-0 select-none pr-3 text-right text-stone-700">
                   {i + 1}
                 </span>
                 <span className="flex-1">{line}</span>
@@ -451,10 +657,10 @@ function DiffViewer({
   const isSuccess = result.includes("updated successfully");
 
   return (
-    <div className="border border-neutral-800/60 rounded-md overflow-hidden my-1">
+    <div className="mission-code-surface my-1 overflow-hidden rounded-md border">
       <button
         onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 text-left bg-neutral-900/80 hover:bg-neutral-800/60 transition-colors"
+        className="flex w-full items-center gap-2 bg-white/[0.025] px-3 py-1.5 text-left transition-colors hover:bg-white/[0.05]"
       >
         <ChevronRight
           className={cn(
@@ -464,14 +670,14 @@ function DiffViewer({
         />
         <span className="text-xs font-mono text-amber-400">{fileName}</span>
         {isSuccess && (
-          <span className="text-[10px] text-green-500">✓ updated</span>
+          <span className="text-[10px] text-emerald-300">updated</span>
         )}
-        <span className="text-[10px] text-neutral-600 truncate hidden sm:inline ml-auto">
+        <span className="ml-auto hidden truncate text-[10px] text-stone-600 sm:inline">
           {filePath}
         </span>
       </button>
       {expanded && (
-        <div className="px-3 py-2 text-xs text-neutral-400 whitespace-pre-wrap">
+        <div className="whitespace-pre-wrap px-3 py-2 text-xs text-stone-400">
           {result}
         </div>
       )}
@@ -494,10 +700,10 @@ function TerminalViewer({
   const [expanded, setExpanded] = useState(isShort);
 
   return (
-    <div className="border border-neutral-800/60 rounded-md overflow-hidden my-1">
+    <div className="mission-code-surface my-1 overflow-hidden rounded-md border">
       <button
         onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 text-left bg-neutral-900/80 hover:bg-neutral-800/60 transition-colors"
+        className="flex w-full items-center gap-2 bg-white/[0.025] px-3 py-1.5 text-left transition-colors hover:bg-white/[0.05]"
       >
         <ChevronRight
           className={cn(
@@ -509,16 +715,16 @@ function TerminalViewer({
         <span className="text-xs font-mono text-green-400 truncate">
           {description || command.slice(0, 60)}
         </span>
-        <span className="text-[10px] text-neutral-600 ml-auto flex-shrink-0">
+        <span className="ml-auto flex-shrink-0 text-[10px] text-stone-600">
           {lines.length} lines
         </span>
       </button>
       {expanded && (
-        <div className="bg-neutral-950/80">
-          <div className="px-3 py-1 text-[10px] font-mono text-neutral-600 border-b border-neutral-800/50 break-all">
+        <div>
+          <div className="break-all border-b border-white/[0.06] px-3 py-1 font-mono text-[10px] text-stone-600">
             $ {command}
           </div>
-          <pre className="px-3 py-2 text-xs font-mono overflow-auto max-h-[400px] text-neutral-300 whitespace-pre-wrap">
+          <pre className="max-h-[400px] overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-xs text-stone-300">
             {result}
           </pre>
         </div>
@@ -540,18 +746,18 @@ function ToolPairFallback({
   const [expanded, setExpanded] = useState(!isLarge);
   return (
     <div className="space-y-1">
-      <div className="text-xs text-neutral-500 font-mono whitespace-pre-wrap break-words">
+      <div className="whitespace-pre-wrap break-words font-mono text-xs text-stone-500">
         {call.content}
       </div>
       {isLarge && !expanded ? (
         <button
           onClick={() => setExpanded(true)}
-          className="text-[11px] text-cyan-500 hover:text-cyan-400 border-l-2 border-neutral-800 pl-2"
+          className="border-l-2 border-teal-400/25 pl-2 text-[11px] text-teal-300 hover:text-teal-200"
         >
           ▶ 展开结果 ({result.content.length.toLocaleString()} chars)
         </button>
       ) : (
-        <div className="text-xs text-neutral-400 whitespace-pre-wrap break-words border-l-2 border-neutral-800 pl-2 max-h-[300px] overflow-auto">
+        <div className="max-h-[300px] overflow-auto whitespace-pre-wrap break-words border-l-2 border-white/[0.08] pl-2 text-xs text-stone-400">
           {result.content}
         </div>
       )}
@@ -582,7 +788,7 @@ function ToolPairBubble({
     : call.content.replace(/^\[Tool: \w+\]\s*/, "").slice(0, 80);
 
   return (
-    <div className="border-b border-neutral-800/30 py-2">
+    <div className="mission-tool-row px-3 py-2">
       {/* Compact header — clickable to toggle */}
       <div
         className="flex items-center gap-2 flex-wrap cursor-pointer select-none"
@@ -596,18 +802,18 @@ function ToolPairBubble({
         />
         <Icon className={cn("w-3.5 h-3.5", config.color)} />
         <span className={cn("text-sm font-semibold", config.color)}>
-          🔧 工具调用 (msg {call.id})
+          工具调用 (msg {call.id})
         </span>
-        <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-neutral-800 text-amber-300">
+        <span className="rounded-md border border-amber-400/15 bg-amber-400/10 px-1.5 py-0.5 font-mono text-xs text-amber-200">
           {toolName}
         </span>
         {labels && labels.length > 0 && <LabelBadges labels={labels} />}
         {!expanded && (
-          <span className="text-xs text-neutral-600 truncate max-w-[400px] ml-1 font-mono">
+          <span className="ml-1 max-w-[400px] truncate font-mono text-xs text-stone-600">
             {preview}
           </span>
         )}
-        <span className="text-[10px] text-cyan-500/50 font-mono ml-auto">
+        <span className="ml-auto font-mono text-[10px] text-teal-300/45">
           {call.timestamp.split("T")[1]?.split(".")[0] || call.timestamp}
         </span>
       </div>
@@ -629,6 +835,143 @@ function ToolPairBubble({
             <ToolPairFallback call={call} result={result} />
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+function formatRawPayload(value: string | null): string {
+  if (!value) return "";
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+function CodexToolCallBubble({
+  call,
+  jsonlPath,
+}: {
+  call: CodexToolCall;
+  jsonlPath?: string | null;
+}) {
+  const rawInput = formatRawPayload(call.rawInput);
+  const rawOutput = formatRawPayload(call.rawOutput);
+  const [expanded, setExpanded] = useState(false);
+  const outputImages = call.outputImages || [];
+  const displayTitle = call.displayTitle || "工具调用";
+  const toolLabel = call.namespace ? `${call.namespace}.${call.toolName}` : call.toolName;
+  const statusTone =
+    call.status === "success"
+      ? "text-emerald-300 bg-emerald-500/10 border-emerald-500/20"
+      : call.status === "error"
+        ? "text-red-300 bg-red-500/10 border-red-500/20"
+        : "text-amber-300 bg-amber-500/10 border-amber-500/20";
+  const preview =
+    (call.displayTitle && call.inputSummary !== call.displayTitle ? call.inputSummary : null) ||
+    (rawInput ? rawInput.slice(0, 160).replace(/\n/g, " ") : "") ||
+    call.outputSummary ||
+    "";
+
+  return (
+    <div className="mission-tool-row px-3 py-2">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <ChevronRight
+          className={cn(
+            "w-3 h-3 shrink-0 text-neutral-600 transition-transform",
+            expanded && "rotate-90",
+          )}
+        />
+        <Wrench className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+        <span className="min-w-0 truncate text-sm font-semibold text-amber-300">
+          {displayTitle}
+        </span>
+        <span className="max-w-[180px] truncate rounded-md border border-amber-400/15 bg-amber-400/10 px-1.5 py-0.5 font-mono text-xs text-amber-200">
+          {toolLabel}
+        </span>
+        <span className="hidden max-w-[170px] truncate font-mono text-[10px] text-stone-600 sm:inline">
+          {call.callId}
+        </span>
+        <span className={cn("shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-mono", statusTone)}>
+          {call.status}
+        </span>
+        {call.durationMs != null && (
+          <span className="shrink-0 font-mono text-[10px] text-stone-600">
+            {call.durationMs}ms
+          </span>
+        )}
+        {outputImages.length > 0 && (
+          <span className="shrink-0 rounded border border-teal-400/20 bg-teal-400/10 px-1.5 py-0.5 font-mono text-[10px] text-teal-200">
+            {outputImages.length} screenshot{outputImages.length > 1 ? "s" : ""}
+          </span>
+        )}
+        {!expanded && preview && (
+          <span className="min-w-0 flex-1 truncate font-mono text-xs text-stone-600">
+            {preview}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 font-mono text-[10px] text-teal-300/45">
+          {formatTime(call.timestamp)}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="mt-2 space-y-2 pl-5">
+          <div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-600">
+            <span className="font-mono">{call.callId}</span>
+            {call.messageId != null && <span>message_id:{call.messageId}</span>}
+            {call.lineNo != null && <span>call line:{call.lineNo}</span>}
+            {call.outputLineNo != null && <span>output line:{call.outputLineNo}</span>}
+            {call.outputTimestamp && <span>output:{formatTime(call.outputTimestamp)}</span>}
+            {call.source && <span>{call.source}</span>}
+          </div>
+          {call.inputSummary && (
+            <div className="mission-code-surface rounded border px-2 py-1 font-mono text-xs text-stone-400">
+              {call.inputSummary}
+            </div>
+          )}
+          {outputImages.length > 0 && jsonlPath && (
+            <div className="flex flex-wrap gap-2">
+              {outputImages.map((image) => {
+                const src = `/api/conversation-image?path=${encodeURIComponent(jsonlPath)}&toolLine=${image.lineNo}&index=${image.index}`;
+                return (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    key={`${image.lineNo}:${image.index}`}
+                    src={src}
+                    alt={call.displayTitle || call.toolName}
+                    className="max-h-72 max-w-sm rounded-lg border border-white/10 object-contain shadow-sm"
+                    loading="lazy"
+                  />
+                );
+              })}
+            </div>
+          )}
+          {rawInput && (
+            <div className="mission-code-surface overflow-hidden rounded border">
+              <div className="border-b border-white/[0.06] bg-white/[0.025] px-2 py-1 font-mono text-[10px] text-stone-500">
+                raw input
+              </div>
+              <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap px-2 py-2 text-xs text-stone-300">
+                {rawInput}
+              </pre>
+            </div>
+          )}
+          {rawOutput && (
+            <div className="mission-code-surface overflow-hidden rounded border">
+              <div className="border-b border-white/[0.06] bg-white/[0.025] px-2 py-1 font-mono text-[10px] text-stone-500">
+                raw output
+              </div>
+              <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap px-2 py-2 text-xs text-stone-300">
+                {rawOutput}
+              </pre>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -685,9 +1028,10 @@ function UserMessageMinimap({
   if (allMarkers.length === 0) return null;
 
   return (
-    <div className="w-36 flex-shrink-0 border-l border-neutral-800/50 overflow-y-auto">
-      <div className="sticky top-0 bg-neutral-950 px-2 py-1.5 text-[9px] text-neutral-600 border-b border-neutral-800/30 z-10">
-        👤 {allMarkers.length} 条用户消息
+    <div className="mission-minimap w-36 flex-shrink-0 overflow-y-auto border-l">
+      <div className="mission-minimap-header sticky top-0 z-10 flex items-center gap-1.5 border-b px-2 py-1.5 text-[9px] text-stone-500">
+        <User className="h-3 w-3 text-teal-300/70" />
+        {allMarkers.length} 条用户消息
       </div>
       <div className="py-1">
         {allMarkers.map((m) => {
@@ -710,10 +1054,10 @@ function UserMessageMinimap({
                 }
               }}
               className={cn(
-                "w-full text-left px-2 py-1 transition-colors",
+                "w-full border-l-2 px-2 py-1 text-left transition-colors",
                 isActive
-                  ? "bg-blue-500/20 border-l-2 border-blue-400"
-                  : "hover:bg-neutral-800/50 border-l-2 border-transparent",
+                  ? "mission-minimap-active"
+                  : "border-transparent hover:bg-white/[0.045]",
                 !isLoaded && "opacity-50",
               )}
               title={isLoaded ? m.preview : `${m.preview}\n(点击加载此区域)`}
@@ -721,13 +1065,13 @@ function UserMessageMinimap({
               <div className="flex items-center gap-1">
                 <div className={cn(
                   "w-1.5 h-1.5 rounded-full flex-shrink-0",
-                  isActive ? "bg-blue-400" : "bg-blue-400/50",
+                  isActive ? "bg-teal-300" : "bg-teal-300/45",
                 )} />
-                <span className={cn("text-[9px]", isActive ? "text-blue-300" : "text-neutral-600")}>{m.time}</span>
+                <span className={cn("text-[9px]", isActive ? "text-teal-100" : "text-stone-600")}>{m.time}</span>
               </div>
               <p className={cn(
                 "text-[10px] truncate pl-2.5",
-                isActive ? "text-blue-200/80" : "text-neutral-600",
+                isActive ? "text-teal-50/75" : "text-stone-600",
               )}>
                 {m.preview || "(空)"}
               </p>
@@ -741,6 +1085,7 @@ function UserMessageMinimap({
 
 // Roles that are collapsed by default — only show a summary header
 const COLLAPSED_ROLES = new Set([
+  "system",
   "thinking",
   "agent_user",
   "agent_assistant",
@@ -772,22 +1117,8 @@ function MessageBubble({
 
   // Check if this message has images (use rich rendering for those)
   const hasImages =
-    msg.rawContent?.includes('"type":"image"') ||
+    rawContentHasImage(msg.rawContent) ||
     msg.content.includes("[图片]");
-
-  // Role display with emoji
-  const roleEmoji: Record<string, string> = {
-    user: "👤",
-    assistant: "🤖",
-    tool_use: "🔧",
-    tool_result: "🔧",
-    thinking: "🧠",
-    system: "⚙️",
-    worker_user: "⌨",
-    agent_user: "👤",
-    agent_assistant: "🤖",
-    compact_summary: "📋",
-  };
 
   // Extract a short preview for collapsed state
   const preview = isCollapsible
@@ -796,7 +1127,7 @@ function MessageBubble({
     : "";
 
   return (
-    <div className="border-b border-neutral-800/30 py-3">
+    <div className="mission-message-row py-3.5">
       {/* Header: role + msg ID + timestamp + tool */}
       <div
         className={cn(
@@ -815,23 +1146,21 @@ function MessageBubble({
         )}
         <Icon className={cn("w-3.5 h-3.5", config.color)} />
         <span className={cn("text-sm font-semibold", config.color)}>
-          {isSlot ? "⚙️" : roleEmoji[msg.role] || "📄"}{" "}
-          {isSlot ? msg.roleDisplay : msg.roleDisplay || config.label} (msg{" "}
-          {msg.id})
+          {isSlot ? msg.roleDisplay : msg.roleDisplay || config.label} (msg {msg.id})
         </span>
         {msg.toolName && (
-          <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-neutral-800 text-amber-300">
+          <span className="rounded-md border border-amber-400/15 bg-amber-400/10 px-1.5 py-0.5 font-mono text-xs text-amber-200">
             {msg.toolName}
           </span>
         )}
         {labels && labels.length > 0 && <LabelBadges labels={labels} />}
         {!expanded && (
-          <span className="text-xs text-neutral-600 truncate max-w-[400px] ml-1">
+          <span className="ml-1 max-w-[400px] truncate text-xs text-stone-500">
             {preview}
           </span>
         )}
         {!expanded && (
-          <span className="text-[10px] text-neutral-700 ml-auto flex-shrink-0">
+          <span className="ml-auto flex-shrink-0 text-[10px] text-stone-600">
             {msg.content.length.toLocaleString()} chars
           </span>
         )}
@@ -840,13 +1169,13 @@ function MessageBubble({
       {expanded && (
         <>
           {/* Timestamp line */}
-          <div className="text-xs text-cyan-500/70 mb-2 mt-1.5 font-mono">
+          <div className="mb-2 mt-1.5 font-mono text-xs text-teal-300/[0.68]">
             {msg.timestamp}
             {msg.model && (
-              <span className="ml-3 text-neutral-600">{msg.model}</span>
+              <span className="ml-3 text-stone-500">{msg.model}</span>
             )}
             {msg.seq != null && (
-              <span className="ml-3 text-neutral-700">seq:{msg.seq}</span>
+              <span className="ml-3 text-stone-600">seq:{msg.seq}</span>
             )}
           </div>
 
@@ -854,7 +1183,7 @@ function MessageBubble({
           <div
             className={cn(
               "text-sm leading-relaxed whitespace-pre-wrap break-words",
-              msg.role === "user" ? "text-neutral-200" : "text-neutral-400",
+              msg.role === "user" ? "text-stone-100" : "text-stone-400",
               msg.role === "thinking" && "text-purple-300/70",
               msg.role === "tool_result" && "font-mono text-xs",
             )}
@@ -863,7 +1192,9 @@ function MessageBubble({
               <MessageContent msg={msg} jsonlPath={jsonlPath} />
             ) : msg.content.length > 2000 && !showFull ? (
               <>
-                <div>{msg.content.slice(0, 2000)}</div>
+                <div>
+                  <MessageTextContent content={msg.content.slice(0, 2000)} />
+                </div>
                 <button
                   onClick={() => setShowFull(true)}
                   className="text-[11px] text-cyan-500 hover:text-cyan-400 mt-1"
@@ -872,7 +1203,7 @@ function MessageBubble({
                 </button>
               </>
             ) : (
-              msg.content
+              <MessageTextContent content={msg.content} />
             )}
           </div>
         </>
@@ -905,15 +1236,15 @@ function EventBubble({ event }: { event: ConversationEvent }) {
   })();
 
   return (
-    <div className="flex items-center gap-2 py-0.5 opacity-50 hover:opacity-80 transition-opacity">
+    <div className="flex items-center gap-2 py-0.5 opacity-55 transition-opacity hover:opacity-85">
       <Icon className={cn("w-3 h-3 flex-shrink-0", color)} />
       <span className={cn("text-[10px] font-mono", color)}>{label}</span>
       {event.content && (
-        <span className="text-[10px] text-neutral-600 truncate">
+        <span className="truncate text-[10px] text-stone-600">
           {event.content}
         </span>
       )}
-      <span className="text-[10px] text-neutral-700 ml-auto flex-shrink-0">
+      <span className="ml-auto flex-shrink-0 text-[10px] text-stone-700">
         {formatTime(event.timestamp)}
       </span>
     </div>
@@ -928,21 +1259,21 @@ function TurnHeaderBubble({ turn }: { turn: ConversationTurn }) {
     : null;
 
   return (
-    <div className="flex items-stretch gap-0 my-2">
+    <div className="my-2 flex items-stretch gap-0">
       {/* Left accent bar */}
-      <div className="w-1 rounded-l bg-cyan-500/60 flex-shrink-0" />
-      <div className="flex-1 border border-cyan-500/20 border-l-0 rounded-r bg-cyan-950/20 px-3 py-2">
+      <div className="w-1 flex-shrink-0 rounded-l bg-teal-400/55" />
+      <div className="flex-1 rounded-r border border-l-0 border-teal-400/[0.18] bg-teal-400/[0.045] px-3 py-2">
         {/* Top row: turn index + user content preview */}
         <div className="flex items-center gap-2">
-          <span className="text-[11px] font-bold text-cyan-400 flex-shrink-0">
+          <span className="flex-shrink-0 text-[11px] font-bold text-teal-300">
             Turn {turn.turnIdx}
           </span>
           {turn.topic && (
-            <span className="text-[11px] text-cyan-300/70 truncate max-w-[300px]">
+            <span className="max-w-[300px] truncate text-[11px] text-teal-200/70">
               {turn.topic}
             </span>
           )}
-          <span className="ml-auto text-[10px] text-neutral-600 flex-shrink-0">
+          <span className="ml-auto flex-shrink-0 text-[10px] text-stone-600">
             {turn.messageCount} msgs
             {turn.toolCallCount > 0 && ` · ${turn.toolCallCount} tools`}
             {duration != null && ` · ${duration >= 60 ? `${(duration / 60).toFixed(1)}m` : `${duration.toFixed(0)}s`}`}
@@ -950,15 +1281,15 @@ function TurnHeaderBubble({ turn }: { turn: ConversationTurn }) {
         </div>
         {/* User content preview */}
         {turn.userContent && (
-          <p className="text-[11px] text-neutral-400 mt-1 truncate max-w-full">
-            👤 {turn.userContent.slice(0, 120)}{turn.userContent.length > 120 ? "..." : ""}
+          <p className="mt-1 max-w-full truncate text-[11px] text-stone-400">
+            用户：{makeUserPreview(turn.userContent)}
           </p>
         )}
         {/* Bottom row: tool badges + flags */}
         {(tools.length > 0 || turn.hasCodeChange || turn.hasMcpCall) && (
           <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
             {tools.map((t, i) => (
-              <span key={i} className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-500 font-mono">
+              <span key={i} className="rounded bg-white/[0.045] px-1.5 py-0.5 font-mono text-[9px] text-stone-500">
                 {t}
               </span>
             ))}
@@ -1000,19 +1331,17 @@ function ConversationListItem({
   starred?: boolean;
   onToggleStar?: () => void;
 }) {
+  const isPlaceholder = isCodexPtyPlaceholder(conv);
+  const isJsonlFallback =
+    conv.source === "codex_cli" && Boolean(conv.jsonlPath) && conv.chatType === "jsonl_fallback";
   return (
-    <div
-      className={cn(isSubagent && "ml-4 border-l border-neutral-800/50 pl-1")}
-    >
+    <div className={cn(isSubagent && "ml-4 border-l border-white/[0.07] pl-1.5")}>
       <button
         onClick={onClick}
         className={cn(
-          "w-full text-left p-3 rounded-lg border transition-colors",
-          active
-            ? "bg-neutral-800/50 border-orange-500/30"
-            : starred
-              ? "border-amber-500/30 hover:border-amber-500/50"
-              : "border-neutral-800/50 hover:border-neutral-700",
+          "mission-conv-list-item w-full p-3 text-left transition-colors",
+          active && "mission-conv-list-item-active",
+          starred && !active && "mission-conv-list-item-starred",
           isSubagent && "py-2",
         )}
       >
@@ -1021,17 +1350,17 @@ function ConversationListItem({
             {onToggleStar && (
               <span
                 onClick={(e) => { e.stopPropagation(); onToggleStar(); }}
-                className={cn("cursor-pointer flex-shrink-0 text-[12px]", starred ? "text-amber-400" : "text-neutral-700 hover:text-neutral-500")}
+                className={cn("cursor-pointer flex-shrink-0 text-[12px]", starred ? "text-amber-300" : "text-stone-700 hover:text-stone-500")}
                 title={starred ? "取消标星" : "标星"}
               >
                 {starred ? "★" : "☆"}
               </span>
             )}
             {isSubagent && (
-              <GitBranch className="w-3 h-3 text-neutral-600 flex-shrink-0" />
+              <GitBranch className="w-3 h-3 flex-shrink-0 text-stone-600" />
             )}
             {conv.slotId && (
-              <span className="text-[10px] font-mono text-neutral-600 truncate">
+              <span className="truncate font-mono text-[10px] text-stone-600">
                 {conv.slotId}
               </span>
             )}
@@ -1043,7 +1372,7 @@ function ConversationListItem({
                   e.stopPropagation();
                   onToggleExpand?.();
                 }}
-                className="flex items-center gap-0.5 text-[10px] text-neutral-500 hover:text-neutral-300 transition-colors px-1 py-0.5 rounded hover:bg-neutral-800"
+                className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] text-stone-500 transition-colors hover:bg-white/[0.05] hover:text-stone-200"
                 title={expanded ? "收起子任务" : "展开子任务"}
               >
                 {expanded ? (
@@ -1057,55 +1386,53 @@ function ConversationListItem({
             <Badge
               variant="outline"
               className={cn(
-                "text-[10px] border-neutral-800",
-                conv.status === "active"
-                  ? "text-green-500"
-                  : conv.status === "compacted"
-                    ? "text-yellow-600"
-                    : "text-neutral-600",
+                "border-white/10 text-[10px]",
+                conversationStatusClass(conv),
               )}
             >
-              {conv.status === "active"
-                ? "进行中"
-                : conv.status === "compacted"
-                  ? "已压缩"
-                  : "已完成"}
+              {conversationStatusLabel(conv)}
             </Badge>
           </div>
         </div>
 
         {conv.llmSummary && (
-          <p className="text-[11px] text-neutral-500 mt-1 line-clamp-2 leading-relaxed">
+          <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-stone-500">
             {conv.llmSummary}
           </p>
         )}
 
-        <div className="flex items-center justify-between text-[11px] text-neutral-500 mt-1">
+        <div className="mt-1 flex items-center justify-between text-[11px] text-stone-500">
           <div className="flex items-center gap-2 min-w-0">
             {conv.messageCount > 0 && <span>{conv.messageCount} 条消息</span>}
             {conv.taskId && (
               <span
-                className="font-mono text-blue-400/60 truncate max-w-[80px]"
+                className="max-w-[80px] truncate font-mono text-sky-300/60"
                 title={conv.taskId}
               >
                 {conv.taskId.slice(0, 8)}
               </span>
             )}
             {conv.slotId && (
-              <span className="font-mono text-cyan-500/60">{conv.slotId}</span>
+              <span className="font-mono text-teal-300/60">{conv.slotId}</span>
             )}
             {conv.source === "pty_jsonl" && (
-              <span className="text-[9px] text-purple-500/50">PTY</span>
+              <span className="text-[9px] text-violet-300/50">PTY</span>
+            )}
+            {isPlaceholder && (
+              <span className="text-[9px] text-amber-300/60">旧 PTY 占位</span>
+            )}
+            {isJsonlFallback && (
+              <span className="text-[9px] text-sky-300/60">JSONL fallback</span>
             )}
             {conv.model && (
-              <span className="font-mono text-neutral-600 truncate max-w-[100px]">
+              <span className="max-w-[100px] truncate font-mono text-stone-600">
                 {conv.model}
               </span>
             )}
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
             {conv.endedAt && (
-              <span className="text-[10px] text-neutral-600" title="持续时间">
+              <span className="text-[10px] text-stone-600" title="持续时间">
                 {(() => {
                   const ms =
                     new Date(conv.endedAt).getTime() -
@@ -1116,12 +1443,12 @@ function ConversationListItem({
                 })()}
               </span>
             )}
-            <span>{timeAgo(conv.startedAt)}</span>
+            <span>{timeAgo(conv.updatedAt || conv.startedAt)}</span>
           </div>
         </div>
 
         {conv.gitBranch && (
-          <div className="text-[10px] text-neutral-600 font-mono mt-1 truncate">
+          <div className="mt-1 truncate font-mono text-[10px] text-stone-600">
             {conv.gitBranch}
           </div>
         )}
@@ -1154,12 +1481,9 @@ function GeminiListItem({
     <button
       onClick={onClick}
       className={cn(
-        "w-full text-left px-3 py-2 rounded-md border transition-colors",
-        active
-          ? "bg-neutral-800/50 border-indigo-500/30"
-          : starred
-            ? "border-amber-500/30 hover:border-amber-500/50"
-            : "border-neutral-800/30 hover:border-neutral-700",
+        "mission-conv-list-item w-full px-3 py-2 text-left transition-colors",
+        active && "mission-conv-list-item-active",
+        starred && !active && "mission-conv-list-item-starred",
       )}
     >
       <div className="flex items-center justify-between">
@@ -1167,7 +1491,7 @@ function GeminiListItem({
           {onToggleStar && (
             <span
               onClick={(e) => { e.stopPropagation(); onToggleStar(); }}
-              className={cn("cursor-pointer flex-shrink-0 text-[12px]", starred ? "text-amber-400" : "text-neutral-700 hover:text-neutral-500")}
+              className={cn("cursor-pointer flex-shrink-0 text-[12px]", starred ? "text-amber-300" : "text-stone-700 hover:text-stone-500")}
               title={starred ? "取消标星" : "标星"}
             >
               {starred ? "★" : "☆"}
@@ -1177,16 +1501,16 @@ function GeminiListItem({
           <span className="text-[11px] font-mono text-indigo-300/80 truncate max-w-[120px]">
             {label}
           </span>
-          <span className="text-[10px] font-mono text-neutral-600">
+          <span className="font-mono text-[10px] text-stone-600">
             {conv.model || "gemini"}
           </span>
-          <span className="text-[9px] px-1 rounded bg-neutral-800 text-neutral-500">
+          <span className="rounded bg-white/[0.045] px-1 text-[9px] text-stone-500">
             {sourceTag}
           </span>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           {conv.messageCount > 0 && (
-            <span className="text-[10px] text-neutral-600">
+            <span className="text-[10px] text-stone-600">
               {conv.messageCount} 条
             </span>
           )}
@@ -1194,13 +1518,13 @@ function GeminiListItem({
             className={cn(
               "text-[10px]",
               conv.status === "active"
-                ? "text-green-500/70"
-                : "text-neutral-600",
+                ? "text-emerald-300/70"
+                : "text-stone-600",
             )}
           >
             {conv.status === "active" ? "进行中" : "已完成"}
           </span>
-          <span className="text-[10px] text-neutral-600">
+          <span className="text-[10px] text-stone-600">
             {timeAgo(conv.startedAt)}
           </span>
         </div>
@@ -1209,16 +1533,28 @@ function GeminiListItem({
   );
 }
 
-export function Conversations() {
+export function Conversations({
+  fixedViewMode,
+  storageScope = "conv",
+  hideViewTabs = false,
+}: ConversationsProps = {}) {
+  const selectedStorageKey = `${storageScope}:selectedId`;
+  const viewModeStorageKey = `${storageScope}:viewMode`;
+  const listScrollStorageKey = `${storageScope}:listScroll`;
+  const msgScrollStorageKey = `${storageScope}:msgScrollIdx`;
+  const sidebarCollapsedStorageKey = `${storageScope}:sidebarCollapsed`;
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [events, setEvents] = useState<ConversationEvent[]>([]);
+  const [codexToolCalls, setCodexToolCalls] = useState<CodexToolCall[]>([]);
+  const [codexToolCallSource, setCodexToolCallSource] = useState<string | null>(null);
+  const [codexToolCallError, setCodexToolCallError] = useState<string | null>(null);
   const [labelsMap, setLabelsMap] = useState<
     Record<string, [string, string][]>
   >({});
   const [showLabels, setShowLabels] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(() =>
-    sessionStorage.getItem("conv:selectedId"),
+    sessionStorage.getItem(selectedStorageKey),
   );
   const [jsonlPath, setJsonlPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1233,18 +1569,21 @@ export function Conversations() {
   const [projects, setProjects] = useState<
     { id: string; path: string; active: boolean; conversation_count?: number }[]
   >([]);
-  const [viewMode, setViewMode] = useState<
-    "conversations" | "workers" | "gemini" | "jarvis"
-  >(() => {
-    const saved = sessionStorage.getItem("conv:viewMode");
+  const [viewMode, setViewMode] = useState<ConversationViewMode>(() => {
+    if (fixedViewMode) return fixedViewMode;
+    const saved = sessionStorage.getItem(viewModeStorageKey);
     return saved === "conversations" ||
       saved === "workers" ||
       saved === "gemini" ||
-      saved === "jarvis"
+      saved === "jarvis" ||
+      saved === "codex"
       ? saved
       : "conversations";
   });
   const [showList, setShowList] = useState(true); // mobile: toggle list/detail
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => sessionStorage.getItem(sidebarCollapsedStorageKey) === "1",
+  );
   const [expandedParents, setExpandedParents] = useState<Set<string>>(
     new Set(),
   );
@@ -1277,6 +1616,12 @@ export function Conversations() {
   const listScrollRef = useRef<HTMLDivElement>(null);
   const restoredRef = useRef(false); // guard: only restore once after initial load
 
+  useEffect(() => {
+    if (fixedViewMode && viewMode !== fixedViewMode) {
+      setViewMode(fixedViewMode);
+    }
+  }, [fixedViewMode, viewMode]);
+
   // One-time migration: sync localStorage stars to backend, then clear
   useEffect(() => {
     try {
@@ -1296,13 +1641,20 @@ export function Conversations() {
 
   // Persist selectedId & viewMode to sessionStorage
   useEffect(() => {
-    if (selectedId) sessionStorage.setItem("conv:selectedId", selectedId);
-    else sessionStorage.removeItem("conv:selectedId");
-  }, [selectedId]);
+    if (selectedId) sessionStorage.setItem(selectedStorageKey, selectedId);
+    else sessionStorage.removeItem(selectedStorageKey);
+  }, [selectedId, selectedStorageKey]);
 
   useEffect(() => {
-    sessionStorage.setItem("conv:viewMode", viewMode);
-  }, [viewMode]);
+    if (!fixedViewMode) sessionStorage.setItem(viewModeStorageKey, viewMode);
+  }, [fixedViewMode, viewMode, viewModeStorageKey]);
+
+  useEffect(() => {
+    sessionStorage.setItem(
+      sidebarCollapsedStorageKey,
+      sidebarCollapsed ? "1" : "0",
+    );
+  }, [sidebarCollapsed, sidebarCollapsedStorageKey]);
 
   // Fetch project list for filter dropdown
   useEffect(() => {
@@ -1315,7 +1667,10 @@ export function Conversations() {
   }, []);
 
   // Track Virtuoso visible range for scroll persistence + minimap highlight
-  const visibleRangeRef = useRef<{ startIndex: number }>({ startIndex: 0 });
+  const visibleRangeRef = useRef<{ startIndex: number; endIndex: number }>({
+    startIndex: 0,
+    endIndex: 0,
+  });
   const [visibleStart, setVisibleStart] = useState(0);
   const pendingScrollToMsgId = useRef<number | null>(null);
 
@@ -1324,29 +1679,29 @@ export function Conversations() {
     const save = () => {
       if (listScrollRef.current)
         sessionStorage.setItem(
-          "conv:listScroll",
+          listScrollStorageKey,
           String(listScrollRef.current.scrollTop),
         );
       sessionStorage.setItem(
-        "conv:msgScrollIdx",
+        msgScrollStorageKey,
         String(visibleRangeRef.current.startIndex),
       );
     };
     window.addEventListener("beforeunload", save);
     return () => window.removeEventListener("beforeunload", save);
-  }, []);
+  }, [listScrollStorageKey, msgScrollStorageKey]);
 
   const isGeminiSource = useCallback((source: string) => {
     return source === "router_chat" || source === "gemini_cli";
   }, []);
 
-  const fetchConversations = useCallback(async () => {
-    setLoading(true);
+  const fetchConversations = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoading(true);
     try {
       // Server-side source filtering per tab. No conversationType filter —
       // frontend is a faithful DB viewer, misclassified records must be visible.
       const params = new URLSearchParams();
-      if (statusFilter) params.set("status", statusFilter);
+      if (statusFilter && viewMode !== "codex") params.set("status", statusFilter);
       params.set("limit", "300");
       params.set("conversationType", "all");
 
@@ -1354,6 +1709,9 @@ export function Conversations() {
         params.set("conversationType", "gemini");
       } else if (viewMode === "jarvis") {
         params.set("conversationType", "jarvis");
+      } else if (viewMode === "codex") {
+        params.set("conversationType", "all");
+        params.set("source", "codex_cli");
       } else if (viewMode === "workers") {
         params.set("conversationType", "system");
       } else {
@@ -1367,7 +1725,7 @@ export function Conversations() {
       const res = await fetch(`/api/conversations?${params}`);
       if (res.ok) {
         const data = await res.json();
-        const list = Array.isArray(data) ? data : [];
+        const list: Conversation[] = Array.isArray(data) ? data : [];
         setConversations(list);
         // Extract starred IDs from conversation labels
         const stars = new Set<string>();
@@ -1383,43 +1741,66 @@ export function Conversations() {
     } catch {
       // silent
     }
-    setLoading(false);
+    if (!options?.silent) setLoading(false);
   }, [statusFilter, viewMode, projectFilter]);
 
   const PAGE_SIZE = 500;
 
   const fetchMessages = useCallback(
-    async (sessionId: string, withLabels?: boolean) => {
-      setLoadingMessages(true);
-      setSearchResults(null);
+    async (sessionId: string, withLabels?: boolean, options?: { silent?: boolean }) => {
+      if (!options?.silent) setLoadingMessages(true);
+      if (!options?.silent) setSearchResults(null);
       try {
         const labelsParam = withLabels ? "&labels=1" : "";
+        const codexParam =
+          viewMode === "codex"
+            ? "&includeCodexToolCalls=1&toolLimit=100000"
+            : "";
         // Load from beginning (sinceId=0) instead of tail
         const res = await fetch(
-          `/api/conversations?sessionId=${encodeURIComponent(sessionId)}&sinceId=0&tail=${PAGE_SIZE}${labelsParam}`,
+          `/api/conversations?sessionId=${encodeURIComponent(sessionId)}&sinceId=0&tail=${PAGE_SIZE}${labelsParam}${codexParam}`,
         );
         if (res.ok) {
           const data = await res.json();
-          const msgs = data.messages || [];
+          const codexProjectedMessages = Array.isArray(data.codexMessages)
+            ? data.codexMessages
+            : null;
+          const msgs = codexProjectedMessages || data.messages || [];
           setMessages(msgs);
           setEvents(data.events || []);
+          setCodexToolCalls(Array.isArray(data.codexToolCalls) ? data.codexToolCalls : []);
+          setCodexToolCallSource(data.codexToolCallSource || null);
+          setCodexToolCallError(data.codexToolCallError || null);
           setJsonlPath(data.conversation?.jsonlPath || null);
           setLabelsMap(data.labels || {});
-          setUserIndex(data.userIndex || []);
-          setTurns(data.turns || []);
-          setHasMore(msgs.length >= PAGE_SIZE);
+          setUserIndex(
+            codexProjectedMessages
+              ? codexProjectedMessages
+                  .filter((m: ConversationMessage) => m.role === "user")
+                  .map((m: ConversationMessage) => ({
+                    id: m.id,
+                    time: formatTime(m.timestamp),
+                    preview: makeUserPreview(m.content),
+                  }))
+              : data.userIndex || [],
+          );
+          setTurns(codexProjectedMessages ? [] : data.turns || []);
+          setHasMore(codexProjectedMessages ? false : msgs.length >= PAGE_SIZE);
         }
       } catch {
         setMessages([]);
         setEvents([]);
+        setCodexToolCalls([]);
+        setCodexToolCallSource(null);
+        setCodexToolCallError(null);
         setJsonlPath(null);
         setLabelsMap({});
         setTurns([]);
         setHasMore(false);
       }
-      setLoadingMessages(false);
+      if (!options?.silent) setLoadingMessages(false);
     },
-    [],
+    [viewMode],
   );
 
   const loadMoreMessages = useCallback(async () => {
@@ -1453,6 +1834,7 @@ export function Conversations() {
     try {
       const ctParam = viewMode === "gemini" ? "&conversationType=gemini"
         : viewMode === "jarvis" ? "&conversationType=jarvis"
+        : viewMode === "codex" ? "&conversationType=codex_chat"
         : viewMode === "workers" ? "&conversationType=system"
         : "&conversationType=user";
       const res = await fetch(
@@ -1476,19 +1858,19 @@ export function Conversations() {
   useEffect(() => {
     if (restoredRef.current || loading || conversations.length === 0) return;
     restoredRef.current = true;
-    const savedId = sessionStorage.getItem("conv:selectedId");
+    const savedId = sessionStorage.getItem(selectedStorageKey);
     if (savedId && conversations.some((c) => c.id === savedId)) {
       setSelectedId(savedId);
       fetchMessages(savedId, showLabels);
       // Restore list scroll position after DOM updates
       requestAnimationFrame(() => {
-        const savedListScroll = sessionStorage.getItem("conv:listScroll");
+        const savedListScroll = sessionStorage.getItem(listScrollStorageKey);
         if (savedListScroll && listScrollRef.current) {
           listScrollRef.current.scrollTop = Number(savedListScroll);
         }
       });
     }
-  }, [loading, conversations, fetchMessages, showLabels]);
+  }, [loading, conversations, fetchMessages, showLabels, selectedStorageKey, listScrollStorageKey]);
 
   const selectConversation = useCallback(
     (id: string) => {
@@ -1504,11 +1886,49 @@ export function Conversations() {
     [conversations, selectedId],
   );
 
+  useEffect(() => {
+    if (viewMode !== "codex" || !selectedId) return;
+    const refresh = () => {
+      fetchConversations({ silent: true });
+      fetchMessages(selectedId, showLabels, { silent: true });
+    };
+    const id = window.setInterval(refresh, 2500);
+    return () => window.clearInterval(id);
+  }, [viewMode, selectedId, showLabels, fetchConversations, fetchMessages]);
+
+  const preferredCodexConversation = useMemo(() => {
+    if (viewMode !== "codex") return null;
+    return (
+      conversations.find((c) => conversationDisplayStatus(c) === "active" && Boolean(c.jsonlPath)) ||
+      conversations.find((c) => conversationDisplayStatus(c) === "active") ||
+      conversations.find((c) => Boolean(c.jsonlPath)) ||
+      conversations.find((c) => !isCodexPtyPlaceholder(c)) ||
+      conversations[0] ||
+      null
+    );
+  }, [conversations, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "codex" || conversations.length === 0) return;
+    if (!preferredCodexConversation) return;
+    if (selectedId && conversations.some((c) => c.id === selectedId)) return;
+    setSelectedId(preferredCodexConversation.id);
+    fetchMessages(preferredCodexConversation.id, showLabels);
+  }, [
+    viewMode,
+    conversations,
+    selectedId,
+    preferredCodexConversation,
+    fetchMessages,
+    showLabels,
+  ]);
+
   // Flatten messages and events into a single timeline array for virtual scrolling
   type FlatItem =
     | { type: "date-header"; date: string }
     | { type: "message"; data: ConversationMessage }
     | { type: "event"; data: ConversationEvent }
+    | { type: "codex-tool-call"; data: CodexToolCall }
     | { type: "turn-header"; turn: ConversationTurn }
     | {
         type: "tool-pair";
@@ -1544,10 +1964,12 @@ export function Conversations() {
     // Sort messages + events by timestamp
     type SortedItem =
       | { type: "message"; data: ConversationMessage }
-      | { type: "event"; data: ConversationEvent };
+      | { type: "event"; data: ConversationEvent }
+      | { type: "codex-tool-call"; data: CodexToolCall };
     const sorted: SortedItem[] = [
       ...messages.map((m) => ({ type: "message" as const, data: m })),
       ...importantEvents.map((e) => ({ type: "event" as const, data: e })),
+      ...codexToolCalls.map((call) => ({ type: "codex-tool-call" as const, data: call })),
     ].sort(
       (a, b) =>
         new Date(a.data.timestamp).getTime() -
@@ -1591,14 +2013,63 @@ export function Conversations() {
       i++;
     }
     return flat;
-  }, [messages, events, turns]);
+  }, [messages, events, turns, codexToolCalls]);
+
+  const latestTimelineKey = useMemo(() => {
+    const item = flatTimeline[flatTimeline.length - 1];
+    if (!item) return "";
+    if (item.type === "message") {
+      return [
+        item.type,
+        item.data.id,
+        item.data.timestamp,
+        item.data.content.length,
+      ].join(":");
+    }
+    if (item.type === "codex-tool-call") {
+      return [
+        item.type,
+        item.data.callId,
+        item.data.status,
+        item.data.timestamp,
+        item.data.outputTimestamp || "",
+        item.data.rawOutput?.length || 0,
+      ].join(":");
+    }
+    if (item.type === "event") {
+      return [item.type, item.data.id, item.data.timestamp].join(":");
+    }
+    if (item.type === "tool-pair") {
+      return [
+        item.type,
+        item.call.id,
+        item.result.id,
+        item.result.content.length,
+      ].join(":");
+    }
+    if (item.type === "turn-header") {
+      return [item.type, item.turn.turnIdx, item.turn.endedAt || ""].join(":");
+    }
+    return [item.type, item.date].join(":");
+  }, [flatTimeline]);
 
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
+  const scrollToLatest = useCallback(() => {
+    if (flatTimeline.length === 0) return;
+    requestAnimationFrame(() => {
+      virtuosoRef.current?.scrollToIndex({
+        index: flatTimeline.length - 1,
+        align: "end",
+      });
+    });
+  }, [flatTimeline.length]);
+
   // Restore message scroll position after messages finish loading (Virtuoso)
   useEffect(() => {
+    if (viewMode === "codex") return;
     if (!loadingMessages && flatTimeline.length > 0) {
-      const savedIdx = sessionStorage.getItem("conv:msgScrollIdx");
+      const savedIdx = sessionStorage.getItem(msgScrollStorageKey);
       if (savedIdx && virtuosoRef.current) {
         requestAnimationFrame(() => {
           virtuosoRef.current?.scrollToIndex({
@@ -1606,18 +2077,24 @@ export function Conversations() {
             align: "start",
           });
         });
-        sessionStorage.removeItem("conv:msgScrollIdx");
+        sessionStorage.removeItem(msgScrollStorageKey);
       }
     }
-  }, [loadingMessages, flatTimeline]);
+  }, [loadingMessages, flatTimeline, msgScrollStorageKey, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "codex" || loadingMessages || flatTimeline.length === 0) {
+      return;
+    }
+    scrollToLatest();
+  }, [viewMode, loadingMessages, latestTimelineKey, flatTimeline.length, scrollToLatest]);
 
   // Handle pending scroll to a message ID (after onLoadAround reloads messages)
   useEffect(() => {
     const targetId = pendingScrollToMsgId.current;
     if (targetId == null || flatTimeline.length === 0) return;
     const idx = flatTimeline.findIndex(
-      (it: { type: string; data?: { id: number } }) =>
-        it.type === "message" && it.data?.id === targetId,
+      (it) => it.type === "message" && it.data.id === targetId,
     );
     if (idx >= 0) {
       pendingScrollToMsgId.current = null;
@@ -1635,6 +2112,12 @@ export function Conversations() {
       if (tab === "gemini") {
         return isGeminiSource(c.source);
       }
+      if (tab === "jarvis") {
+        return c.conversationType === "jarvis";
+      }
+      if (tab === "codex") {
+        return c.source === "codex_cli";
+      }
       // workers: catch-all for non-user non-gemini
       return c.conversationType !== "user" && !isGeminiSource(c.source);
     },
@@ -1643,11 +2126,16 @@ export function Conversations() {
 
   const counts = useMemo(() => {
     const filtered = conversations.filter((c) => filterByTab(c, viewMode));
-    const active = filtered.filter((c) => c.status === "active").length;
-    const completed = filtered.filter((c) => c.status === "completed").length;
-    const compacted = filtered.filter((c) => c.status === "compacted").length;
+    const active = filtered.filter((c) => conversationDisplayStatus(c) === "active").length;
+    const completed = filtered.filter((c) => conversationDisplayStatus(c) === "completed").length;
+    const compacted = filtered.filter((c) => conversationDisplayStatus(c) === "compacted").length;
     return { active, completed, compacted, total: filtered.length };
   }, [conversations, viewMode, filterByTab]);
+
+  const statusScopedConversations = useMemo(() => {
+    if (!statusFilter) return conversations;
+    return conversations.filter((c) => conversationDisplayStatus(c) === statusFilter);
+  }, [conversations, statusFilter]);
 
   // Tab counts: current tab shows exact count, others show '…' until switched
   const tabCounts = useMemo(
@@ -1656,6 +2144,7 @@ export function Conversations() {
       jarvis: viewMode === "jarvis" ? conversations.length : null,
       workers: viewMode === "workers" ? conversations.length : null,
       gemini: viewMode === "gemini" ? conversations.length : null,
+      codex: viewMode === "codex" ? conversations.length : null,
     }),
     [conversations, viewMode],
   );
@@ -1665,7 +2154,7 @@ export function Conversations() {
   const { mainList, subagentMap } = useMemo(() => {
     const map = new Map<string, Conversation[]>();
     const main: Conversation[] = [];
-    for (const conv of conversations) {
+    for (const conv of statusScopedConversations) {
       // Only fold subagent/compaction types into parent map.
       // Compaction *continuations* (user/worker with parentSessionId) stay in main list
       // so they remain visible — parentSessionId just records the stitching lineage.
@@ -1684,12 +2173,19 @@ export function Conversations() {
     }
     // Sort: active first, then by most recent
     main.sort((a, b) => {
-      if (a.status === "active" && b.status !== "active") return -1;
-      if (a.status !== "active" && b.status === "active") return 1;
-      return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
+      const aStatus = conversationDisplayStatus(a);
+      const bStatus = conversationDisplayStatus(b);
+      if (aStatus === "active" && bStatus !== "active") return -1;
+      if (aStatus !== "active" && bStatus === "active") return 1;
+      if (aStatus === "placeholder" && bStatus !== "placeholder") return 1;
+      if (aStatus !== "placeholder" && bStatus === "placeholder") return -1;
+      return (
+        new Date(b.updatedAt || b.startedAt).getTime() -
+        new Date(a.updatedAt || a.startedAt).getTime()
+      );
     });
     return { mainList: main, subagentMap: map };
-  }, [conversations]);
+  }, [statusScopedConversations]);
 
   const dayGroups = useMemo(() => groupByDay(mainList), [mainList]);
 
@@ -1711,7 +2207,7 @@ export function Conversations() {
     }
     // Build sorted group list
     const groups = Array.from(map.entries()).map(([slotId, sessions]) => {
-      const activeCount = sessions.filter((s) => s.status === "active").length;
+      const activeCount = sessions.filter((s) => conversationDisplayStatus(s) === "active").length;
       const latestAt = sessions[0]?.startedAt || "";
       return {
         slotId,
@@ -1801,23 +2297,43 @@ export function Conversations() {
   }, [isAllCollapsed, viewMode, slotGroups, dayGroups]);
 
   return (
-    <div className="flex-1 flex min-h-0 overflow-hidden">
+    <div className="mission-conversation-shell flex min-h-0 flex-1 overflow-hidden">
+      {sidebarCollapsed && (
+        <div className="mission-conversation-rail flex w-10 flex-shrink-0 flex-col items-center border-r py-2">
+          <button
+            onClick={() => {
+              setSidebarCollapsed(false);
+              setShowList(true);
+            }}
+            className="rounded-md p-1.5 text-stone-500 transition-colors hover:bg-white/[0.05] hover:text-stone-200"
+            title="展开左侧列表"
+            aria-label="展开左侧列表"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+          <div className="mt-2 h-px w-5 bg-white/[0.07]" />
+          <MessageSquare className="mt-3 h-4 w-4 text-stone-600" />
+        </div>
+      )}
+
       {/* Left: Conversation list */}
+      {!sidebarCollapsed && (
       <div
         className={cn(
-          "w-80 flex-shrink-0 border-r border-neutral-800 flex flex-col",
+          "mission-conversation-sidebar flex w-80 flex-shrink-0 flex-col border-r",
           !showList && "hidden md:flex",
         )}
       >
         {/* View mode tabs */}
-        <div className="flex border-b border-neutral-800">
+        {!hideViewTabs && (
+        <div className="mission-conversation-tabs flex border-b p-1">
           <button
             onClick={() => setViewMode("conversations")}
             className={cn(
-              "flex-1 py-2 text-xs font-medium transition-colors flex items-center justify-center gap-1.5",
+              "flex flex-1 items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors",
               viewMode === "conversations"
-                ? "text-neutral-200 border-b-2 border-blue-500"
-                : "text-neutral-500 hover:text-neutral-400",
+                ? "bg-white/[0.07] text-stone-100"
+                : "text-stone-500 hover:bg-white/[0.04] hover:text-stone-300",
             )}
           >
             <MessageSquare className="w-3 h-3" />
@@ -1826,10 +2342,10 @@ export function Conversations() {
           <button
             onClick={() => setViewMode("jarvis")}
             className={cn(
-              "flex-1 py-2 text-xs font-medium transition-colors flex items-center justify-center gap-1.5",
+              "flex flex-1 items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors",
               viewMode === "jarvis"
-                ? "text-neutral-200 border-b-2 border-purple-500"
-                : "text-neutral-500 hover:text-neutral-400",
+                ? "bg-white/[0.07] text-stone-100"
+                : "text-stone-500 hover:bg-white/[0.04] hover:text-stone-300",
             )}
           >
             <Zap className="w-3 h-3" />
@@ -1838,10 +2354,10 @@ export function Conversations() {
           <button
             onClick={() => setViewMode("workers")}
             className={cn(
-              "flex-1 py-2 text-xs font-medium transition-colors flex items-center justify-center gap-1.5",
+              "flex flex-1 items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors",
               viewMode === "workers"
-                ? "text-neutral-200 border-b-2 border-orange-500"
-                : "text-neutral-500 hover:text-neutral-400",
+                ? "bg-white/[0.07] text-stone-100"
+                : "text-stone-500 hover:bg-white/[0.04] hover:text-stone-300",
             )}
           >
             <Server className="w-3 h-3" />
@@ -1850,21 +2366,34 @@ export function Conversations() {
           <button
             onClick={() => setViewMode("gemini")}
             className={cn(
-              "flex-1 py-2 text-xs font-medium transition-colors flex items-center justify-center gap-1.5",
+              "flex flex-1 items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors",
               viewMode === "gemini"
-                ? "text-neutral-200 border-b-2 border-indigo-500"
-                : "text-neutral-500 hover:text-neutral-400",
+                ? "bg-white/[0.07] text-stone-100"
+                : "text-stone-500 hover:bg-white/[0.04] hover:text-stone-300",
             )}
           >
             <Sparkles className="w-3 h-3" />
             Gemini
           </button>
+          <button
+            onClick={() => setViewMode("codex")}
+            className={cn(
+              "flex flex-1 items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors",
+              viewMode === "codex"
+                ? "bg-white/[0.07] text-stone-100"
+                : "text-stone-500 hover:bg-white/[0.04] hover:text-stone-300",
+            )}
+          >
+            <Terminal className="w-3 h-3" />
+            Codex
+          </button>
         </div>
+        )}
 
         {/* Search bar */}
-        <div className="p-3 border-b border-neutral-800/50 space-y-2">
+        <div className="mission-conversation-filterbar space-y-2 border-b p-3">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-500" />
+            <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-500" />
             <input
               type="text"
               placeholder="搜索对话内容..."
@@ -1874,24 +2403,24 @@ export function Conversations() {
                 if (!e.target.value) setSearchResults(null);
               }}
               onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-              className="w-full pl-9 pr-3 py-1.5 bg-neutral-900 border border-neutral-800 rounded-md text-xs text-neutral-300 placeholder:text-neutral-600 focus:outline-none focus:border-neutral-700"
+              className="mission-control h-8 w-full pl-9 pr-3 text-xs placeholder:text-stone-500 focus:outline-none"
             />
           </div>
 
           {/* Project filter */}
           {projects.length > 0 && (
             <Select value={projectFilter} onValueChange={setProjectFilter}>
-              <SelectTrigger className="bg-neutral-900 border-neutral-800 text-neutral-300 h-7 text-xs w-full [&>svg]:w-3 [&>svg]:h-3">
+              <SelectTrigger className="h-8 w-full text-xs [&>svg]:h-3 [&>svg]:w-3">
                 <div className="flex items-center gap-1.5 truncate">
-                  <FolderOpen className="w-3 h-3 text-neutral-500 shrink-0" />
+                  <FolderOpen className="h-3 w-3 shrink-0 text-stone-500" />
                   <SelectValue placeholder="全部项目" />
                 </div>
               </SelectTrigger>
-              <SelectContent className="bg-neutral-800 border-neutral-700 max-h-72">
-                <SelectItem value="all" className="text-neutral-300 focus:bg-neutral-700 focus:text-white text-xs">
+              <SelectContent className="max-h-72">
+                <SelectItem value="all" className="text-xs">
                   全部项目
                 </SelectItem>
-                <SelectSeparator className="bg-neutral-700" />
+                <SelectSeparator className="bg-white/[0.08]" />
                 {projects
                   .filter((p) => p.active)
                   .sort((a, b) => (b.conversation_count ?? 0) - (a.conversation_count ?? 0))
@@ -1899,11 +2428,11 @@ export function Conversations() {
                     <SelectItem
                       key={p.id}
                       value={p.id}
-                      className="text-neutral-300 focus:bg-neutral-700 focus:text-white text-xs"
+                      className="text-xs"
                     >
                       {p.id}
                       {p.conversation_count != null && (
-                        <span className="ml-1.5 text-neutral-500">({p.conversation_count})</span>
+                        <span className="ml-1.5 text-stone-500">({p.conversation_count})</span>
                       )}
                     </SelectItem>
                   ))}
@@ -1916,10 +2445,10 @@ export function Conversations() {
             <button
               onClick={() => setStatusFilter(null)}
               className={cn(
-                "px-2 py-0.5 text-[10px] rounded-full border transition-colors",
+                "rounded-md border px-2 py-0.5 text-[10px] transition-colors",
                 !statusFilter
-                  ? "bg-neutral-800 text-white border-neutral-700"
-                  : "text-neutral-500 border-neutral-800 hover:text-neutral-300",
+                  ? "border-white/[0.12] bg-white/[0.08] text-stone-100"
+                  : "border-white/[0.07] text-stone-500 hover:text-stone-300",
               )}
             >
               全部 {counts.total}
@@ -1927,10 +2456,10 @@ export function Conversations() {
             <button
               onClick={() => setStatusFilter("active")}
               className={cn(
-                "px-2 py-0.5 text-[10px] rounded-full border transition-colors",
+                "rounded-md border px-2 py-0.5 text-[10px] transition-colors",
                 statusFilter === "active"
                   ? "bg-green-500/10 text-green-400 border-green-500/30"
-                  : "text-neutral-500 border-neutral-800 hover:text-neutral-300",
+                  : "border-white/[0.07] text-stone-500 hover:text-stone-300",
               )}
             >
               进行中 {counts.active}
@@ -1938,24 +2467,24 @@ export function Conversations() {
             <button
               onClick={() => setStatusFilter("completed")}
               className={cn(
-                "px-2 py-0.5 text-[10px] rounded-full border transition-colors",
+                "rounded-md border px-2 py-0.5 text-[10px] transition-colors",
                 statusFilter === "completed"
-                  ? "bg-neutral-700 text-neutral-300 border-neutral-600"
-                  : "text-neutral-500 border-neutral-800 hover:text-neutral-300",
+                  ? "border-white/[0.12] bg-white/[0.065] text-stone-300"
+                  : "border-white/[0.07] text-stone-500 hover:text-stone-300",
               )}
             >
               已完成 {counts.completed}
             </button>
             <button
-              onClick={fetchConversations}
-              className="ml-auto p-1 rounded text-neutral-600 hover:text-neutral-400 transition-colors"
+              onClick={() => fetchConversations()}
+              className="ml-auto rounded p-1 text-stone-600 transition-colors hover:bg-white/[0.04] hover:text-stone-300"
               title="刷新"
             >
               <RefreshCw className={cn("w-3 h-3", loading && "animate-spin")} />
             </button>
             <button
               onClick={toggleCollapseAll}
-              className="p-1 rounded text-neutral-600 hover:text-neutral-400 transition-colors"
+              className="rounded p-1 text-stone-600 transition-colors hover:bg-white/[0.04] hover:text-stone-300"
               title={isAllCollapsed ? "展开全部" : "折叠全部"}
             >
               {isAllCollapsed ? (
@@ -1964,14 +2493,25 @@ export function Conversations() {
                 <ChevronsDownUp className="w-3 h-3" />
               )}
             </button>
+            <button
+              onClick={() => {
+                setSidebarCollapsed(true);
+                setShowList(false);
+              }}
+              className="rounded p-1 text-stone-600 transition-colors hover:bg-white/[0.04] hover:text-stone-300"
+              title="收起左侧列表"
+              aria-label="收起左侧列表"
+            >
+              <ArrowLeft className="w-3 h-3" />
+            </button>
           </div>
         </div>
 
         {/* Search results */}
         {searchResults !== null ? (
-          <div className="flex-1 overflow-auto p-2 space-y-1">
+          <div className="flex-1 space-y-1 overflow-auto p-2">
             <div className="flex items-center justify-between px-1 mb-2">
-              <span className="text-[11px] text-neutral-500">
+              <span className="text-[11px] text-stone-500">
                 搜索到 {searchResults.length} 条会话
               </span>
               <button
@@ -1979,7 +2519,7 @@ export function Conversations() {
                   setSearch("");
                   setSearchResults(null);
                 }}
-                className="text-[11px] text-neutral-600 hover:text-neutral-400"
+                className="text-[11px] text-stone-600 hover:text-stone-300"
               >
                 清除
               </button>
@@ -1988,26 +2528,26 @@ export function Conversations() {
               <button
                 key={r.sessionId || r.id}
                 onClick={() => selectConversation(r.sessionId || r.id)}
-                className="w-full text-left p-2 rounded-md border border-neutral-800/50 hover:border-neutral-700 transition-colors"
+                className="mission-conv-list-item w-full p-2 text-left transition-colors"
               >
                 <div className="flex items-center gap-2 mb-0.5">
                   <span className="text-[10px] font-mono text-indigo-300/70 truncate max-w-[140px]">
                     {r.sessionId?.slice(0, 8) || r.id}
                   </span>
                   {r.source && (
-                    <span className="text-[9px] px-1 rounded bg-neutral-800 text-neutral-500">{r.source}</span>
+                    <span className="rounded bg-white/[0.045] px-1 text-[9px] text-stone-500">{r.source}</span>
                   )}
                   {r.messageCount != null && (
-                    <span className="text-[10px] text-neutral-600">{r.messageCount} 条</span>
+                    <span className="text-[10px] text-stone-600">{r.messageCount} 条</span>
                   )}
-                  <span className="text-[10px] text-neutral-600">
+                  <span className="text-[10px] text-stone-600">
                     {timeAgo(r.startedAt || r.timestamp)}
                   </span>
                 </div>
                 {r.summary && (
-                  <p className="text-[11px] text-neutral-400 truncate mb-0.5">{r.summary}</p>
+                  <p className="mb-0.5 truncate text-[11px] text-stone-400">{r.summary}</p>
                 )}
-                <p className="text-xs text-neutral-500 line-clamp-2">
+                <p className="line-clamp-2 text-xs text-stone-500">
                   {r.matchReason || r.content}
                 </p>
               </button>
@@ -2091,18 +2631,20 @@ export function Conversations() {
             }}
           >
             {loading && conversations.length === 0 ? (
-              <div className="text-center py-8 text-neutral-600 text-xs">
+              <div className="py-8 text-center text-xs text-stone-600">
                 加载中...
               </div>
             ) : mainList.length === 0 ? (
-              <div className="text-center py-8 text-neutral-600 text-xs">
+              <div className="py-8 text-center text-xs text-stone-600">
                 {viewMode === "conversations"
                   ? "暂无对话记录"
                   : viewMode === "jarvis"
                     ? "暂无 Jarvis 会话"
                     : viewMode === "workers"
                       ? "暂无后台工位会话"
-                      : "暂无 Gemini 会话"}
+                      : viewMode === "codex"
+                        ? "暂无 Codex 会话"
+                        : "暂无 Gemini 会话"}
               </div>
             ) : viewMode === "workers" ? (
               /* Workers tab: group by slot */
@@ -2115,7 +2657,7 @@ export function Conversations() {
                     <div key={slotId}>
                       <button
                         onClick={() => toggleSlotCollapse(slotId)}
-                        className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-neutral-500 hover:text-neutral-300 sticky top-0 bg-neutral-950/90 backdrop-blur-sm z-10 border-b border-neutral-800/50"
+                        className="mission-list-group-header sticky top-0 z-10 flex w-full items-center gap-1.5 border-b px-3 py-1.5 text-[11px] text-stone-500 hover:text-stone-300"
                       >
                         {isSlotCollapsed ? (
                           <ChevronRight className="w-3 h-3" />
@@ -2126,18 +2668,18 @@ export function Conversations() {
                           className={cn(
                             "font-mono font-medium",
                             activeCount > 0
-                              ? "text-green-400/80"
-                              : "text-neutral-500",
+                              ? "text-emerald-300/80"
+                              : "text-stone-500",
                           )}
                         >
                           {displayName}
                         </span>
                         {activeCount > 0 && (
-                          <span className="text-[9px] px-1 py-0.5 rounded bg-green-500/20 text-green-400">
+                          <span className="rounded bg-emerald-400/[0.12] px-1 py-0.5 text-[9px] text-emerald-300">
                             运行中 {activeCount}
                           </span>
                         )}
-                        <span className="text-neutral-600 ml-auto">
+                        <span className="ml-auto text-stone-600">
                           {totalCount}
                         </span>
                       </button>
@@ -2183,9 +2725,9 @@ export function Conversations() {
               <>
               {starredConvs.length > 0 && (
                 <div className="mb-2">
-                  <div className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-amber-400 font-medium">
+                  <div className="flex items-center gap-2 px-2 py-1.5 text-[11px] font-medium text-amber-300">
                     <span>★ 标星</span>
-                    <span className="text-neutral-600">{starredConvs.length}</span>
+                    <span className="text-stone-600">{starredConvs.length}</span>
                   </div>
                   <div className="space-y-0.5">
                     {starredConvs.map((conv) =>
@@ -2220,7 +2762,7 @@ export function Conversations() {
                   <div key={dayKey}>
                     <button
                       onClick={() => toggleDayCollapse(dayKey)}
-                      className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-neutral-500 hover:text-neutral-300 sticky top-0 bg-neutral-950/90 backdrop-blur-sm z-10 border-b border-neutral-800/50"
+                      className="mission-list-group-header sticky top-0 z-10 flex w-full items-center gap-1.5 border-b px-3 py-1.5 text-[11px] text-stone-500 hover:text-stone-300"
                     >
                       {isDayCollapsed ? (
                         <ChevronRight className="w-3 h-3" />
@@ -2228,7 +2770,7 @@ export function Conversations() {
                         <ChevronDown className="w-3 h-3" />
                       )}
                       <span className="font-medium">{label}</span>
-                      <span className="text-neutral-600 ml-auto">
+                      <span className="ml-auto text-stone-600">
                         {items.length}
                       </span>
                     </button>
@@ -2289,6 +2831,7 @@ export function Conversations() {
           </div>
         )}
       </div>
+      )}
 
       {/* Right: Message detail */}
       <div
@@ -2300,10 +2843,13 @@ export function Conversations() {
         {selectedId && selectedConv ? (
           <>
             {/* Header */}
-            <div className="flex items-center gap-3 px-4 py-3 border-b border-neutral-800/50">
+            <div className="mission-conversation-detail-header flex items-center gap-3 border-b px-4 py-3">
               <button
-                onClick={() => setShowList(true)}
-                className="md:hidden p-1 rounded text-neutral-500 hover:text-neutral-300"
+                onClick={() => {
+                  setSidebarCollapsed(false);
+                  setShowList(true);
+                }}
+                className="rounded p-1 text-stone-500 hover:bg-white/[0.04] hover:text-stone-300 md:hidden"
               >
                 <ArrowLeft className="w-4 h-4" />
               </button>
@@ -2315,7 +2861,7 @@ export function Conversations() {
                       onClick={() =>
                         selectConversation(selectedConv.parentSessionId!)
                       }
-                      className="flex items-center gap-1 text-[11px] text-neutral-500 hover:text-neutral-300 transition-colors"
+                      className="flex items-center gap-1 text-[11px] text-stone-500 transition-colors hover:text-stone-300"
                       title="返回父会话"
                     >
                       <GitBranch className="w-3 h-3" />
@@ -2323,29 +2869,21 @@ export function Conversations() {
                     </button>
                   )}
                   {selectedConv.project && (
-                    <span className="text-sm font-medium text-neutral-200">
+                    <span className="text-sm font-medium text-stone-100">
                       {selectedConv.project.split("/").pop()}
                     </span>
                   )}
                   <Badge
                     variant="outline"
                     className={cn(
-                      "text-[10px] border-neutral-800",
-                      selectedConv.status === "active"
-                        ? "text-green-500"
-                        : selectedConv.status === "compacted"
-                          ? "text-yellow-600"
-                          : "text-neutral-600",
+                      "border-white/10 text-[10px]",
+                      conversationStatusClass(selectedConv),
                     )}
                   >
-                    {selectedConv.status === "active"
-                      ? "进行中"
-                      : selectedConv.status === "compacted"
-                        ? "已压缩"
-                        : "已完成"}
+                    {conversationStatusLabel(selectedConv)}
                   </Badge>
                 </div>
-                <div className="flex items-center gap-3 text-[11px] text-neutral-500">
+                <div className="flex items-center gap-3 text-[11px] text-stone-500">
                   {selectedConv.messageCount > 0 && (
                     <span>{selectedConv.messageCount} 条消息</span>
                   )}
@@ -2353,7 +2891,7 @@ export function Conversations() {
                     <span className="font-mono">{selectedConv.model}</span>
                   )}
                   {selectedConv.slotId && (
-                    <span className="font-mono text-cyan-500/60">
+                    <span className="font-mono text-teal-300/60">
                       {selectedConv.slotId}
                     </span>
                   )}
@@ -2362,7 +2900,7 @@ export function Conversations() {
                   </span>
                 </div>
                 {selectedConv.llmSummary && (
-                  <p className="text-[11px] text-neutral-500 mt-0.5 line-clamp-1">
+                  <p className="mt-0.5 line-clamp-1 text-[11px] text-stone-500">
                     {selectedConv.llmSummary}
                   </p>
                 )}
@@ -2377,7 +2915,7 @@ export function Conversations() {
                   "flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors flex-shrink-0",
                   showLabels
                     ? "bg-amber-500/10 text-amber-300 border border-amber-500/30"
-                    : "text-neutral-500 hover:text-neutral-300 border border-neutral-800 hover:border-neutral-700",
+                    : "border border-white/[0.08] text-stone-500 hover:border-white/15 hover:text-stone-300",
                 )}
                 title="显示/隐藏标签"
               >
@@ -2387,20 +2925,20 @@ export function Conversations() {
             </div>
 
             {/* Messages + Events Timeline */}
-            <div className="flex-1 overflow-hidden px-4 py-2 flex flex-col">
+            <div className="mission-message-pane flex flex-1 flex-col overflow-hidden px-4 py-3">
               {loadingMessages ? (
-                <div className="text-center py-8 text-neutral-600 text-xs">
+                <div className="py-8 text-center text-xs text-stone-600">
                   加载消息...
                 </div>
               ) : messages.length === 0 &&
                 selectedConv.source === "router_chat" ? (
                 <div className="flex items-center justify-center py-12">
                   <div className="max-w-sm text-center space-y-3">
-                    <Sparkles className="w-8 h-8 text-indigo-400/50 mx-auto" />
-                    <div className="text-sm text-neutral-400 font-medium">
+                    <Sparkles className="mx-auto h-8 w-8 text-indigo-300/50" />
+                    <div className="text-sm font-medium text-stone-400">
                       Gemini Router Chat
                     </div>
-                    <div className="text-xs text-neutral-600 space-y-1">
+                    <div className="space-y-1 text-xs text-stone-600">
                       {selectedConv.taskId && (
                         <div>
                           Task:{" "}
@@ -2421,7 +2959,7 @@ export function Conversations() {
                         )}
                       </div>
                     </div>
-                    <p className="text-[11px] text-neutral-600 border border-neutral-800 rounded px-3 py-2">
+                    <p className="rounded border border-white/[0.08] px-3 py-2 text-[11px] text-stone-600">
                       消息已归档或通过滚动摘要压缩。
                     </p>
                     {selectedConv.taskId && (
@@ -2433,26 +2971,44 @@ export function Conversations() {
                           ) as HTMLElement;
                           if (boardTab) boardTab.click();
                         }}
-                        className="text-[11px] text-indigo-400 hover:text-indigo-300 transition-colors"
+                        className="text-[11px] text-indigo-300 transition-colors hover:text-indigo-200"
                       >
                         → 查看关联 Board 任务
                       </button>
                     )}
                   </div>
                 </div>
-              ) : messages.length === 0 ? (
-                <div className="text-center py-8 text-neutral-600 text-xs">
+              ) : messages.length === 0 &&
+                codexToolCalls.length === 0 &&
+                viewMode === "codex" &&
+                selectedConv.source === "codex_cli" &&
+                !selectedConv.jsonlPath ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="max-w-md rounded-md border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs text-stone-500">
+                    <div className="mb-1 font-medium text-amber-300">旧 PTY 占位</div>
+                    <div>
+                      这不是可回放的 Codex JSONL 会话。MissionD DB 中还保留着这个
+                      `pty-slot-*` 诊断行，但它没有 jsonlPath，也没有消息内容；页面的
+                      “进行中”现在只统计真实 JSONL 会话。
+                    </div>
+                    {selectedConv.slotId && (
+                      <div className="mt-2 font-mono text-stone-600">{selectedConv.slotId}</div>
+                    )}
+                  </div>
+                </div>
+              ) : messages.length === 0 && codexToolCalls.length === 0 ? (
+                <div className="py-8 text-center text-xs text-stone-600">
                   暂无消息
                 </div>
               ) : (
                 <>
                   {/* Event stats summary */}
                   {(events.length > 0 || turns.length > 0) && (
-                    <div className="flex items-center gap-3 px-1 py-1.5 mb-2 text-[10px] text-neutral-600 border border-neutral-800/50 rounded">
+                    <div className="mb-2 flex items-center gap-3 rounded-md border border-white/[0.07] bg-white/[0.025] px-2 py-1.5 text-[10px] text-stone-600">
                       <Layers className="w-3 h-3" />
                       {events.length > 0 && <span>{events.length} 系统事件</span>}
                       {turns.length > 0 && (
-                        <span className="text-cyan-500/70">
+                        <span className="text-teal-300/70">
                           {turns.length} turns (S3分割)
                           {(() => {
                             const codeChanges = turns.filter(t => t.hasCodeChange).length;
@@ -2493,6 +3049,20 @@ export function Conversations() {
                       })()}
                     </div>
                   )}
+                  {codexToolCalls.length > 0 && (
+                    <div className="mb-2 flex items-center gap-3 rounded-md border border-amber-500/[0.16] bg-amber-500/[0.035] px-2 py-1.5 text-[10px] text-stone-500">
+                      <Wrench className="w-3 h-3 text-amber-400" />
+                      <span className="text-amber-300">{codexToolCalls.length} Codex tool calls</span>
+                      {codexToolCallSource && (
+                        <span className="font-mono text-stone-600">{codexToolCallSource}</span>
+                      )}
+                      {codexToolCallError && codexToolCallSource === "jsonl_fallback" && (
+                        <span className="truncate text-stone-700" title={codexToolCallError}>
+                          mission_codex_ops fallback
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {/* Label stats summary */}
                   {showLabels &&
                     Object.keys(labelsMap).length > 0 &&
@@ -2504,7 +3074,7 @@ export function Conversations() {
                         }
                       }
                       return (
-                        <div className="flex items-center gap-2 px-1 py-1.5 mb-2 text-[10px] border border-amber-500/20 bg-amber-500/5 rounded flex-wrap">
+                        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-amber-500/[0.16] bg-amber-500/[0.035] px-2 py-1.5 text-[10px]">
                           <Tag className="w-3 h-3 text-amber-400 flex-shrink-0" />
                           <span className="text-amber-300">
                             {Object.keys(labelsMap).length} 条消息有标签
@@ -2541,6 +3111,7 @@ export function Conversations() {
                     rangeChanged={(range: ListRange) => {
                       visibleRangeRef.current = {
                         startIndex: range.startIndex,
+                        endIndex: range.endIndex,
                       };
                       setVisibleStart(range.startIndex);
                     }}
@@ -2551,12 +3122,12 @@ export function Conversations() {
                     itemContent={(_index: number, item: FlatItem) => {
                       if (item.type === "date-header") {
                         return (
-                          <div className="flex items-center gap-3 my-3">
-                            <div className="flex-1 h-px bg-neutral-800/50" />
-                            <span className="text-[10px] text-neutral-600">
+                          <div className="my-3 flex items-center gap-3">
+                            <div className="h-px flex-1 bg-white/[0.07]" />
+                            <span className="text-[10px] text-stone-600">
                               {item.date}
                             </span>
-                            <div className="flex-1 h-px bg-neutral-800/50" />
+                            <div className="h-px flex-1 bg-white/[0.07]" />
                           </div>
                         );
                       }
@@ -2572,6 +3143,9 @@ export function Conversations() {
                             }
                           />
                         );
+                      }
+                      if (item.type === "codex-tool-call") {
+                        return <CodexToolCallBubble call={item.data} jsonlPath={jsonlPath} />;
                       }
                       if (item.type === "message") {
                         return (
@@ -2639,8 +3213,8 @@ export function Conversations() {
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
-              <MessageSquare className="w-8 h-8 text-neutral-700 mx-auto mb-2" />
-              <p className="text-sm text-neutral-600">选择一个对话查看详情</p>
+              <MessageSquare className="mx-auto mb-2 h-8 w-8 text-stone-700" />
+              <p className="text-sm text-stone-600">选择一个对话查看详情</p>
             </div>
           </div>
         )}

@@ -33,17 +33,17 @@ export function BoardConsolidated() {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Segmented control */}
-      <div className="px-4 sm:px-8 pt-2 pb-1">
-        <div className="inline-flex items-center gap-0.5 bg-neutral-900 rounded-lg p-0.5">
+      <div className="px-4 pt-3 sm:px-6">
+        <div className="mission-subtab-rail inline-flex items-center gap-1 rounded-lg p-1">
           {SUB_TABS.map((t) => (
             <button
               key={t.key}
               onClick={() => setSubTab(t.key)}
               className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors',
+                'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
                 subTab === t.key
-                  ? 'bg-neutral-800 text-white'
-                  : 'text-neutral-500 hover:text-neutral-300',
+                  ? 'mission-tab-trigger-active'
+                  : 'text-stone-500 hover:bg-white/[0.04] hover:text-stone-200',
               )}
             >
               {t.label}
@@ -54,7 +54,7 @@ export function BoardConsolidated() {
 
       {/* Content */}
       {subTab === 'all' ? (
-        <div className="flex-1 overflow-auto px-4 sm:px-8 pb-8 max-w-4xl">
+        <div className="max-w-6xl flex-1 overflow-auto px-4 pb-8 pt-3 sm:px-6">
           <PendingQuestions />
           <div className="mb-4">
             <QuickAdd />

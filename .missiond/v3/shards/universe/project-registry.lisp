@@ -357,7 +357,7 @@
       :missiond-role "registered XJP invoice service; owns domestic fapiao request ledger, manual issuing records, delivery links, red-letter audit, and delegates invoice.xiaojins.com DNS mutation to xjp-domain-service while keeping order eligibility and invoice locks in payments"
       :surface project-registry)
     (project :id code-center
-      :aliases [xjp-code-center code-service "代码中心" "代码浏览"]
+      :aliases [xjp-code-center xjp-codebase codebase code-service "代码中心" "代码库" "代码浏览"]
       :kind rust-service
       :management-domain xiaojinpro-core-backend
       :runtime-layer support-backend
@@ -366,7 +366,7 @@
       :backend ".missiond/backend/code-center-backend-blueprint.lisp"
       :status contract-first-service
       :checks ["cargo check -p xjp-code-center"]
-      :missiond-role "registered XJP code browsing and tagging service; code.xiaojins.com is the canonical GCP backend domain, /api/code/health remains a compatibility health path, and standard /health/live plus /health/ready are the deploy smoke paths"
+      :missiond-role "registered XJP Codebase service and compatibility code browsing/tagging service; code.xiaojins.com hosts /api/code and /api/codebase, codebase.xiaojins.com:2222 is the SSH canonical Git remote, GitHub is mirror evidence only, and standard /health/live plus /health/ready plus /api/codebase/health are deploy smoke paths"
       :surface project-registry)
     (project :id skill-store
       :aliases [skill-store-gateway skills "技能商店" "skills.xiaojins.com"]

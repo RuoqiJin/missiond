@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { ElementType } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles, Repeat2, Compass, GraduationCap } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles, Repeat2, Compass, GraduationCap, Code2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -15,6 +15,8 @@ import { KnowledgeConsolidated } from './components/KnowledgeConsolidated';
 import { LogsConsolidated } from './components/LogsConsolidated';
 import { JarvisChat } from './components/JarvisChat';
 import { CodexReplayDashboard } from './components/CodexReplayDashboard';
+import { CodexConversations } from './components/CodexConversations';
+import { XjpcodePanel } from './components/XjpcodePanel';
 import { AgentNavigationDashboard } from './components/AgentNavigationDashboard';
 import { OperationsOverview } from './components/OperationsOverview';
 import { PtyTeachingPanel } from './components/PtyTeachingPanel';
@@ -26,6 +28,7 @@ type Tab = BoardTabId;
 
 const TAB_ICON_MAP: Record<string, ElementType> = {
   Brain,
+  Code2,
   Compass,
   ClipboardList,
   Crosshair,
@@ -194,12 +197,12 @@ export default function App() {
 
   if (!mounted) {
     return (
-      <div className="min-h-screen bg-background p-4 sm:p-8">
-        <Skeleton className="h-7 w-32 bg-neutral-800 mb-6" />
-        <Skeleton className="h-10 bg-neutral-800/50 rounded-lg mb-4" />
+      <div className="mission-app-shell min-h-screen p-4 sm:p-8">
+        <Skeleton className="mb-6 h-7 w-32 bg-muted/70" />
+        <Skeleton className="mb-4 h-10 rounded-lg bg-muted/45" />
         <div className="space-y-2">
           {[1, 2, 3, 4].map((i) => (
-            <Skeleton key={i} className="h-16 bg-neutral-800/30 rounded-lg" />
+            <Skeleton key={i} className="h-16 rounded-lg bg-muted/30" />
           ))}
         </div>
       </div>
@@ -207,25 +210,25 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-background">
+    <div className="mission-app-shell flex h-screen flex-col overflow-hidden bg-background text-foreground">
       {/* Top bar with tabs */}
-      <div className="flex items-center justify-between px-4 sm:px-8 pt-4 pb-2">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-orange-500/10">
-              <ClipboardList className="w-5 h-5 text-orange-400" />
+      <div className="mission-topbar flex items-center justify-between gap-4 px-4 py-3 sm:px-6">
+        <div className="flex min-w-0 items-center gap-4">
+          <div className="flex shrink-0 items-center gap-3">
+            <div className="mission-brand-mark">
+              <ClipboardList className="h-5 w-5 text-amber-300" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-white">Mission Board</h1>
-              <p className="text-xs text-neutral-500 mt-0.5 flex items-center gap-1.5">
+              <h1 className="text-[17px] font-semibold leading-tight text-stone-50">MissionD</h1>
+              <p className="mt-0.5 flex items-center gap-1.5 text-xs text-stone-400">
                 {isLoading && <Loader2 className="w-3 h-3 animate-spin" />}
-                {taskCount} 个待办
+                {taskCount} 个待办 · Operator Console
               </p>
             </div>
           </div>
 
           {/* Tabs */}
-          <div className="flex items-center gap-1 ml-4 bg-neutral-900 rounded-lg p-0.5 overflow-x-auto overflow-y-hidden">
+          <div className="mission-tab-rail ml-1 flex min-w-0 items-center gap-1 overflow-x-auto overflow-y-hidden rounded-lg p-1">
             {BOARD_TABS.map(({ id, label, icon }) => {
               const Icon = TAB_ICON_MAP[icon] ?? ClipboardList;
               return (
@@ -233,8 +236,8 @@ export default function App() {
                   key={id}
                   onClick={() => setTab(id)}
                   className={cn(
-                    'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                    tab === id ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+                    'mission-tab-trigger flex shrink-0 items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors',
+                    tab === id && 'mission-tab-trigger-active',
                   )}
                 >
                   <Icon className="w-3 h-3" />
@@ -249,13 +252,13 @@ export default function App() {
           {/* WS connection indicator */}
           <div
             className={cn(
-              'w-1.5 h-1.5 rounded-full transition-colors',
+              'h-2 w-2 rounded-full transition-colors',
               wsState === 'connected' ? 'bg-emerald-500' : wsState === 'connecting' ? 'bg-amber-500 animate-pulse' : 'bg-neutral-600',
             )}
             title={`EventBus: ${wsState}`}
           />
           {tab === 'board' && (
-            <Button size="sm" variant="outline" onClick={() => openAddDialog()} className="gap-1 border-neutral-800 text-neutral-400 hover:text-white">
+            <Button size="sm" variant="outline" onClick={() => openAddDialog()} className="gap-1">
               <Plus className="w-4 h-4" />
               详细创建
             </Button>
@@ -273,14 +276,16 @@ export default function App() {
         </>
       ) : tab === 'navigator' ? (
         <AgentNavigationDashboard />
+      ) : tab === 'xjpcode' ? (
+        <XjpcodePanel />
       ) : tab === 'teach' ? (
         <PtyTeachingPanel slots={slots} refreshSlots={fetchSlots} />
       ) : tab === 'terminal' ? (
-        <div className="mx-4 mb-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950/60 sm:mx-8 lg:flex-row">
-          <aside className="flex max-h-48 shrink-0 flex-col border-b border-neutral-800 bg-neutral-950/80 lg:max-h-none lg:w-72 lg:border-b-0 lg:border-r">
-            <div className="shrink-0 border-b border-neutral-800 px-3 py-2">
-              <div className="text-xs font-medium text-neutral-300">Workstations</div>
-              <div className="mt-0.5 text-[10px] text-neutral-600">{slots.length} projected slots</div>
+        <div className="mission-panel mx-4 mb-4 flex min-h-0 flex-1 flex-col overflow-hidden sm:mx-6 lg:flex-row">
+          <aside className="flex max-h-48 shrink-0 flex-col border-b border-white/[0.07] bg-black/10 lg:max-h-none lg:w-72 lg:border-b-0 lg:border-r">
+            <div className="shrink-0 border-b border-white/[0.07] px-3 py-2.5">
+              <div className="text-xs font-medium text-stone-200">Workstations</div>
+              <div className="mt-0.5 text-[10px] text-stone-500">{slots.length} projected slots</div>
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-2">
               {slotsByProvider.length > 0 ? (
@@ -317,8 +322,8 @@ export default function App() {
                               className={cn(
                                 'w-full rounded-md border px-2 py-2 text-left transition-colors',
                                 isActive
-                                  ? 'border-orange-500/45 bg-orange-500/15 text-orange-200'
-                                  : 'border-neutral-900 bg-neutral-900/40 text-neutral-400 hover:border-neutral-700 hover:bg-neutral-900/80 hover:text-neutral-200',
+                                  ? 'border-amber-400/35 bg-amber-400/[0.12] text-amber-100'
+                                  : 'border-white/[0.055] bg-white/[0.025] text-stone-400 hover:border-white/15 hover:bg-white/[0.045] hover:text-stone-100',
                               )}
                             >
                               <div className="flex min-w-0 items-center gap-2">
@@ -338,7 +343,7 @@ export default function App() {
                   ))}
                 </div>
               ) : (
-                <div className="px-1 text-xs text-neutral-600">Loading slots...</div>
+                <div className="px-1 text-xs text-stone-500">Loading slots...</div>
               )}
             </div>
           </aside>
@@ -347,14 +352,14 @@ export default function App() {
             {activeSlot ? (
               <Terminal key={activeSlot} slotId={activeSlot} slot={activeSlotDef ?? undefined} activeTask={terminalActiveTask} />
             ) : (
-              <div className="flex h-full items-center justify-center text-sm text-neutral-500">Loading slots...</div>
+              <div className="flex h-full items-center justify-center text-sm text-stone-500">Loading slots...</div>
             )}
           </main>
 
-          <aside className="hidden w-80 shrink-0 flex-col border-l border-neutral-800 bg-neutral-950/80 xl:flex">
-            <div className="border-b border-neutral-800 px-3 py-2">
-              <div className="text-xs font-medium text-neutral-300">Evidence</div>
-              <div className="mt-0.5 truncate text-[10px] text-neutral-600" title={activeSlotDef?.id}>{activeSlotDef?.id || 'No slot selected'}</div>
+          <aside className="hidden w-80 shrink-0 flex-col border-l border-white/[0.07] bg-black/10 xl:flex">
+            <div className="border-b border-white/[0.07] px-3 py-2.5">
+              <div className="text-xs font-medium text-stone-200">Evidence</div>
+              <div className="mt-0.5 truncate text-[10px] text-stone-500" title={activeSlotDef?.id}>{activeSlotDef?.id || 'No slot selected'}</div>
             </div>
             <div className="min-h-0 flex-1 space-y-4 overflow-auto p-3 text-xs">
               <section>
@@ -415,6 +420,8 @@ export default function App() {
         </div>
       ) : tab === 'exec' ? (
         <ExecDashboard slots={slots} tasks={tasks} />
+      ) : tab === 'codex-conversations' ? (
+        <CodexConversations />
       ) : tab === 'codex' ? (
         <CodexReplayDashboard />
       ) : tab === 'system' ? (

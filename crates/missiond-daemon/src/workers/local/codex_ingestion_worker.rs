@@ -114,7 +114,8 @@ struct ParsedToolCall {
 /// Parsed text message (agent or user) from JSONL.
 #[derive(Debug, Clone)]
 struct ParsedMessage {
-    role: String, // "assistant" or "user"
+    role: String, // "assistant" | "user" | "system"
+    raw_role: String,
     content: String,
     timestamp: String,
     line_no: usize,
@@ -679,9 +680,17 @@ async fn process_thread(
                 parent_uuid: None,
                 model: thread.model.clone(),
                 timestamp: m.timestamp.clone(),
-                metadata: Some(r#"{"source":"codex_ingestion"}"#.to_string()),
+                metadata: Some(
+                    serde_json::json!({
+                        "source": "codex_ingestion",
+                        "origin": format!("{:?}", m.origin),
+                        "jsonl_line": m.line_no,
+                        "raw_role": m.raw_role,
+                    })
+                    .to_string(),
+                ),
                 tool_name: None,
-                raw_role: Some(m.role.clone()),
+                raw_role: Some(m.raw_role.clone()),
                 content_types: Some(r#"["text"]"#.to_string()),
                 has_image: false,
                 has_tool_use: false,
@@ -1077,11 +1086,21 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                         }
                     }
                     "message" => {
-                        // Agent text message — extract from content array or direct string
+                        // Provider text message — preserve the raw JSONL role.
                         let text = extract_message_text(&event.payload);
+                        let raw_role = event
+                            .payload
+                            .get("role")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("assistant");
                         if !text.is_empty() {
+                            let Some(role) = project_codex_response_item_role(raw_role, &text)
+                            else {
+                                continue;
+                            };
                             messages.push(ParsedMessage {
-                                role: "assistant".to_string(),
+                                role: role.to_string(),
+                                raw_role: raw_role.to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
                                 line_no: physical_line_no,
@@ -1107,6 +1126,7 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                         if !text.is_empty() {
                             messages.push(ParsedMessage {
                                 role: "user".to_string(),
+                                raw_role: "user".to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
                                 line_no: physical_line_no,
@@ -1126,6 +1146,7 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                         if !text.is_empty() {
                             messages.push(ParsedMessage {
                                 role: "assistant".to_string(),
+                                raw_role: "assistant".to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
                                 line_no: physical_line_no,
@@ -1146,6 +1167,7 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
                         if !text.is_empty() {
                             messages.push(ParsedMessage {
                                 role: "assistant".to_string(),
+                                raw_role: "assistant".to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
                                 line_no: physical_line_no,
@@ -1175,6 +1197,24 @@ fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result
     })
 }
 
+fn project_codex_response_item_role(raw_role: &str, text: &str) -> Option<&'static str> {
+    match raw_role {
+        "assistant" => Some("assistant"),
+        "developer" | "system" => Some("system"),
+        "user" if is_codex_context_injection(text) => Some("system"),
+        "user" => Some("user"),
+        _ => None,
+    }
+}
+
+fn is_codex_context_injection(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("<permissions instructions>")
+        || trimmed.starts_with("<app-context>")
+        || trimmed.starts_with("# AGENTS.md instructions")
+        || trimmed.contains("<environment_context>")
+}
+
 fn dedupe_codex_projected_messages(messages: Vec<ParsedMessage>) -> Vec<ParsedMessage> {
     let mut deduped = Vec::with_capacity(messages.len());
     for message in messages {
@@ -1200,15 +1240,11 @@ fn find_codex_projected_duplicate(
     messages: &[ParsedMessage],
     candidate: &ParsedMessage,
 ) -> Option<usize> {
-    if candidate.role != "assistant" {
-        return None;
-    }
-
     for (idx, existing) in messages.iter().enumerate().rev() {
-        if existing.role == "user" {
+        if candidate.role == "assistant" && existing.role == "user" {
             break;
         }
-        if existing.role != "assistant" || existing.content != candidate.content {
+        if existing.role != candidate.role || existing.content != candidate.content {
             continue;
         }
         if codex_message_timestamps_within_projection_window(
@@ -1335,6 +1371,7 @@ mod tests {
     fn codex_message_uuid_is_non_null_and_stable() {
         let message = ParsedMessage {
             role: "assistant".to_string(),
+            raw_role: "assistant".to_string(),
             content: "done".to_string(),
             timestamp: "2026-05-03T00:00:00Z".to_string(),
             line_no: 42,
@@ -1578,6 +1615,7 @@ mod tests {
         // message row.
         let assistant = ParsedMessage {
             role: "assistant".to_string(),
+            raw_role: "assistant".to_string(),
             content: "ok".to_string(),
             timestamp: "2026-05-03T00:00:00Z".to_string(),
             line_no: 1,
@@ -1586,14 +1624,15 @@ mod tests {
         };
         let user = ParsedMessage {
             role: "user".to_string(),
+            raw_role: "user".to_string(),
             content: "ping".to_string(),
             timestamp: "2026-05-03T00:00:01Z".to_string(),
             line_no: 2,
             source_event_hash: short_sha256("b", 16),
             origin: CodexMessageOrigin::EventUserMessage,
         };
-        let raw_role_assistant = Some(assistant.role.clone());
-        let raw_role_user = Some(user.role.clone());
+        let raw_role_assistant = Some(assistant.raw_role.clone());
+        let raw_role_user = Some(user.raw_role.clone());
         assert_eq!(raw_role_assistant.as_deref(), Some("assistant"));
         assert_eq!(raw_role_user.as_deref(), Some("user"));
     }
