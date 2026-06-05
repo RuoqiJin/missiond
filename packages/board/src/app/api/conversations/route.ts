@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { open, readFile, readdir, stat } from 'fs/promises';
+import { createHash } from 'crypto';
 import os from 'os';
 import path from 'path';
 import { callTool } from '@/lib/missiond';
@@ -61,6 +62,8 @@ interface CodexProjectedTurn {
 
 interface ConversationListEntry {
   id: string;
+  uiId?: string;
+  displayId?: string;
   project: string | null;
   slotId: string | null;
   source: string;
@@ -76,6 +79,10 @@ interface ConversationListEntry {
   status: string;
   conversationType: string;
   chatType: string | null;
+  topicId?: string | null;
+  topicLabel?: string | null;
+  providerTitle?: string | null;
+  displayTitle?: string | null;
   llmSummary: string | null;
   labels?: [string, string][];
 }
@@ -86,7 +93,14 @@ interface CodexJsonlFile {
   size: number;
 }
 
+interface CodexSessionNameEntry {
+  id: string;
+  title: string;
+  updatedAt: string | null;
+}
+
 const CODEX_FALLBACK_SCAN_TTL_MS = 15_000;
+const CODEX_SESSION_NAME_TTL_MS = 5_000;
 const CODEX_FALLBACK_WINDOW_MS = 48 * 60 * 60 * 1000;
 const CODEX_FALLBACK_ACTIVE_MS = 20 * 60 * 1000;
 const CODEX_FALLBACK_HEAD_BYTES = 128 * 1024;
@@ -94,6 +108,9 @@ const CODEX_FALLBACK_TAIL_BYTES = 384 * 1024;
 
 let codexJsonlFileCache:
   | { expiresAt: number; files: CodexJsonlFile[] }
+  | null = null;
+let codexSessionNameCache:
+  | { expiresAt: number; names: Map<string, CodexSessionNameEntry> }
   | null = null;
 
 function asObject(value: unknown): JsonObject | null {
@@ -110,14 +127,117 @@ function asNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function codexHome(): string {
+  return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+}
+
 function codexSessionsRoot(): string {
-  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  return path.join(codexHome, 'sessions');
+  return path.join(codexHome(), 'sessions');
 }
 
 function codexSessionIdFromPath(jsonlPath: string): string | null {
   const match = jsonlPath.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
   return match?.[1] ?? null;
+}
+
+function compactTitle(value: string | null, max = 120): string | null {
+  if (!value) return null;
+  const compact = value.replace(/\s+/g, ' ').trim();
+  if (!compact) return null;
+  return compact.length > max ? `${compact.slice(0, max)}...` : compact;
+}
+
+function parseTimeMs(value: string | null): number {
+  if (!value) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+async function loadCodexSessionNames(): Promise<Map<string, CodexSessionNameEntry>> {
+  const now = Date.now();
+  if (codexSessionNameCache && codexSessionNameCache.expiresAt > now) {
+    return codexSessionNameCache.names;
+  }
+
+  const names = new Map<string, CodexSessionNameEntry>();
+  const indexPath = path.join(codexHome(), 'session_index.jsonl');
+  try {
+    const text = await readFile(indexPath, 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let record: JsonObject;
+      try {
+        record = JSON.parse(trimmed) as JsonObject;
+      } catch {
+        continue;
+      }
+      const id = asString(record.id);
+      const title = compactTitle(
+        asString(record.thread_name) ??
+          asString(record.title) ??
+          asString(record.name),
+      );
+      if (!id || !title) continue;
+      const updatedAt = asString(record.updated_at) ?? asString(record.updatedAt);
+      const existing = names.get(id);
+      if (!existing || parseTimeMs(updatedAt) >= parseTimeMs(existing.updatedAt)) {
+        names.set(id, { id, title, updatedAt });
+      }
+    }
+  } catch {
+    // Codex can run without session_index.jsonl; list entries will fall back to summaries.
+  }
+
+  codexSessionNameCache = {
+    expiresAt: now + CODEX_SESSION_NAME_TTL_MS,
+    names,
+  };
+  return names;
+}
+
+function stableShortHash(value: string): string {
+  return createHash('sha1').update(value).digest('hex').slice(0, 8);
+}
+
+function codexConversationUiId(conv: ConversationListEntry): string {
+  if (conv.jsonlPath) return `${conv.id}:${stableShortHash(conv.jsonlPath)}`;
+  return conv.id;
+}
+
+function codexConversationDisplayId(conv: ConversationListEntry): string {
+  if (!conv.jsonlPath) return conv.id.slice(0, 12);
+  return `${conv.id.slice(0, 8)}:${stableShortHash(conv.jsonlPath).slice(0, 4)}`;
+}
+
+function decorateCodexConversation(
+  conv: ConversationListEntry,
+  names: Map<string, CodexSessionNameEntry>,
+): ConversationListEntry {
+  if (conv.source !== 'codex_cli') return conv;
+  const providerTitle =
+    compactTitle(conv.providerTitle ?? null) ??
+    names.get(conv.id)?.title ??
+    null;
+  const displayTitle =
+    compactTitle(conv.displayTitle ?? null) ??
+    providerTitle ??
+    compactTitle(conv.topicLabel ?? null) ??
+    compactTitle(conv.llmSummary, 120);
+  return {
+    ...conv,
+    uiId: conv.uiId ?? codexConversationUiId(conv),
+    displayId: conv.displayId ?? codexConversationDisplayId(conv),
+    providerTitle,
+    displayTitle,
+  };
+}
+
+async function decorateCodexConversations(
+  conversations: ConversationListEntry[],
+): Promise<ConversationListEntry[]> {
+  const names = await loadCodexSessionNames();
+  return conversations.map((conv) => decorateCodexConversation(conv, names));
 }
 
 async function readFileSlice(filePath: string, start: number, length: number): Promise<string> {
@@ -185,6 +305,31 @@ async function recentCodexJsonlFiles(): Promise<CodexJsonlFile[]> {
     files: limited,
   };
   return limited;
+}
+
+function isSafeCodexJsonlPath(filePath: string): boolean {
+  const resolved = path.resolve(filePath);
+  const roots = [
+    path.resolve(codexSessionsRoot()),
+    path.resolve(path.join(codexHome(), 'archived_sessions')),
+  ];
+  return (
+    resolved.endsWith('.jsonl') &&
+    roots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`))
+  );
+}
+
+async function codexJsonlFileFromRequestedPath(
+  filePath: string,
+): Promise<CodexJsonlFile | null> {
+  if (!isSafeCodexJsonlPath(filePath)) return null;
+  try {
+    const st = await stat(filePath);
+    if (!st.isFile()) return null;
+    return { path: filePath, mtimeMs: st.mtimeMs, size: st.size };
+  } catch {
+    return null;
+  }
 }
 
 function stringifyPayload(value: unknown): string | null {
@@ -625,27 +770,51 @@ async function mergeCodexJsonlFallback(
       .map((conv) => conv.jsonlPath)
       .filter((value): value is string => Boolean(value)),
   );
+  const byUiId = new Set(normalizedDbConversations.map(codexConversationUiId));
 
   const fallback = await Promise.all(files.map(summarizeCodexJsonlFile));
   const merged = [...normalizedDbConversations];
   for (const conv of fallback) {
     if (!conv) continue;
-    if (byId.has(conv.id) || byPath.has(conv.jsonlPath || '')) continue;
+    if (byPath.has(conv.jsonlPath || '')) continue;
+    if (byId.has(conv.id) && !conv.jsonlPath) continue;
+    const uiId = codexConversationUiId(conv);
+    if (byUiId.has(uiId)) continue;
     if (options.project && conv.project !== options.project) continue;
     if (options.status && conv.status !== options.status) continue;
     merged.push(conv);
+    byUiId.add(uiId);
+    if (conv.jsonlPath) byPath.add(conv.jsonlPath);
   }
 
-  return merged
+  return (await decorateCodexConversations(merged))
     .sort(sortCodexConversations)
     .slice(0, Math.max(1, options.limit));
 }
 
-async function loadFilesystemCodexConversation(sessionId: string): Promise<ConversationListEntry | null> {
+async function loadFilesystemCodexConversation(
+  sessionId: string,
+  requestedJsonlPath?: string | null,
+): Promise<ConversationListEntry | null> {
+  if (requestedJsonlPath) {
+    const requestedFile = await codexJsonlFileFromRequestedPath(requestedJsonlPath);
+    if (requestedFile) {
+      const requestedConversation = await summarizeCodexJsonlFile(requestedFile);
+      const pathSessionId = codexSessionIdFromPath(requestedFile.path);
+      if (requestedConversation && (requestedConversation.id === sessionId || pathSessionId === sessionId)) {
+        const [decorated] = await decorateCodexConversations([requestedConversation]);
+        return decorated ?? requestedConversation;
+      }
+    }
+  }
+
   const files = await recentCodexJsonlFiles();
   const file = files.find((candidate) => codexSessionIdFromPath(candidate.path) === sessionId);
   if (!file) return null;
-  return summarizeCodexJsonlFile(file);
+  const conversation = await summarizeCodexJsonlFile(file);
+  if (!conversation) return null;
+  const [decorated] = await decorateCodexConversations([conversation]);
+  return decorated ?? conversation;
 }
 
 function codexProjectedMessagePriority(origin: string): number {
@@ -1085,6 +1254,7 @@ export async function GET(req: NextRequest) {
     if (sessionId) {
       const tail = req.nextUrl.searchParams.get('tail') || '200';
       const sinceId = req.nextUrl.searchParams.get('sinceId');
+      const requestedJsonlPath = req.nextUrl.searchParams.get('jsonlPath');
       const includeLabels = req.nextUrl.searchParams.get('labels') === '1';
       const includeCodexToolCalls = req.nextUrl.searchParams.get('includeCodexToolCalls') === '1';
       const toolLimit = Number(req.nextUrl.searchParams.get('toolLimit') || '100000');
@@ -1108,7 +1278,7 @@ export async function GET(req: NextRequest) {
           }).catch(() => ({ events: [] })),
         ]);
       } catch (err) {
-        const filesystemConversation = await loadFilesystemCodexConversation(sessionId);
+        const filesystemConversation = await loadFilesystemCodexConversation(sessionId, requestedJsonlPath);
         if (!filesystemConversation) throw err;
         const result: Record<string, unknown> = {
           conversation: filesystemConversation,
@@ -1140,7 +1310,16 @@ export async function GET(req: NextRequest) {
       if (includeCodexToolCalls) {
         const conversation = asObject(result.conversation);
         let jsonlPath = asString(conversation?.jsonlPath);
-        if (!jsonlPath) {
+        const requestedFilesystemConversation = requestedJsonlPath
+          ? await loadFilesystemCodexConversation(sessionId, requestedJsonlPath)
+          : null;
+        if (requestedFilesystemConversation?.jsonlPath) {
+          jsonlPath = requestedFilesystemConversation.jsonlPath;
+          result.conversation = {
+            ...(conversation ?? {}),
+            ...requestedFilesystemConversation,
+          };
+        } else if (!jsonlPath) {
           const filesystemConversation = await loadFilesystemCodexConversation(sessionId);
           if (filesystemConversation?.jsonlPath) {
             jsonlPath = filesystemConversation.jsonlPath;
@@ -1167,11 +1346,21 @@ export async function GET(req: NextRequest) {
             status: asString(conversation.status) ?? 'completed',
             conversationType: asString(conversation.conversationType) ?? 'codex_chat',
             chatType: asString(conversation.chatType),
+            topicId: asString(conversation.topicId),
+            topicLabel: asString(conversation.topicLabel),
+            providerTitle: asString(conversation.providerTitle),
+            displayTitle: asString(conversation.displayTitle),
+            uiId: asString(conversation.uiId) ?? undefined,
+            displayId: asString(conversation.displayId) ?? undefined,
             llmSummary: asString(conversation.llmSummary),
             labels: Array.isArray(conversation.labels)
               ? (conversation.labels as [string, string][])
               : undefined,
           });
+          const [decoratedConversation] = await decorateCodexConversations([
+            result.conversation as ConversationListEntry,
+          ]);
+          if (decoratedConversation) result.conversation = decoratedConversation;
         }
         if (jsonlPath) {
           const codexMessages = await parseCodexMessagesFromJsonl(sessionId, jsonlPath);
@@ -1212,6 +1401,9 @@ export async function GET(req: NextRequest) {
         limit: Number(limit),
       });
       return NextResponse.json(merged);
+    }
+    if (Array.isArray(conversations)) {
+      return NextResponse.json(await decorateCodexConversations(conversations as ConversationListEntry[]));
     }
     return NextResponse.json(conversations);
   } catch (err) {

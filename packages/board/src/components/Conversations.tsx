@@ -39,6 +39,8 @@ import { FolderOpen } from "lucide-react";
 
 interface Conversation {
   id: string;
+  uiId?: string;
+  displayId?: string;
   project: string | null;
   slotId: string | null;
   source: string;
@@ -54,6 +56,10 @@ interface Conversation {
   status: string;
   conversationType: string;
   chatType: string | null;
+  topicId?: string | null;
+  topicLabel?: string | null;
+  providerTitle?: string | null;
+  displayTitle?: string | null;
   llmSummary: string | null;
   labels?: [string, string][];
 }
@@ -168,6 +174,55 @@ function extractUserDisplayContent(content: string | null | undefined): string {
 function makeUserPreview(content: string | null | undefined, maxLength = 120): string {
   const preview = extractUserDisplayContent(content).replace(/\s+/g, " ").trim();
   return preview.length > maxLength ? preview.slice(0, maxLength) : preview;
+}
+
+function compactConversationText(value: string | null | undefined, maxLength = 140): string | null {
+  const compact = (value || "").replace(/\s+/g, " ").trim();
+  if (!compact) return null;
+  return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
+}
+
+function conversationUniqueKey(conv: Conversation): string {
+  if (conv.uiId) return conv.uiId;
+  if (conv.jsonlPath) return `${conv.id}:${conv.jsonlPath}`;
+  return conv.id;
+}
+
+function conversationDomIdFromKey(key: string): string {
+  return `conv-${key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+function conversationDomId(conv: Conversation): string {
+  return conversationDomIdFromKey(conversationUniqueKey(conv));
+}
+
+function conversationShortId(conv: Conversation): string {
+  return conv.displayId || conv.id.slice(0, 12);
+}
+
+function conversationTitle(conv: Conversation): string | null {
+  return (
+    compactConversationText(conv.displayTitle) ||
+    compactConversationText(conv.providerTitle) ||
+    compactConversationText(conv.topicLabel) ||
+    compactConversationText(conv.llmSummary) ||
+    null
+  );
+}
+
+function conversationProjectName(conv: Conversation): string | null {
+  if (!conv.project) return null;
+  return conv.project.split("/").filter(Boolean).pop() || conv.project;
+}
+
+function conversationDetailTitle(conv: Conversation): string {
+  return conversationTitle(conv) || conversationProjectName(conv) || conv.id;
+}
+
+function conversationSecondarySummary(conv: Conversation, title: string | null): string | null {
+  const summary = compactConversationText(conv.llmSummary, 180);
+  if (!summary || summary === title) return null;
+  return summary;
 }
 
 function isCodexPtyPlaceholder(conv: Conversation): boolean {
@@ -1335,10 +1390,15 @@ function ConversationListItem({
   const isPlaceholder = isCodexPtyPlaceholder(conv);
   const isJsonlFallback =
     conv.source === "codex_cli" && Boolean(conv.jsonlPath) && conv.chatType === "jsonl_fallback";
+  const title = conversationTitle(conv);
+  const summary = conversationSecondarySummary(conv, title);
+  const projectName = conversationProjectName(conv);
+  const shortId = conversationShortId(conv);
   return (
     <div className={cn(isSubagent && "ml-4 border-l border-white/[0.07] pl-1.5")}>
       <button
         onClick={onClick}
+        title={`${conversationDetailTitle(conv)}\nID: ${conv.id}${conv.jsonlPath ? `\nJSONL: ${conv.jsonlPath}` : ""}`}
         className={cn(
           "mission-conv-list-item w-full p-3 text-left transition-colors",
           active && "mission-conv-list-item-active",
@@ -1363,6 +1423,11 @@ function ConversationListItem({
             {conv.slotId && (
               <span className="truncate font-mono text-[10px] text-stone-600">
                 {conv.slotId}
+              </span>
+            )}
+            {!conv.slotId && projectName && (
+              <span className="truncate font-mono text-[10px] text-stone-600">
+                {projectName}
               </span>
             )}
           </div>
@@ -1396,9 +1461,24 @@ function ConversationListItem({
           </div>
         </div>
 
-        {conv.llmSummary && (
+        {title && (
+          <p className="mt-1 line-clamp-2 text-[12px] font-medium leading-relaxed text-stone-300">
+            {title}
+          </p>
+        )}
+
+        <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] text-stone-600">
+          <span className="font-mono text-stone-500">ID {shortId}</span>
+          {conv.providerTitle && conv.source === "codex_cli" && (
+            <span className="rounded bg-emerald-400/[0.08] px-1 text-[9px] text-emerald-300/60">
+              Codex 命名
+            </span>
+          )}
+        </div>
+
+        {summary && (
           <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-stone-500">
-            {conv.llmSummary}
+            {summary}
           </p>
         )}
 
@@ -1540,6 +1620,8 @@ export function Conversations({
   hideViewTabs = false,
 }: ConversationsProps = {}) {
   const selectedStorageKey = `${storageScope}:selectedId`;
+  const selectedKeyStorageKey = `${storageScope}:selectedKey`;
+  const selectedJsonlPathStorageKey = `${storageScope}:selectedJsonlPath`;
   const viewModeStorageKey = `${storageScope}:viewMode`;
   const listScrollStorageKey = `${storageScope}:listScroll`;
   const msgScrollStorageKey = `${storageScope}:msgScrollIdx`;
@@ -1556,6 +1638,12 @@ export function Conversations({
   const [showLabels, setShowLabels] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(() =>
     sessionStorage.getItem(selectedStorageKey),
+  );
+  const [selectedKey, setSelectedKey] = useState<string | null>(() =>
+    sessionStorage.getItem(selectedKeyStorageKey),
+  );
+  const [selectedJsonlPath, setSelectedJsonlPath] = useState<string | null>(() =>
+    sessionStorage.getItem(selectedJsonlPathStorageKey),
   );
   const [jsonlPath, setJsonlPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1645,6 +1733,19 @@ export function Conversations({
     if (selectedId) sessionStorage.setItem(selectedStorageKey, selectedId);
     else sessionStorage.removeItem(selectedStorageKey);
   }, [selectedId, selectedStorageKey]);
+
+  useEffect(() => {
+    if (selectedKey) sessionStorage.setItem(selectedKeyStorageKey, selectedKey);
+    else sessionStorage.removeItem(selectedKeyStorageKey);
+  }, [selectedKey, selectedKeyStorageKey]);
+
+  useEffect(() => {
+    if (selectedJsonlPath) {
+      sessionStorage.setItem(selectedJsonlPathStorageKey, selectedJsonlPath);
+    } else {
+      sessionStorage.removeItem(selectedJsonlPathStorageKey);
+    }
+  }, [selectedJsonlPath, selectedJsonlPathStorageKey]);
 
   useEffect(() => {
     if (!fixedViewMode) sessionStorage.setItem(viewModeStorageKey, viewMode);
@@ -1748,19 +1849,27 @@ export function Conversations({
   const PAGE_SIZE = 500;
 
   const fetchMessages = useCallback(
-    async (sessionId: string, withLabels?: boolean, options?: { silent?: boolean }) => {
+    async (
+      sessionId: string,
+      withLabels?: boolean,
+      options?: { silent?: boolean; jsonlPath?: string | null },
+    ) => {
       if (!options?.silent) setLoadingMessages(true);
       if (!options?.silent) setSearchResults(null);
       try {
-        const labelsParam = withLabels ? "&labels=1" : "";
-        const codexParam =
-          viewMode === "codex"
-            ? "&includeCodexToolCalls=1&toolLimit=100000"
-            : "";
+        const params = new URLSearchParams({
+          sessionId,
+          sinceId: "0",
+          tail: String(PAGE_SIZE),
+        });
+        if (withLabels) params.set("labels", "1");
+        if (viewMode === "codex") {
+          params.set("includeCodexToolCalls", "1");
+          params.set("toolLimit", "100000");
+          if (options?.jsonlPath) params.set("jsonlPath", options.jsonlPath);
+        }
         // Load from beginning (sinceId=0) instead of tail
-        const res = await fetch(
-          `/api/conversations?sessionId=${encodeURIComponent(sessionId)}&sinceId=0&tail=${PAGE_SIZE}${labelsParam}${codexParam}`,
-        );
+        const res = await fetch(`/api/conversations?${params}`);
         if (res.ok) {
           const data = await res.json();
           const codexProjectedMessages = Array.isArray(data.codexMessages)
@@ -1772,7 +1881,11 @@ export function Conversations({
           setCodexToolCalls(Array.isArray(data.codexToolCalls) ? data.codexToolCalls : []);
           setCodexToolCallSource(data.codexToolCallSource || null);
           setCodexToolCallError(data.codexToolCallError || null);
-          setJsonlPath(data.conversation?.jsonlPath || null);
+          const resolvedJsonlPath = data.conversation?.jsonlPath || null;
+          setJsonlPath(resolvedJsonlPath);
+          if (!options?.silent && viewMode === "codex") {
+            setSelectedJsonlPath(resolvedJsonlPath);
+          }
           setLabelsMap(data.labels || {});
           setUserIndex(
             codexProjectedMessages
@@ -1860,9 +1973,18 @@ export function Conversations({
     if (restoredRef.current || loading || conversations.length === 0) return;
     restoredRef.current = true;
     const savedId = sessionStorage.getItem(selectedStorageKey);
-    if (savedId && conversations.some((c) => c.id === savedId)) {
-      setSelectedId(savedId);
-      fetchMessages(savedId, showLabels);
+    const savedKey = sessionStorage.getItem(selectedKeyStorageKey);
+    const savedJsonlPath = sessionStorage.getItem(selectedJsonlPathStorageKey);
+    const savedConversation =
+      (savedKey ? conversations.find((c) => conversationUniqueKey(c) === savedKey) : null) ||
+      (savedId ? conversations.find((c) => c.id === savedId) : null);
+    if (savedConversation) {
+      const key = conversationUniqueKey(savedConversation);
+      const resolvedJsonlPath = savedJsonlPath || savedConversation.jsonlPath || null;
+      setSelectedId(savedConversation.id);
+      setSelectedKey(key);
+      setSelectedJsonlPath(resolvedJsonlPath);
+      fetchMessages(savedConversation.id, showLabels, { jsonlPath: resolvedJsonlPath });
       // Restore list scroll position after DOM updates
       requestAnimationFrame(() => {
         const savedListScroll = sessionStorage.getItem(listScrollStorageKey);
@@ -1871,31 +1993,68 @@ export function Conversations({
         }
       });
     }
-  }, [loading, conversations, fetchMessages, showLabels, selectedStorageKey, listScrollStorageKey]);
+  }, [
+    loading,
+    conversations,
+    fetchMessages,
+    showLabels,
+    selectedStorageKey,
+    selectedKeyStorageKey,
+    selectedJsonlPathStorageKey,
+    listScrollStorageKey,
+  ]);
 
   const selectConversation = useCallback(
-    (id: string) => {
+    (conversationOrId: Conversation | string) => {
+      const conversation = typeof conversationOrId === "string"
+        ? conversations.find((c) => c.id === conversationOrId)
+        : conversationOrId;
+      const id = typeof conversationOrId === "string" ? conversationOrId : conversationOrId.id;
+      const key = conversation ? conversationUniqueKey(conversation) : id;
+      const nextJsonlPath = conversation?.jsonlPath || null;
       setSelectedId(id);
+      setSelectedKey(key);
+      setSelectedJsonlPath(nextJsonlPath);
+      setJsonlPath(nextJsonlPath);
       setShowList(false);
-      fetchMessages(id, showLabels);
+      fetchMessages(id, showLabels, { jsonlPath: nextJsonlPath });
     },
-    [fetchMessages, showLabels],
+    [conversations, fetchMessages, showLabels],
+  );
+
+  const selectedKeyResolved = useMemo(
+    () => Boolean(selectedKey && conversations.some((c) => conversationUniqueKey(c) === selectedKey)),
+    [conversations, selectedKey],
   );
 
   const selectedConv = useMemo(
-    () => conversations.find((c) => c.id === selectedId),
-    [conversations, selectedId],
+    () =>
+      (selectedKeyResolved && selectedKey
+        ? conversations.find((c) => conversationUniqueKey(c) === selectedKey)
+        : null) || conversations.find((c) => c.id === selectedId),
+    [conversations, selectedId, selectedKey, selectedKeyResolved],
+  );
+
+  const isConversationActive = useCallback(
+    (conv: Conversation) =>
+      selectedKeyResolved && selectedKey
+        ? conversationUniqueKey(conv) === selectedKey
+        : conv.id === selectedId,
+    [selectedId, selectedKey, selectedKeyResolved],
   );
 
   useEffect(() => {
     if (viewMode !== "codex" || !selectedId) return;
     const refresh = () => {
       fetchConversations({ silent: true });
-      fetchMessages(selectedId, showLabels, { silent: true });
+      fetchMessages(selectedId, showLabels, {
+        silent: true,
+        jsonlPath: selectedJsonlPath,
+      });
     };
     const id = window.setInterval(refresh, 2500);
     return () => window.clearInterval(id);
-  }, [viewMode, selectedId, showLabels, fetchConversations, fetchMessages]);
+  }, [viewMode, selectedId, selectedJsonlPath, showLabels, fetchConversations, fetchMessages]);
 
   const preferredCodexConversation = useMemo(() => {
     if (viewMode !== "codex") return null;
@@ -1912,13 +2071,20 @@ export function Conversations({
   useEffect(() => {
     if (viewMode !== "codex" || conversations.length === 0) return;
     if (!preferredCodexConversation) return;
+    if (selectedKeyResolved) return;
     if (selectedId && conversations.some((c) => c.id === selectedId)) return;
     setSelectedId(preferredCodexConversation.id);
-    fetchMessages(preferredCodexConversation.id, showLabels);
+    setSelectedKey(conversationUniqueKey(preferredCodexConversation));
+    setSelectedJsonlPath(preferredCodexConversation.jsonlPath || null);
+    fetchMessages(preferredCodexConversation.id, showLabels, {
+      jsonlPath: preferredCodexConversation.jsonlPath || null,
+    });
   }, [
     viewMode,
     conversations,
     selectedId,
+    selectedKey,
+    selectedKeyResolved,
     preferredCodexConversation,
     fetchMessages,
     showLabels,
@@ -2697,7 +2863,10 @@ export function Conversations({
                 return;
               e.preventDefault();
 
-              const currentConv = visibleList.find((c) => c.id === selectedId);
+              const currentConv =
+                (selectedKeyResolved && selectedKey
+                  ? visibleList.find((c) => conversationUniqueKey(c) === selectedKey)
+                  : null) || visibleList.find((c) => c.id === selectedId);
 
               if (e.key === "ArrowRight") {
                 if (
@@ -2726,9 +2895,10 @@ export function Conversations({
                     expandedParents.has(currentConv.parentSessionId)
                   ) {
                     selectConversation(currentConv.parentSessionId);
-                    const el = document.getElementById(
-                      `conv-${currentConv.parentSessionId}`,
-                    );
+                    const parent = visibleList.find((c) => c.id === currentConv.parentSessionId);
+                    const el = parent
+                      ? document.getElementById(conversationDomId(parent))
+                      : document.getElementById(conversationDomIdFromKey(currentConv.parentSessionId));
                     el?.scrollIntoView({ block: "nearest" });
                     return;
                   }
@@ -2745,16 +2915,18 @@ export function Conversations({
                 return;
               }
 
-              const idx = visibleList.findIndex((c) => c.id === selectedId);
+              const idx = visibleList.findIndex((c) =>
+                selectedKeyResolved && selectedKey
+                  ? conversationUniqueKey(c) === selectedKey
+                  : c.id === selectedId,
+              );
               const next =
                 e.key === "ArrowDown"
                   ? Math.min(idx + 1, visibleList.length - 1)
                   : Math.max(idx - 1, 0);
               if (next !== idx && visibleList[next]) {
-                selectConversation(visibleList[next].id);
-                const el = document.getElementById(
-                  `conv-${visibleList[next].id}`,
-                );
+                selectConversation(visibleList[next]);
+                const el = document.getElementById(conversationDomId(visibleList[next]));
                 el?.scrollIntoView({ block: "nearest" });
               }
             }}
@@ -2817,11 +2989,11 @@ export function Conversations({
                           const children = subagentMap.get(conv.id) || [];
                           const isExpanded = expandedParents.has(conv.id);
                           return (
-                            <div key={conv.id} id={`conv-${conv.id}`}>
+                            <div key={conversationUniqueKey(conv)} id={conversationDomId(conv)}>
                               <ConversationListItem
                                 conv={conv}
-                                active={conv.id === selectedId}
-                                onClick={() => selectConversation(conv.id)}
+                                active={isConversationActive(conv)}
+                                onClick={() => selectConversation(conv)}
                                 subagentCount={children.length}
                                 expanded={isExpanded}
                                 onToggleExpand={() =>
@@ -2833,10 +3005,10 @@ export function Conversations({
                               {isExpanded &&
                                 children.map((child) => (
                                   <ConversationListItem
-                                    key={child.id}
+                                    key={conversationUniqueKey(child)}
                                     conv={child}
-                                    active={child.id === selectedId}
-                                    onClick={() => selectConversation(child.id)}
+                                    active={isConversationActive(child)}
+                                    onClick={() => selectConversation(child)}
                                     isSubagent
                                     starred={starredIds.has(child.id)}
                                     onToggleStar={() => toggleStar(child.id)}
@@ -2861,21 +3033,21 @@ export function Conversations({
                   <div className="space-y-0.5">
                     {starredConvs.map((conv) =>
                       viewMode === "gemini" ? (
-                        <div key={`star-${conv.id}`} id={`conv-${conv.id}`}>
+                        <div key={`star-${conversationUniqueKey(conv)}`} id={conversationDomId(conv)}>
                           <GeminiListItem
                             conv={conv}
-                            active={conv.id === selectedId}
-                            onClick={() => selectConversation(conv.id)}
+                            active={isConversationActive(conv)}
+                            onClick={() => selectConversation(conv)}
                             starred
                             onToggleStar={() => toggleStar(conv.id)}
                           />
                         </div>
                       ) : (
-                        <div key={`star-${conv.id}`} id={`conv-${conv.id}`}>
+                        <div key={`star-${conversationUniqueKey(conv)}`} id={conversationDomId(conv)}>
                           <ConversationListItem
                             conv={conv}
-                            active={conv.id === selectedId}
-                            onClick={() => selectConversation(conv.id)}
+                            active={isConversationActive(conv)}
+                            onClick={() => selectConversation(conv)}
                             starred
                             onToggleStar={() => toggleStar(conv.id)}
                           />
@@ -2907,11 +3079,11 @@ export function Conversations({
                       (viewMode === "gemini" ? (
                         <div className="space-y-0.5">
                           {items.map((conv) => (
-                            <div key={conv.id} id={`conv-${conv.id}`}>
+                            <div key={conversationUniqueKey(conv)} id={conversationDomId(conv)}>
                               <GeminiListItem
                                 conv={conv}
-                                active={conv.id === selectedId}
-                                onClick={() => selectConversation(conv.id)}
+                                active={isConversationActive(conv)}
+                                onClick={() => selectConversation(conv)}
                                 starred={starredIds.has(conv.id)}
                                 onToggleStar={() => toggleStar(conv.id)}
                               />
@@ -2923,11 +3095,11 @@ export function Conversations({
                           const children = subagentMap.get(conv.id) || [];
                           const isExpanded = expandedParents.has(conv.id);
                           return (
-                            <div key={conv.id} id={`conv-${conv.id}`}>
+                            <div key={conversationUniqueKey(conv)} id={conversationDomId(conv)}>
                               <ConversationListItem
                                 conv={conv}
-                                active={conv.id === selectedId}
-                                onClick={() => selectConversation(conv.id)}
+                                active={isConversationActive(conv)}
+                                onClick={() => selectConversation(conv)}
                                 subagentCount={children.length}
                                 expanded={isExpanded}
                                 onToggleExpand={() =>
@@ -2939,10 +3111,10 @@ export function Conversations({
                               {isExpanded &&
                                 children.map((child) => (
                                   <ConversationListItem
-                                    key={child.id}
+                                    key={conversationUniqueKey(child)}
                                     conv={child}
-                                    active={child.id === selectedId}
-                                    onClick={() => selectConversation(child.id)}
+                                    active={isConversationActive(child)}
+                                    onClick={() => selectConversation(child)}
                                     isSubagent
                                     starred={starredIds.has(child.id)}
                                     onToggleStar={() => toggleStar(child.id)}
@@ -2997,11 +3169,12 @@ export function Conversations({
                       <span>子任务</span>
                     </button>
                   )}
-                  {selectedConv.project && (
-                    <span className="text-sm font-medium text-stone-100">
-                      {selectedConv.project.split("/").pop()}
-                    </span>
-                  )}
+                  <span
+                    className="truncate text-sm font-medium text-stone-100"
+                    title={`${conversationDetailTitle(selectedConv)}\nID: ${selectedConv.id}${selectedConv.jsonlPath ? `\nJSONL: ${selectedConv.jsonlPath}` : ""}`}
+                  >
+                    {conversationDetailTitle(selectedConv)}
+                  </span>
                   <Badge
                     variant="outline"
                     className={cn(
@@ -3019,6 +3192,9 @@ export function Conversations({
                   {selectedConv.model && (
                     <span className="font-mono">{selectedConv.model}</span>
                   )}
+                  <span className="font-mono" title={selectedConv.id}>
+                    ID {conversationShortId(selectedConv)}
+                  </span>
                   {selectedConv.slotId && (
                     <span className="font-mono text-teal-300/60">
                       {selectedConv.slotId}
@@ -3030,7 +3206,7 @@ export function Conversations({
                 </div>
                 {selectedConv.llmSummary && (
                   <p className="mt-0.5 line-clamp-1 text-[11px] text-stone-500">
-                    {selectedConv.llmSummary}
+                    {conversationSecondarySummary(selectedConv, conversationTitle(selectedConv)) || selectedConv.llmSummary}
                   </p>
                 )}
               </div>
@@ -3038,7 +3214,9 @@ export function Conversations({
                 onClick={() => {
                   const next = !showLabels;
                   setShowLabels(next);
-                  if (selectedId) fetchMessages(selectedId, next);
+                  if (selectedId) {
+                    fetchMessages(selectedId, next, { jsonlPath: selectedJsonlPath });
+                  }
                 }}
                 className={cn(
                   "flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors flex-shrink-0",
