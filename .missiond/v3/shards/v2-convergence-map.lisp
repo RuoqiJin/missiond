@@ -290,6 +290,13 @@
       :v3-function codex-boot-context
       :surface codex-boot-context
       :note "Codex boot context converges worker startup and external-chat handoff into a compact V3 context capsule so agents receive shared collaboration protocol and task grounding before full Lisp.")
+    (v2-item context-surface-registry
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-worker.lisp :: worker context projection / context-pack startup semantics"
+      :v3-pillar memory
+      :v3-function context-surface-registry
+      :surface context-surface-registry
+      :note "V2 worker context projection and context-pack startup semantics converge into a V3 context-surface registry: context-shaped schemas are classified by authority, mission_context_gather remains the only runtime evidence-lane aggregator, and Codex App bootstrap hints stay deterministic fallback guidance.")
     (v2-item durable-shared-memory
       :status code-aligned
       :v2-source ".missiond/tasks/schema/shared-memory-v1.lisp :: shared-memory-schema missiond.shared-memory.v1 (compatibility projection)"

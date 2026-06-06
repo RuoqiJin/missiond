@@ -415,9 +415,10 @@ function buildRequiredToolSequence({ message, intent, project, gatherProjectId, 
       required: true,
       purpose: 'Resolve the named external project before gathering KB, runtime, Board, or repo evidence.',
       args: {
+        action: 'resolve',
         query: gatherProjectId,
       },
-      local_call: missionMcpLocalCall('mission_project', { query: gatherProjectId }),
+      local_call: missionMcpLocalCall('mission_project', { action: 'resolve', query: gatherProjectId }),
     });
     return sequence.map((step, index) => ({ ...step, order: index + 1 }));
   }
@@ -491,7 +492,7 @@ function defaultAllowedLanes(sourceProfile) {
 }
 
 function missionMcpLocalCall(tool, args) {
-  return `node scripts/mission-mcp-call.mjs ${tool} '${shellQuoteJson(args)}'`;
+  return `node scripts/mission-mcp-call.mjs --payload ${tool} '${shellQuoteJson(args)}'`;
 }
 
 function shellQuoteJson(value) {

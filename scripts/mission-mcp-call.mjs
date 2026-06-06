@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 
-const [, , toolName, rawArgs = '{}'] = process.argv;
+const cliArgs = process.argv.slice(2);
+const payloadOnly =
+  cliArgs.includes('--payload') || process.env.MISSION_MCP_CALL_PAYLOAD === '1';
+const positionalArgs = cliArgs.filter((arg) => arg !== '--payload');
+const [toolName, rawArgs = '{}'] = positionalArgs;
 if (!toolName) {
-  console.error('Usage: node scripts/mission-mcp-call.mjs <tool-name> <json-args>');
+  console.error('Usage: node scripts/mission-mcp-call.mjs [--payload] <tool-name> <json-args>');
   process.exit(2);
 }
 
@@ -82,9 +86,29 @@ async function finish(code) {
     await writeStream(process.stderr, `${stderr.trim()}\n`);
   }
   if (callResponse) {
-    await writeStream(process.stdout, `${JSON.stringify(callResponse, null, 2)}\n`);
+    if (payloadOnly) {
+      const payload = extractToolPayload(callResponse);
+      const output =
+        typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+      await writeStream(process.stdout, `${output}\n`);
+    } else {
+      await writeStream(process.stdout, `${JSON.stringify(callResponse, null, 2)}\n`);
+    }
   }
   process.exitCode = code ?? 0;
+}
+
+function extractToolPayload(response) {
+  const content = response?.result?.content;
+  const textItem = Array.isArray(content)
+    ? content.find((item) => typeof item?.text === 'string')
+    : null;
+  if (!textItem) return response;
+  try {
+    return JSON.parse(textItem.text);
+  } catch {
+    return textItem.text;
+  }
 }
 
 function writeStream(stream, text) {

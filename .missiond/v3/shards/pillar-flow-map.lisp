@@ -319,6 +319,14 @@
                (step s3 :logic "return L0 always-on protocol plus optional L1 task ids; tell the agent to call mission_context_gather for bounded L2 facts and mission_repo_search for profile-gated repo text lookup")
                (step s4 :logic "keep historical conversations, provider logs, and old Board tasks as L3 cold evidence opened only by explicit audit/debug intent"))
         :egress [codex_boot_context_capsule external_handoff_card boot_context_diagnostic])
+      (function context-surface-registry
+        :surface context-surface-registry
+        :entry [context-surface-registry mission_context_boot mission_context_gather scripts/check-v3-context-surface-registry.mjs]
+        :core ((step s1 :logic "load the Lisp registry of context surface classes, schemas, authorities, producers, sources, and consumers")
+               (step s2 :logic "classify startup, runtime-gather, planning-ledger, bootstrap-hint, sidecar, and diagnostic contexts so agents do not treat every context-shaped payload as a primary source")
+               (step s3 :logic "enforce mission_context_gather as the only runtime evidence-lane aggregator while codex-app bootstrap remains deterministic fallback hints")
+               (step s4 :logic "block new missiond.*context*.v* schemas until they are declared with class, authority, producer, and source/consumer semantics"))
+        :egress [context_surface_registry context_surface_registry_diagnostics context_surface_classification])
       (function knowledge-memory
         :surface memory-kb
         :entry [mission_context_boot mission_context_gather mission_repo_search mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_review mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]

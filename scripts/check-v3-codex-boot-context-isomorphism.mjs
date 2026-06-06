@@ -83,6 +83,8 @@ const checks = [
       'avoid_first_reads',
       'mission_context_boot',
       'mission_context_gather',
+      '--payload',
+      "missionMcpLocalCall('mission_project', { action: 'resolve', query: gatherProjectId })",
       'raw_history_not_startup_context',
     ],
   ],
